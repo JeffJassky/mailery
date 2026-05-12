@@ -1,6 +1,7 @@
 /* Dashboard — health, KPIs, recent activity, quick links */
 import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
+import { SetupStatusBanner } from '../components/setup-status-banner'
 import { sample } from '../lib/mock'
 import { api, type DashboardPayload } from '../lib/api'
 import { useLive } from '../lib/use-live'
@@ -95,6 +96,8 @@ export function Dashboard({ setRoute }: any) {
           </>
         }
       />
+
+      <SetupStatusBanner />
 
       <div className="kpis">
         <div className="kpi">

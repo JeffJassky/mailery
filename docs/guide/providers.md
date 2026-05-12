@@ -17,9 +17,44 @@ new SendGridProvider({
 
 ### One-time setup on SendGrid side
 
-1. **Authenticate your sender domain.** SendGrid dashboard → Settings → Sender Authentication. Set SPF, DKIM, DMARC. Without DKIM, expect single-digit-percent deliverability.
-2. **Configure event webhook.** Settings → Mail Settings → Event Webhook. POST URL: `https://yourdomain.com/m/webhooks/sendgrid`. Enable: delivered, open, click, bounce, dropped, spamreport, unsubscribe. Note "deferred" — mailery treats it as a soft bounce.
-3. **Generate the Signed Event Webhook key.** Same settings page. Copy the public key (PEM format) into `SENDGRID_WEBHOOK_KEY`. mailery uses this to verify inbound webhook signatures.
+#### 1. Authenticate your sender domain (SPF / DKIM / DMARC)
+
+Without DKIM, expect <10% inbox placement at Gmail. Full step-by-step is in [Deliverability → SendGrid setup](./deliverability#sendgrid-setup) — covers the dashboard path, the DNS records to add, and how to verify everything is passing.
+
+Short version:
+- SendGrid dashboard → **Settings → Sender Authentication → Authenticate Your Domain**
+- Add the 3-5 CNAMEs SendGrid generates to your DNS provider
+- Add an SPF TXT record (`v=spf1 include:sendgrid.net ~all` if you don't have one yet)
+- Add a DMARC TXT record at `_dmarc.yourdomain.com` (start with `p=none` for monitoring)
+
+If you're running [separate marketing and transactional domains](./deliverability#reputation-isolation-separate-domains-for-marketing-vs-transactional), authenticate each domain separately — each gets its own DKIM key and reputation.
+
+#### 2. Configure the Event Webhook (mailery's inbound signal)
+
+The event webhook is how SendGrid tells mailery what happened to each send (delivered, bounced, opened, clicked, complained, unsubscribed). Without it, mailery can't update send records or maintain suppression.
+
+SendGrid dashboard → **Settings → Mail Settings → Event Webhook**:
+
+- **HTTP Post URL**: `https://yourdomain.com/m/webhooks/sendgrid` (must be reachable from the public internet, **not** behind your admin auth)
+- **Actions to be POSTed**: check **delivered**, **open**, **click**, **bounce**, **dropped**, **spamreport**, **unsubscribe**. Skip **deferred** (mailery treats it as a soft bounce; SendGrid retries internally) and **processed** (noise — every send produces one).
+- Toggle **Event Webhook Status** to **Enabled**.
+- Save.
+
+#### 3. Generate the Signed Event Webhook key
+
+Same settings page, scroll to **Signed Event Webhook**:
+
+- Click **Enable Signing** if not already on.
+- SendGrid generates an **ECDSA public verification key** (PEM format).
+- Click **Test Your Integration** to confirm SendGrid can reach the URL.
+- Copy the **Verification Key** (it's a multi-line PEM block starting with `-----BEGIN PUBLIC KEY-----`).
+- Paste it as the `webhookVerificationKey` option (or set `SENDGRID_WEBHOOK_KEY` env var if using `Mailer.fromEnv()`).
+
+mailery verifies every inbound webhook signature against this key. Unsigned or invalid-signature requests are rejected with `401`. Don't skip this — without verification, anyone who finds your webhook URL can fake bounce events and poison your suppression list.
+
+#### 4. (Optional) IP allowlist
+
+If your edge / CDN supports it, allowlist SendGrid's webhook source IPs (SendGrid publishes them at `https://api.sendgrid.com/v3/access_settings/whitelist`). Defense-in-depth over the signature check.
 
 ### Sandbox mode
 

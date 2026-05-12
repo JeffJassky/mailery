@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import express from 'express'
 import { request } from 'http'
-import { AddressInfo } from 'net'
+import type { AddressInfo } from 'net'
 
 import { createAdminRouter } from '../../src/server/api/admin.js'
 import { createTestMailer, type TestMailerHarness } from '../../src/testing/index.js'

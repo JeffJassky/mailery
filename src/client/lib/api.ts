@@ -70,6 +70,23 @@ export const api = {
   audit: () => json<any[]>('/audit'),
   health: () => json<any>('/health'),
   resumeHealth: () => json<{ ok: boolean }>('/health/resume', { method: 'POST' }),
+  setupStatus: () => json<SetupStatus>('/setup-status'),
+}
+
+export type CheckSeverity = 'ok' | 'warn' | 'error'
+
+export interface SetupCheck {
+  name: string
+  label: string
+  severity: CheckSeverity
+  message: string
+  hint?: string
+}
+
+export interface SetupStatus {
+  overall: CheckSeverity
+  generatedAt: string
+  checks: SetupCheck[]
 }
 
 export interface DashboardPayload {

@@ -85,6 +85,21 @@ Verify each declared domain separately with your email provider (SendGrid / Post
 
 See [Queue drivers](./queues) for the Bull/Agenda choice, and [Deployment](./deployment) for the web/worker split.
 
+## Setup status checks
+
+The dashboard surfaces a banner when something in your configuration is broken or worth a second look. Backed by `GET /admin/mailer/api/setup-status` which runs a handful of checks each time the dashboard loads (and every 60s while open):
+
+- **MongoDB connection** — error if the ping fails.
+- **Queue driver** — error if the configured driver isn't responding.
+- **Workers heartbeat** — error if the last tick is more than `3 × tickIntervalSeconds` old. Usually means you forgot to start a worker process.
+- **Circuit breaker** — warning when degraded, error when tripped.
+- **`fromDefaults` / `transactionalFromDefaults` vs `senderDomains`** — error if either default's domain isn't valid for the email kind it would be used for.
+- **Published templates** — error if any published template's `fromEmail` no longer satisfies the current `senderDomains` registry (typically after editing the registry post-publish).
+- **CAN-SPAM postal address** — warning if `senderAddress` is unset and any marketing template has been published.
+- **DOI template** — error if `requireDoubleOptIn: true` but no published template exists at `doiTemplateSlug`.
+
+All-clear states are silent. The banner only renders when there's at least one warning or error to surface. Hit `GET /admin/mailer/api/setup-status` directly if you want to script against it (e.g., as part of a deploy-time health check).
+
 ## Tracking
 
 ```ts

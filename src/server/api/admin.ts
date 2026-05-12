@@ -20,6 +20,7 @@ import {
   renderTemplate,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { runSetupChecks } from './setup-status.js'
 import { signUnsubscribeToken } from '../tokens.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -299,6 +300,15 @@ function apiRouter(mailer: Mailer): Router {
     asyncHandler(async (_req, res) => {
       const rows = await c.auditLog.find().sort({ occurredAt: -1 }).limit(200).toArray()
       res.json(rows)
+    }),
+  )
+
+  // ----- Setup status -------------------------------------------------------
+  r.get(
+    '/setup-status',
+    asyncHandler(async (_req, res) => {
+      const status = await runSetupChecks(mailer)
+      res.json(status)
     }),
   )
 

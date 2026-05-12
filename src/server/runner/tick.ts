@@ -21,6 +21,27 @@ import type { RunnerContext } from './index.js'
 const STRANDED_SEND_THRESHOLD_MS = 5 * 60 * 1000
 
 export async function runTick(ctx: RunnerContext): Promise<void> {
+  // Heartbeat: ensure the singleton health doc exists with an up-to-date
+  // `updatedAt` so the setup-status check can detect "workers are running."
+  await ctx.collections.health.updateOne(
+    { _id: 'singleton' },
+    {
+      $set: { updatedAt: new Date() },
+      $setOnInsert: {
+        _id: 'singleton',
+        windowStartedAt: new Date(),
+        windowDurationMs: ctx.config.circuitBreaker.windowMinutes * 60 * 1000,
+        status: 'healthy',
+        trippedAt: null,
+        trippedReason: null,
+        manuallyResumedAt: null,
+        counters: { sent: 0, delivered: 0, bounced: 0, hardBounced: 0, softBounced: 0, complained: 0, failedToSend: 0 },
+        rates: { bounceRate: 0, hardBounceRate: 0, complaintRate: 0, failureRate: 0 },
+      },
+    },
+    { upsert: true },
+  ).catch(() => {})
+
   await processNewlyFiredEventTriggers(ctx).catch((err) => {
     console.error('mailery: triggers scan failed', err)
   })
