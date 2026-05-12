@@ -2,22 +2,39 @@
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
 import { sample } from '../lib/mock'
+import { api } from '../lib/api'
+import { useLive } from '../lib/use-live'
 import { AreaChart } from './dashboard'
 
+const HEALTH_FALLBACK = {
+  status: 'healthy' as const,
+  rates: { hardBounceRate: 0.0031, complaintRate: 0.0002, combinedBounceRate: 0.0118, failureRate: 0.0004 },
+}
+
 export function Health(_: any) {
+  const { data: health } = useLive(() => api.health(), HEALTH_FALLBACK)
+
+  const rates = (health as any).rates ?? {}
+  const fmt = (n: number) => `${(n * 100).toFixed(2)}%`
+
   return (
     <>
       <PageHead
         title="Health"
         desc="Circuit breaker · rolling window · provider status."
-        actions={<><span className="pill green"><span className="dot" />Healthy</span><button className="btn"><Icons.Pause size={14} />Pause all sends</button></>}
+        actions={
+          <>
+            <span className={'pill ' + statusClass((health as any).status)}><span className="dot" />{(health as any).status ?? 'healthy'}</span>
+            <button className="btn"><Icons.Pause size={14} />Pause all sends</button>
+          </>
+        }
       />
 
       <div className="kpis">
-        <div className="kpi"><div className="kpi-label">Hard bounce / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>0.31%</div><div className="kpi-meta subtle">Trip @ 2.00%</div></div>
-        <div className="kpi"><div className="kpi-label">Complaint / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>0.02%</div><div className="kpi-meta subtle">Trip @ 0.30%</div></div>
-        <div className="kpi"><div className="kpi-label">Combined bounce</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>1.18%</div><div className="kpi-meta subtle">Trip @ 5.00%</div></div>
-        <div className="kpi"><div className="kpi-label">Failed-to-send</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>0.04%</div><div className="kpi-meta subtle">Degrade @ 10.00%</div></div>
+        <div className="kpi"><div className="kpi-label">Hard bounce / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.hardBounceRate ?? 0)}</div><div className="kpi-meta subtle">Trip @ 2.00%</div></div>
+        <div className="kpi"><div className="kpi-label">Complaint / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.complaintRate ?? 0)}</div><div className="kpi-meta subtle">Trip @ 0.30%</div></div>
+        <div className="kpi"><div className="kpi-label">Combined bounce</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.combinedBounceRate ?? rates.bounceRate ?? 0)}</div><div className="kpi-meta subtle">Trip @ 5.00%</div></div>
+        <div className="kpi"><div className="kpi-label">Failed-to-send</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.failureRate ?? 0)}</div><div className="kpi-meta subtle">Degrade @ 10.00%</div></div>
       </div>
 
       <div className="split split-asym" style={{ marginBottom: 16 }}>
@@ -68,10 +85,16 @@ export function Health(_: any) {
             <span className="text-xs hstack"><span className="status-dot" style={{ background: 'var(--accent)' }} />In-flight</span>
             <span className="text-xs hstack"><span className="status-dot" style={{ background: 'var(--blue)', boxShadow: 'none' }} />Delayed</span>
             <span className="grow" />
-            <span className="text-xs subtle">Recovery sweep · every 60s · last 12s ago</span>
+            <span className="text-xs subtle">Recovery sweep · every 60s</span>
           </div>
         </div>
       </div>
     </>
   )
+}
+
+function statusClass(s: string | undefined): string {
+  if (s === 'tripped') return 'red'
+  if (s === 'degraded') return 'amber'
+  return 'green'
 }

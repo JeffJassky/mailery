@@ -2,6 +2,22 @@
 import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
 import { sample } from '../lib/mock'
+import { api, type DashboardPayload } from '../lib/api'
+import { useLive } from '../lib/use-live'
+
+const FALLBACK_DASHBOARD: DashboardPayload = {
+  kpis: {
+    sends: { value: 14318, delta: 0.084 },
+    deliveredRate: { value: 0.9942, delta: 0.0012, bounced: 83 },
+    openRate: { value: 0.478, delta: -0.011, exclBots: true },
+    clickRate: { value: 0.112, delta: 0.006 },
+  },
+  health: { status: 'healthy', rates: { hardBounceRate: 0.0031, complaintRate: 0.0002, combinedBounceRate: 0.0118, failureRate: 0.0004 } },
+  queue: { inFlight: 412, delayed: 9184, providerOk: true, providerName: 'sendgrid' },
+  recentFlows: sample.flows.slice(0, 5),
+  recentSends: sample.sends.slice(0, 6),
+  recentAudit: sample.audit.slice(0, 5),
+}
 
 export function Sparkline({ data, color = 'var(--accent)', height = 36 }: any) {
   const w = 200, h = height
@@ -52,6 +68,21 @@ function AreaChart({ a, b, height = 200 }: any) {
 }
 
 export function Dashboard({ setRoute }: any) {
+  const { data } = useLive(() => api.dashboard(), FALLBACK_DASHBOARD)
+  const kpis = data.kpis
+  const queue = data.queue
+  const recentFlows = data.recentFlows ?? FALLBACK_DASHBOARD.recentFlows
+  const recentSends = data.recentSends ?? FALLBACK_DASHBOARD.recentSends
+  const recentAudit = data.recentAudit ?? FALLBACK_DASHBOARD.recentAudit
+  const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`
+  const fmtDelta = (delta: number | null, unit: 'pct' | 'pp' = 'pct') => {
+    if (delta == null) return null
+    const sign = delta >= 0 ? '▲' : '▼'
+    const abs = Math.abs(delta)
+    const val = unit === 'pp' ? `${(abs * 100).toFixed(2)}pp` : `${(abs * 100).toFixed(1)}%`
+    return <span className={'kpi-delta ' + (delta >= 0 ? 'up' : 'down')}>{sign} {val}</span>
+  }
+
   return (
     <>
       <PageHead
@@ -68,26 +99,26 @@ export function Dashboard({ setRoute }: any) {
       <div className="kpis">
         <div className="kpi">
           <div className="kpi-label">Sends</div>
-          <div className="kpi-value">14,318</div>
-          <div className="kpi-meta"><span className="kpi-delta up">▲ 8.4%</span><span>vs. prev 24h</span></div>
+          <div className="kpi-value">{kpis.sends.value.toLocaleString()}</div>
+          <div className="kpi-meta">{fmtDelta(kpis.sends.delta)}<span>vs. prev 24h</span></div>
           <div style={{ position: 'absolute', right: -2, bottom: -2, width: 120, opacity: 0.7 }}>
             <Sparkline data={sample.sendSeries} />
           </div>
         </div>
         <div className="kpi">
           <div className="kpi-label">Delivered</div>
-          <div className="kpi-value">99.42%</div>
-          <div className="kpi-meta"><span className="kpi-delta up">▲ 0.12pp</span><span>83 bounced</span></div>
+          <div className="kpi-value">{fmtPct(kpis.deliveredRate.value)}</div>
+          <div className="kpi-meta">{fmtDelta(kpis.deliveredRate.delta, 'pp')}<span>{kpis.deliveredRate.bounced} bounced</span></div>
         </div>
         <div className="kpi">
           <div className="kpi-label">Open rate</div>
-          <div className="kpi-value">47.8%</div>
-          <div className="kpi-meta"><span className="kpi-delta down">▼ 1.1pp</span><span>excl. bots</span></div>
+          <div className="kpi-value">{fmtPct(kpis.openRate.value)}</div>
+          <div className="kpi-meta">{fmtDelta(kpis.openRate.delta, 'pp')}<span>{kpis.openRate.exclBots ? 'excl. bots' : 'raw'}</span></div>
         </div>
         <div className="kpi">
           <div className="kpi-label">Click rate</div>
-          <div className="kpi-value">11.2%</div>
-          <div className="kpi-meta"><span className="kpi-delta up">▲ 0.6pp</span><span>vs. prev 24h</span></div>
+          <div className="kpi-value">{fmtPct(kpis.clickRate.value)}</div>
+          <div className="kpi-meta">{fmtDelta(kpis.clickRate.delta, 'pp')}<span>vs. prev 24h</span></div>
         </div>
       </div>
 
@@ -119,15 +150,15 @@ export function Dashboard({ setRoute }: any) {
         <div className="card">
           <div className="card-head">
             <span className="card-title">Health</span>
-            <div className="card-actions"><span className="pill green"><span className="dot"></span>Healthy</span></div>
+            <div className="card-actions"><span className={'pill ' + (data.health.status === 'healthy' ? 'green' : data.health.status === 'tripped' ? 'red' : 'amber')}><span className="dot"></span>{data.health.status}</span></div>
           </div>
           <div className="card-body">
             <div style={{ display: 'grid', gap: 12 }}>
               {[
-                { label: 'Hard bounce / 1h', v: '0.31%', warn: '< 2%', cls: 'green' },
-                { label: 'Complaint / 1h', v: '0.02%', warn: '< 0.3%', cls: 'green' },
-                { label: 'Combined bounce', v: '1.18%', warn: '< 5%', cls: 'green' },
-                { label: 'Failed-to-send', v: '0.04%', warn: '< 10%', cls: 'green' },
+                { label: 'Hard bounce / 1h', v: fmtPct(data.health.rates.hardBounceRate ?? 0), warn: '< 2%', cls: 'green' },
+                { label: 'Complaint / 1h', v: fmtPct(data.health.rates.complaintRate ?? 0), warn: '< 0.3%', cls: 'green' },
+                { label: 'Combined bounce', v: fmtPct((data.health.rates as any).combinedBounceRate ?? data.health.rates.bounceRate ?? 0), warn: '< 5%', cls: 'green' },
+                { label: 'Failed-to-send', v: fmtPct(data.health.rates.failureRate ?? 0), warn: '< 10%', cls: 'green' },
               ].map((r) => (
                 <div key={r.label} style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                   <span className="text-xs subtle">{r.label}</span>
@@ -141,15 +172,15 @@ export function Dashboard({ setRoute }: any) {
             <div className="text-xs subtle" style={{ marginBottom: 6 }}>Queue</div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span className="text-sm">BullMQ jobs in flight</span>
-              <span className="mono">412</span>
+              <span className="mono">{queue.inFlight.toLocaleString()}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span className="text-sm">Delayed (scheduled)</span>
-              <span className="mono">9,184</span>
+              <span className="mono">{queue.delayed.toLocaleString()}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span className="text-sm">Provider · SendGrid</span>
-              <span className="pill green" style={{ fontSize: 10.5 }}><span className="dot" /> 200 OK</span>
+              <span className="text-sm">Provider · {queue.providerName}</span>
+              <span className={'pill ' + (queue.providerOk ? 'green' : 'red')} style={{ fontSize: 10.5 }}><span className="dot" /> {queue.providerOk ? '200 OK' : 'down'}</span>
             </div>
           </div>
         </div>
@@ -166,12 +197,12 @@ export function Dashboard({ setRoute }: any) {
           <table className="table">
             <thead><tr><th>Flow</th><th>Trigger</th><th className="num">Active</th><th className="num">Sends 7d</th></tr></thead>
             <tbody>
-              {sample.flows.slice(0, 5).map((f) => (
+              {recentFlows.slice(0, 5).map((f: any) => (
                 <tr key={f.slug} onClick={() => setRoute({ screen: 'flow-detail', slug: f.slug })}>
                   <td><div className="f500">{f.name}</div><div className="text-xs subtle mono">{f.slug}</div></td>
-                  <td><span className="tag">{f.trigger}</span></td>
-                  <td className="num tabular">{f.active}</td>
-                  <td className="num tabular">{f.sends7d}</td>
+                  <td><span className="tag">{typeof f.trigger === 'string' ? f.trigger : (f.trigger?.eventName ?? f.trigger?.type ?? '—')}</span></td>
+                  <td className="num tabular">{f.active ?? f.stats?.activeRuns ?? 0}</td>
+                  <td className="num tabular">{f.sends7d ?? f.stats?.sendsLast7Days ?? 0}</td>
                 </tr>
               ))}
             </tbody>
@@ -188,12 +219,12 @@ export function Dashboard({ setRoute }: any) {
           <table className="table">
             <thead><tr><th>Template</th><th>To</th><th>Status</th><th>When</th></tr></thead>
             <tbody>
-              {sample.sends.slice(0, 6).map((s) => (
-                <tr key={s.id} onClick={() => setRoute({ screen: 'send-detail', id: s.id })}>
-                  <td className="mono">{s.template}</td>
-                  <td className="text-xs">{s.to}</td>
+              {recentSends.slice(0, 6).map((s: any) => (
+                <tr key={s.id ?? s._id} onClick={() => setRoute({ screen: 'send-detail', id: String(s.id ?? s._id) })}>
+                  <td className="mono">{s.template ?? s.templateSlug}</td>
+                  <td className="text-xs">{s.to ?? s.emailAtSend}</td>
                   <td><StatusPill status={s.status} /></td>
-                  <td className="text-xs subtle">{s.time}</td>
+                  <td className="text-xs subtle">{s.time ?? (s.queuedAt ? new Date(s.queuedAt).toLocaleTimeString() : '')}</td>
                 </tr>
               ))}
             </tbody>
@@ -211,13 +242,13 @@ export function Dashboard({ setRoute }: any) {
         <table className="table">
           <thead><tr><th>Actor</th><th>Action</th><th>Resource</th><th>Detail</th><th>When</th></tr></thead>
           <tbody>
-            {sample.audit.slice(0, 5).map((e, i) => (
+            {recentAudit.slice(0, 5).map((e: any, i: number) => (
               <tr key={i}>
                 <td className="text-xs mono">{e.actor}</td>
                 <td><span className="tag">{e.action}</span></td>
-                <td className="mono text-xs">{e.target}</td>
-                <td className="text-xs subtle">{e.note}</td>
-                <td className="text-xs subtle">{e.time}</td>
+                <td className="mono text-xs">{formatResource(e.resource ?? e.target)}</td>
+                <td className="text-xs subtle">{e.note ?? e.diffSummary ?? ''}</td>
+                <td className="text-xs subtle">{e.time ?? (e.occurredAt ? new Date(e.occurredAt).toLocaleString() : '')}</td>
               </tr>
             ))}
           </tbody>
@@ -225,6 +256,14 @@ export function Dashboard({ setRoute }: any) {
       </div>
     </>
   )
+}
+
+function formatResource(r: any): string {
+  if (!r) return ''
+  if (typeof r === 'string') return r
+  if (r.slug) return `${(r.collection ?? '').replace('mailer_', '')}/${r.slug}`
+  if (r.id) return `${(r.collection ?? '').replace('mailer_', '')}/${String(r.id).slice(-8)}`
+  return r.collection ?? ''
 }
 
 export { AreaChart }

@@ -2,8 +2,12 @@
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
 import { sample } from '../lib/mock'
+import { api } from '../lib/api'
+import { useLive } from '../lib/use-live'
 
 export function Audit(_: any) {
+  const { data: rows } = useLive(() => api.audit(), sample.audit)
+
   return (
     <>
       <PageHead
@@ -25,11 +29,12 @@ export function Audit(_: any) {
             <tr><th>Actor</th><th>Action</th><th>Resource</th><th>Detail</th><th>Time</th><th style={{ width: 32 }}></th></tr>
           </thead>
           <tbody>
-            {sample.audit.map((e, i) => {
-              const isHuman = e.actor.startsWith('human:')
-              const isSys = e.actor.startsWith('system:')
+            {rows.map((e: any, i: number) => {
+              const actor = e.actor ?? 'system:unknown'
+              const isHuman = actor.startsWith('human:')
+              const isSys = actor.startsWith('system:')
               return (
-                <tr key={i}>
+                <tr key={String(e._id ?? i)}>
                   <td>
                     <div className="hstack">
                       <div style={{
@@ -40,13 +45,13 @@ export function Audit(_: any) {
                       }}>
                         {isHuman ? <Icons.Contacts size={11} /> : isSys ? <Icons.Settings size={11} /> : <Icons.Sparkles size={11} />}
                       </div>
-                      <span className="text-xs mono">{e.actor}</span>
+                      <span className="text-xs mono">{actor}</span>
                     </div>
                   </td>
                   <td><span className="tag">{e.action}</span></td>
-                  <td className="mono text-xs">{e.target}</td>
-                  <td className="text-xs subtle">{e.note}</td>
-                  <td className="text-xs subtle">{e.time}</td>
+                  <td className="mono text-xs">{formatResource(e.resource ?? e.target)}</td>
+                  <td className="text-xs subtle">{e.note ?? e.diffSummary ?? ''}</td>
+                  <td className="text-xs subtle">{e.time ?? (e.occurredAt ? new Date(e.occurredAt).toLocaleString() : '')}</td>
                   <td><Icons.Chevron size={12} /></td>
                 </tr>
               )
@@ -56,4 +61,12 @@ export function Audit(_: any) {
       </div>
     </>
   )
+}
+
+function formatResource(r: any): string {
+  if (!r) return ''
+  if (typeof r === 'string') return r
+  if (r.slug) return `${(r.collection ?? '').replace('mailer_', '')}/${r.slug}`
+  if (r.id) return `${(r.collection ?? '').replace('mailer_', '')}/${String(r.id).slice(-8)}`
+  return r.collection ?? ''
 }

@@ -2,8 +2,13 @@
 import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
 import { sample } from '../lib/mock'
+import { api } from '../lib/api'
+import { useLive } from '../lib/use-live'
 
 export function Contacts({ setRoute }: any) {
+  const { data: live } = useLive(() => api.contacts(), { contacts: sample.contacts as any[], nextCursor: undefined as string | undefined })
+  const contacts = (live as any).contacts ?? sample.contacts
+
   return (
     <>
       <PageHead
@@ -18,16 +23,15 @@ export function Contacts({ setRoute }: any) {
       />
 
       <div className="kpis">
-        <div className="kpi"><div className="kpi-label">Subscribed</div><div className="kpi-value">11,842</div><div className="kpi-meta"><span className="kpi-delta up">▲ 142</span> this week</div></div>
-        <div className="kpi"><div className="kpi-label">Pending DOI</div><div className="kpi-value">348</div><div className="kpi-meta subtle">Avg confirm 4h 12m</div></div>
-        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">412</div><div className="kpi-meta subtle">All-time</div></div>
-        <div className="kpi"><div className="kpi-label">Leads</div><div className="kpi-value">38</div><div className="kpi-meta subtle">Not yet promoted</div></div>
+        <div className="kpi"><div className="kpi-label">Subscribed</div><div className="kpi-value">{contacts.filter((c: any) => c.status === 'subscribed').length || contacts.length}</div></div>
+        <div className="kpi"><div className="kpi-label">Pending DOI</div><div className="kpi-value">{contacts.filter((c: any) => c.status === 'pending_doi').length}</div></div>
+        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">{contacts.filter((c: any) => c.status === 'unsubscribed').length}</div></div>
+        <div className="kpi"><div className="kpi-label">Showing</div><div className="kpi-value">{contacts.length}</div></div>
       </div>
 
       <div className="filter-bar">
         <span className="filter-chip active">Status: any</span>
         <span className="filter-chip">Tag: any</span>
-        <span className="filter-chip">Tier: any</span>
         <span className="filter-chip">Last event: 30d</span>
         <span className="grow" />
         <span className="filter-chip">Sort: recent activity</span>
@@ -37,30 +41,37 @@ export function Contacts({ setRoute }: any) {
         <table className="table">
           <thead>
             <tr>
-              <th>Contact</th><th>Status</th><th>Tier</th><th>Tags</th><th>Last event</th><th className="num">externalId</th>
+              <th>Contact</th><th>Status</th><th>Tags</th><th className="num">externalId</th>
             </tr>
           </thead>
           <tbody>
-            {sample.contacts.map((c) => (
-              <tr key={c.id} onClick={() => setRoute({ screen: 'contact-detail', id: c.id })}>
-                <td>
-                  <div className="hstack">
-                    <div style={{ width: 28, height: 28, borderRadius: 6, background: 'var(--bg-sunken)', color: 'var(--fg-muted)', display: 'grid', placeItems: 'center', fontWeight: 600, fontSize: 12 }}>
-                      {c.name.split(' ').map((n) => n[0]).join('')}
+            {contacts.map((c: any) => {
+              const externalId = c.id ?? c.externalId
+              const name = c.name ?? (c.fields?.firstName ? `${c.fields.firstName} ${c.fields.lastName ?? ''}`.trim() : c.email)
+              const initials = String(name).split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase()
+              return (
+                <tr key={externalId} onClick={() => setRoute({ screen: 'contact-detail', id: externalId })}>
+                  <td>
+                    <div className="hstack">
+                      <div style={{ width: 28, height: 28, borderRadius: 6, background: 'var(--bg-sunken)', color: 'var(--fg-muted)', display: 'grid', placeItems: 'center', fontWeight: 600, fontSize: 12 }}>
+                        {initials || '?'}
+                      </div>
+                      <div>
+                        <div className="f500">{name}</div>
+                        <div className="text-xs subtle">{c.email}</div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="f500">{c.name}</div>
-                      <div className="text-xs subtle">{c.email}</div>
-                    </div>
-                  </div>
-                </td>
-                <td><StatusPill status={c.status === 'pending_doi' ? 'queued' : c.status} /></td>
-                <td><span className={'pill ' + (c.tier === 'Pro' ? 'accent' : 'neutral')}>{c.tier}</span></td>
-                <td>{c.tags.length ? c.tags.map((t) => <span key={t} className="tag" style={{ marginRight: 4 }}>{t}</span>) : <span className="subtle text-xs">—</span>}</td>
-                <td className="text-xs subtle">{c.lastEvent}</td>
-                <td className="num mono text-xs">{c.id}</td>
-              </tr>
-            ))}
+                  </td>
+                  <td><StatusPill status={c.status === 'pending_doi' ? 'queued' : c.status ?? 'subscribed'} /></td>
+                  <td>
+                    {Array.isArray(c.tags) && c.tags.length > 0
+                      ? c.tags.map((t: string) => <span key={t} className="tag" style={{ marginRight: 4 }}>{t}</span>)
+                      : <span className="subtle text-xs">—</span>}
+                  </td>
+                  <td className="num mono text-xs">{externalId}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

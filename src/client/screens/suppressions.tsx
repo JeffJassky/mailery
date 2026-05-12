@@ -2,8 +2,15 @@
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
 import { sample } from '../lib/mock'
+import { api } from '../lib/api'
+import { useLive } from '../lib/use-live'
 
 export function Suppressions(_: any) {
+  const { data: suppressions } = useLive(() => api.suppressions(), sample.suppressions)
+
+  const reasonCount = (reason: string) =>
+    suppressions.filter((s: any) => s.reason === reason).length
+
   return (
     <>
       <PageHead
@@ -18,10 +25,10 @@ export function Suppressions(_: any) {
       />
 
       <div className="kpis">
-        <div className="kpi"><div className="kpi-label">Total suppressed</div><div className="kpi-value">218</div><div className="kpi-meta subtle">All scopes</div></div>
-        <div className="kpi"><div className="kpi-label">Hard bounce</div><div className="kpi-value">94</div><div className="kpi-meta subtle">All-time</div></div>
-        <div className="kpi"><div className="kpi-label">Complaints</div><div className="kpi-value">12</div><div className="kpi-meta subtle">All-time</div></div>
-        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">98</div><div className="kpi-meta"><span className="kpi-delta up">▲ 4</span> last 24h</div></div>
+        <div className="kpi"><div className="kpi-label">Total suppressed</div><div className="kpi-value">{suppressions.length}</div><div className="kpi-meta subtle">All scopes</div></div>
+        <div className="kpi"><div className="kpi-label">Hard bounce</div><div className="kpi-value">{reasonCount('hard_bounce')}</div><div className="kpi-meta subtle">All-time</div></div>
+        <div className="kpi"><div className="kpi-label">Complaints</div><div className="kpi-value">{reasonCount('complaint')}</div><div className="kpi-meta subtle">All-time</div></div>
+        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">{reasonCount('unsubscribed')}</div></div>
       </div>
 
       <div className="filter-bar">
@@ -38,13 +45,13 @@ export function Suppressions(_: any) {
             <tr><th>Email</th><th>Scope</th><th>Reason</th><th>Source</th><th>Added</th><th style={{ width: 32 }}></th></tr>
           </thead>
           <tbody>
-            {sample.suppressions.map((s, i) => (
-              <tr key={i}>
-                <td className="mono text-xs">{s.email}</td>
+            {suppressions.map((s: any, i: number) => (
+              <tr key={String(s._id ?? (s.email ?? '') + s.scope + i)}>
+                <td className="mono text-xs">{s.email ?? <span className="subtle">(hash only)</span>}</td>
                 <td><span className={'pill ' + (s.scope === 'all' ? 'red' : 'amber')}>{s.scope}</span></td>
                 <td><span className="tag">{s.reason}</span></td>
                 <td className="text-xs subtle mono">{s.source}</td>
-                <td className="text-xs subtle">{s.added}</td>
+                <td className="text-xs subtle">{s.added ?? (s.addedAt ? new Date(s.addedAt).toLocaleString() : '—')}</td>
                 <td><Icons.Dots size={14} /></td>
               </tr>
             ))}
