@@ -27,7 +27,7 @@ export interface TestMailerOptions {
   seedContacts?: Contact[]
   provider?: NullProvider
   /** Override Mailer config (excluding required fields the harness fills in). */
-  config?: Partial<Omit<Parameters<typeof Mailer.init>[0], 'db' | 'adapter' | 'redis' | 'providers' | 'defaultProvider'>>
+  config?: Partial<Omit<Parameters<typeof Mailer.init>[0], 'db' | 'adapter' | 'queue' | 'providers' | 'defaultProvider'>>
 }
 
 export interface TestMailerHarness {
@@ -52,12 +52,12 @@ export async function createTestMailer(opts: TestMailerOptions = {}): Promise<Te
   const adapter = opts.adapter ?? memoryAdapter!
   const provider = opts.provider ?? new NullProvider()
 
-  // No BullMQ in tests. The runner's queue.add calls become no-ops; tests
-  // call runTick / processOneRunStep / dispatchSend directly.
+  // No background worker in tests. The runner's queue.add calls become no-ops;
+  // tests call runTick / processOneRunStep / dispatchSend directly.
   const mailer = await Mailer.init({
     db,
     adapter,
-    redis: null,
+    queue: { driver: 'noop' },
     providers: { null: provider },
     defaultProvider: 'null',
     publicUrl: 'http://localhost:3000',

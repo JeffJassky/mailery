@@ -173,6 +173,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
         fromName: rendered.fromName,
         fromEmail: rendered.fromEmail,
         subject: rendered.subject,
+        updatedAt: new Date(),
       },
     },
   )
@@ -281,6 +282,7 @@ interface NewSendInput {
 }
 
 function newSendDoc(input: NewSendInput): SendDoc {
+  const now = new Date()
   return {
     _id: input._id,
     dedupeKey: input.dedupeKey,
@@ -311,7 +313,8 @@ function newSendDoc(input: NewSendInput): SendDoc {
     clickedLinks: [],
     unsubscribedAt: null,
     complainedAt: null,
-    queuedAt: new Date(),
+    queuedAt: now,
+    updatedAt: now,
     sentAt: null,
     deliveredAt: null,
   }

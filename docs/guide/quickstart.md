@@ -4,7 +4,7 @@ This walks through wiring mailery into an existing Express + MongoDB app and sen
 
 - Node 20+
 - A running MongoDB (any version 4.4+; we test against 7.x)
-- A running Redis instance (any version 6+)
+- A queue backend: either Redis 6+ (Bull driver, default) or just Mongo (Agenda driver)
 - A SendGrid API key — or skip this and use the bundled `NullProvider` for local testing
 
 ## 1. Install
@@ -15,7 +15,17 @@ yarn add mailery
 npm install mailery
 ```
 
-Peer dependency: `express ^4 || ^5`. mailery brings in `mongodb`, `bullmq`, `ioredis`, `mjml`, `handlebars`, `@sendgrid/mail`, and `zod`.
+Peer dependencies (install the queue driver you want):
+
+```bash
+# Default: BullMQ + Redis
+npm install bullmq ioredis
+
+# Or: Agenda on the same Mongo, no Redis required
+npm install agenda @agendajs/mongo-backend bottleneck
+```
+
+Plus `express ^4 || ^5`. mailery brings in `mongodb`, `mjml`, `handlebars`, `@sendgrid/mail`, and `zod` as direct deps.
 
 ## 2. Initialize
 
@@ -45,7 +55,7 @@ const mailer = await Mailer.init({
     tagsField: 'tags',
     tagsWritable: true,
   }),
-  redis: { url: process.env.REDIS_URL! },
+  queue: { driver: 'bull', redis: { url: process.env.REDIS_URL! } },
   providers: {
     sendgrid: new SendGridProvider({
       apiKey: process.env.SENDGRID_API_KEY!,
@@ -104,7 +114,7 @@ await mailer.fire('Created', externalId)
 
 ## 6. Run a worker process
 
-The web process you just set up handles HTTP. A **second** process needs to run BullMQ workers — this is what actually advances flow state and dispatches sends:
+The web process you just set up handles HTTP. A **second** process needs to run background workers — this is what actually advances flow state and dispatches sends:
 
 ```ts
 // worker.ts (run alongside server.ts)

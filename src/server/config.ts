@@ -3,12 +3,12 @@
  */
 
 import type { Db } from 'mongodb'
-import type IORedis from 'ioredis'
 import type Handlebars from 'handlebars'
 import type {
   ContactAdapter,
   MailProvider,
 } from '../shared/types.js'
+import type { QueueDriverConfig } from './queues/types.js'
 
 export interface RedisOptions {
   host?: string
@@ -38,10 +38,12 @@ export interface MailerConfig {
 
   // ---- Queue ----------------------------------------------------------------
   /**
-   * Connection options, a pre-built ioredis instance, or `null` to opt out of
-   * BullMQ entirely (synchronous-only mode — used by tests).
+   * Queue driver selection. One of:
+   *   - `{ driver: 'bull', redis: ... }` — BullMQ (default for prod; requires Redis)
+   *   - `{ driver: 'agenda' }` — @hokify/agenda using this Mongo (no Redis required, single-process)
+   *   - `{ driver: 'noop' }` — no background workers (tests, synchronous-only hosts)
    */
-  redis: RedisOptions | IORedis | null
+  queue: QueueDriverConfig
 
   // ---- Providers ------------------------------------------------------------
   providers: Record<string, MailProvider>

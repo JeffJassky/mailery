@@ -84,6 +84,7 @@ async function makeQueuedSend(): Promise<ObjectId> {
     unsubscribedAt: null,
     complainedAt: null,
     queuedAt: new Date(),
+    updatedAt: new Date(),
     sentAt: null,
     deliveredAt: null,
   } as SendDoc)

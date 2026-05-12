@@ -14,13 +14,13 @@ import { Mailer } from 'mailery'
 static async init(config: MailerConfig): Promise<Mailer>
 ```
 
-Connects to Mongo / Redis, ensures indexes on all mailer collections, sets up BullMQ queues. Does **not** start workers — call `.startWorkers()` for that.
+Connects to Mongo, ensures indexes on all mailer collections, instantiates the queue driver. Does **not** start workers — call `.startWorkers()` for that.
 
 ```ts
 const mailer = await Mailer.init({
   db,
   adapter: new MongoContactAdapter({ db, collection: 'users' }),
-  redis: { url: process.env.REDIS_URL! },
+  queue: { driver: 'bull', redis: { url: process.env.REDIS_URL! } },
   providers: { sendgrid: new SendGridProvider({ apiKey: '...' }) },
   defaultProvider: 'sendgrid',
   publicUrl: 'https://yourdomain.com',
@@ -216,7 +216,7 @@ await mailer.audit({
 startWorkers(): Promise<void>
 ```
 
-Spins up BullMQ workers for tick / advance / send / webhook queues. Call from your worker process only.
+Spins up queue workers (Bull or Agenda, per your `queue.driver`) for tick / advance / send / webhook queues. Call from your worker process only.
 
 ### `stop()`
 
@@ -224,7 +224,7 @@ Spins up BullMQ workers for tick / advance / send / webhook queues. Call from yo
 stop(): Promise<void>
 ```
 
-Closes workers, queues, and the Redis connection. Call on `SIGTERM` for graceful shutdown.
+Closes workers, queues, and underlying connections (Redis for the Bull driver). Call on `SIGTERM` for graceful shutdown.
 
 ### `getRunnerContext()`
 
@@ -242,7 +242,6 @@ Returns the internal context object passed to runner functions. Useful for tests
 | `mailer.collections` | `Collections` | Typed accessors for every `mailer_*` collection. |
 | `mailer.adapter` | `ContactAdapter` | Whatever you passed at init. |
 | `mailer.providers` | `Record<string, MailProvider>` | Configured providers map. |
-| `mailer.queues` | `Queues` | BullMQ queue facade (`add`, `getWaitingCount`, `close`). |
-| `mailer.redis` | `IORedis \| null` | The Redis connection, or null in queueless mode. |
+| `mailer.queues` | `Queues` | Driver-agnostic queue facade (`add`, `getWaitingCount`, `close`). |
 | `mailer.config` | `ResolvedConfig` | Resolved configuration with defaults applied. |
 | `mailer.events` | `EventRegistry` | Internal registry tracking event policies. |

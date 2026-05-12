@@ -1,6 +1,6 @@
 # Deployment
 
-mailery is two processes from the same codebase: a **web** process that serves HTTP (admin UI + tracking endpoints + your business logic) and a **worker** process that runs BullMQ consumers (flow advancement + send dispatch + webhook processing).
+mailery is two processes from the same codebase: a **web** process that serves HTTP (admin UI + tracking endpoints + your business logic) and a **worker** process that runs queue consumers (flow advancement + send dispatch + webhook processing). The queue itself can be either BullMQ (Redis) or Agenda (Mongo) — see [Queue drivers](./queues).
 
 ## Why split?
 
@@ -16,7 +16,8 @@ You can run a single combined process during development — just don't set `wor
 // server.ts
 const mailer = await Mailer.init({
   // ...full config
-  workerless: true,        // don't run BullMQ workers in this process
+  queue: { driver: 'bull', redis: { url: process.env.REDIS_URL! } },
+  workerless: true,        // don't run queue workers in this process
 })
 
 const app = express()
@@ -44,15 +45,15 @@ process.on('SIGTERM', async () => {
 })
 ```
 
-`startWorkers()` spins up BullMQ consumers for tick / advance / send / webhook queues. Per-provider rate limits apply automatically.
+`startWorkers()` spins up queue consumers for tick / advance / send / webhook queues. Per-provider rate limits apply automatically (BullMQ enforces them globally via Redis; Agenda enforces them in-process via Bottleneck — see [Queue drivers](./queues) for the trade-off).
 
 ## Scaling
 
 | Bottleneck | Knob |
 |---|---|
-| Slow flow advancement | More worker replicas. Each runs independent consumers; BullMQ distributes work. |
+| Slow flow advancement | More worker replicas. Each runs independent consumers; queue distributes work. (Bull driver only — Agenda is single-process.) |
 | Slow send dispatch | More worker replicas, or raise `sendConcurrency` per worker. |
-| Provider rate-limited | Per-provider `sendRatePerSecond` is the global cap across all workers (BullMQ group limiter). |
+| Provider rate-limited | Per-provider `sendRatePerSecond` is the global cap across all workers (BullMQ group limiter; in-process Bottleneck for Agenda). |
 | Slow Mongo queries | Standard Mongo scaling — read replicas for the admin UI dashboard, indexed queries (mailery's defaults are tight). |
 | Big broadcasts | The broadcast worker streams the segment cursor; tune `broadcastEnqueueBatchSize` + `broadcastEnqueueMaxWaiting` to balance Redis memory vs throughput. |
 
@@ -62,7 +63,7 @@ process.on('SIGTERM', async () => {
 |---|---|---|
 | Node | 20+ | LTS recommended. |
 | MongoDB | 4.4+ | We test against 7.x. Replica set required only if you use transactions (`fireFromSession`). |
-| Redis | 6+ | BullMQ requirement. AOF or RDB persistence recommended (not required — the tick can re-derive state from Mongo). |
+| Redis | 6+ | Required only for the Bull driver. AOF or RDB persistence recommended (not required — the tick can re-derive state from Mongo). Skip Redis entirely with `queue: { driver: 'agenda' }`. |
 | Provider | SendGrid | Or Postmark / SES / Resend via custom provider. |
 
 ## Environment variables
@@ -96,8 +97,8 @@ MAILER_HOST_USERS_TAGS_WRITABLE=true
 - [ ] `/admin/mailer` gated by your existing auth
 - [ ] Sentry / log sink wired to `onSendFailure` and `onCircuitBreakerTrip` hooks
 - [ ] `circuitBreaker` thresholds tuned for your audience (defaults are reasonable starting points)
-- [ ] Monitor BullMQ queue depth (Bull-Board recommended — `mailer.queues.send.getWaitingCount()` etc.)
-- [ ] Health-check endpoint that pings Mongo + Redis + `/admin/mailer/api/health`
+- [ ] Monitor queue depth (`mailer.queues.send.getWaitingCount()` etc.; Bull-Board recommended for Bull driver)
+- [ ] Health-check endpoint that pings Mongo (and Redis if using Bull) + `/admin/mailer/api/health`
 
 ## Docker
 

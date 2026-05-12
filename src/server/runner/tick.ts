@@ -11,12 +11,24 @@ import { evaluateHealth } from './health.js'
 import { promoteSoftBounces } from './bounce-promotion.js'
 import type { RunnerContext } from './index.js'
 
+/**
+ * Sends that entered the 'sending' state more than this long ago are assumed
+ * to have been abandoned mid-dispatch (worker crash, OOM kill, ...). The tick
+ * resets them to 'queued' and re-enqueues. Providers should treat the sendId
+ * (passed in messageMeta) as an idempotency key to avoid duplicate delivery on
+ * the rare case where the original call did reach the provider.
+ */
+const STRANDED_SEND_THRESHOLD_MS = 5 * 60 * 1000
+
 export async function runTick(ctx: RunnerContext): Promise<void> {
   await processNewlyFiredEventTriggers(ctx).catch((err) => {
     console.error('mailery: triggers scan failed', err)
   })
   await sweepStrandedFlowRuns(ctx).catch((err) => {
     console.error('mailery: sweep failed', err)
+  })
+  await sweepStrandedSends(ctx).catch((err) => {
+    console.error('mailery: stranded-send sweep failed', err)
   })
   await drainOutbox(ctx).catch((err) => {
     console.error('mailery: outbox drain failed', err)
@@ -30,6 +42,29 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   await promoteSoftBounces(ctx).catch((err) => {
     console.error('mailery: soft-bounce promotion failed', err)
   })
+}
+
+/**
+ * Find sends stuck in 'sending' past the threshold (crashed mid-dispatch) and
+ * re-enqueue them. Returning to 'queued' lets `dispatchSend` pick them back up.
+ */
+async function sweepStrandedSends(ctx: RunnerContext): Promise<void> {
+  const cutoff = new Date(Date.now() - STRANDED_SEND_THRESHOLD_MS)
+  const cursor = ctx.collections.sends.find(
+    { status: 'sending', updatedAt: { $lt: cutoff } },
+    { projection: { _id: 1 } },
+  ).limit(500)
+  for await (const row of cursor) {
+    const reset = await ctx.collections.sends.updateOne(
+      { _id: row._id, status: 'sending', updatedAt: { $lt: cutoff } },
+      { $set: { status: 'queued', updatedAt: new Date() } },
+    )
+    if (reset.modifiedCount === 0) continue
+    await ctx.queues.send.add('send', { sendId: String(row._id) }, {
+      attempts: ctx.config.sendRetryAttempts,
+      backoff: { type: 'exponential', delay: 60_000 },
+    })
+  }
 }
 
 /**

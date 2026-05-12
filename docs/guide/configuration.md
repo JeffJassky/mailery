@@ -8,7 +8,7 @@
 await Mailer.init({
   db,                                    // mongodb.Db
   adapter,                               // ContactAdapter — see /reference/types-contact
-  redis: { url: 'redis://...' },         // RedisOptions | IORedis | null
+  queue: { driver: 'bull', redis: { url: 'redis://...' } },   // or { driver: 'agenda' }, or { driver: 'noop' }
   providers: { sendgrid: new SendGridProvider({...}) },
   defaultProvider: 'sendgrid',
   publicUrl: 'https://yourdomain.com',   // base URL for /m/* endpoints (tracking, unsub, webhooks)
@@ -20,7 +20,7 @@ await Mailer.init({
 |---|---|
 | `db` | Native MongoDB `Db` instance. mailery creates indexes on init. |
 | `adapter` | A `ContactAdapter` that reads from your host's user collection. Usually `new MongoContactAdapter(...)`. |
-| `redis` | BullMQ backend. Pass options, an `ioredis` instance, or `null` to opt out of BullMQ (synchronous-only mode). |
+| `queue` | Queue driver selection. See [Queue drivers](./queues). One of `{ driver: 'bull', redis }`, `{ driver: 'agenda' }`, `{ driver: 'noop' }`. |
 | `providers` | Map of provider name → instance. Must include at least the `defaultProvider`. |
 | `defaultProvider` | Which provider key (above) handles unrouted sends. |
 | `publicUrl` | Base of the URL where you mount `createPublicRouter()`. Used for unsubscribe / open pixel / click links. |
@@ -47,7 +47,7 @@ await Mailer.init({
 
 ```ts
 {
-  workerless: false,            // set true on web processes that don't run BullMQ workers
+  workerless: false,            // set true on web processes that don't run background workers
   tickIntervalSeconds: 60,      // how often the recovery sweep runs
   sendConcurrency: 5,           // parallel send jobs per worker
   sendRatePerSecond: 10,        // global cap (per-provider overrides this)
@@ -56,7 +56,7 @@ await Mailer.init({
 }
 ```
 
-See [Deployment](./deployment) for the web/worker split.
+See [Queue drivers](./queues) for the Bull/Agenda choice, and [Deployment](./deployment) for the web/worker split.
 
 ## Tracking
 
@@ -136,10 +136,11 @@ const mailer = await Mailer.fromEnv()
 Reads:
 
 ```
-MAILER_MONGODB_URI          MAILER_REDIS_URL
+MAILER_MONGODB_URI          MAILER_REDIS_URL            (only when MAILER_QUEUE_DRIVER=bull, default)
 MAILER_PUBLIC_URL           MAILER_UNSUBSCRIBE_SECRET
 MAILER_SENDER_ADDRESS       MAILER_FROM_NAME / MAILER_FROM_EMAIL
 MAILER_DEFAULT_PROVIDER     MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
+MAILER_QUEUE_DRIVER         'bull' (default) | 'agenda' | 'noop'
 MAILER_HOST_USERS_COLLECTION (default 'users')
 MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
 MAILER_HOST_USERS_ID_FIELD (default '_id')

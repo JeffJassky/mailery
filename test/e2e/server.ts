@@ -43,7 +43,7 @@ async function main() {
   const mailer = await Mailer.init({
     db,
     adapter,
-    redis: null, // queueless — tests drive the runner directly via /__test__/tick
+    queue: { driver: 'noop' }, // queueless — tests drive the runner directly via /__test__/tick
     providers: { null: provider },
     defaultProvider: 'null',
     publicUrl: `http://localhost:${PORT}`,

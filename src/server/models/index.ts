@@ -270,6 +270,8 @@ export interface SendDoc {
   unsubscribedAt: Date | null
   complainedAt: Date | null
   queuedAt: Date
+  /** Last time the row was mutated; used by the stranded-send sweep. */
+  updatedAt: Date
   sentAt: Date | null
   deliveredAt: Date | null
 }
@@ -484,6 +486,7 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { broadcastId: 1 }, sparse: true },
       { key: { providerMessageId: 1 }, sparse: true },
       { key: { status: 1, queuedAt: 1 } },
+      { key: { status: 1, updatedAt: 1 } },
     ]),
     c.suppressions.createIndexes([
       { key: { email: 1, scope: 1 }, unique: true, partialFilterExpression: { email: { $type: 'string' } } },

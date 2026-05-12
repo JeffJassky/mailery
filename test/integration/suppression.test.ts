@@ -92,6 +92,7 @@ async function makeQueuedSend(externalId: string, templateSlug: string, kind: 'm
     unsubscribedAt: null,
     complainedAt: null,
     queuedAt: new Date(),
+    updatedAt: new Date(),
     sentAt: null,
     deliveredAt: null,
   } as SendDoc)

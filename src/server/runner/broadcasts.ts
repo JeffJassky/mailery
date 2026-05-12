@@ -293,6 +293,7 @@ async function buildSendDoc(
     unsubscribedAt: null,
     complainedAt: null,
     queuedAt: new Date(),
+    updatedAt: new Date(),
     sentAt: null,
     deliveredAt: null,
   }

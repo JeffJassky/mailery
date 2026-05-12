@@ -40,7 +40,7 @@ async function main() {
   const mailer = await Mailer.init({
     db,
     adapter,
-    redis: { url: REDIS_URL },
+    queue: { driver: 'bull', redis: { url: REDIS_URL } },
     providers: { [provider.name]: provider },
     defaultProvider: provider.name,
     publicUrl: process.env.MAILER_PUBLIC_URL ?? 'http://localhost:3000',

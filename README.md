@@ -14,7 +14,7 @@ yarn add mailery
 npm install mailery
 ```
 
-Peer-dependencies (host-provided): `express ^4 || ^5`. Runtime deps brought in by mailery: `mongodb`, `bullmq`, `ioredis`, `mjml`, `handlebars`, `@sendgrid/mail`, `zod`.
+Peer dependencies (host-provided): `express ^4 || ^5` plus one queue driver — either `bullmq` + `ioredis` (default) or `agenda` + `@agendajs/mongo-backend` + `bottleneck`. Runtime deps brought in by mailery: `mongodb`, `mjml`, `handlebars`, `@sendgrid/mail`, `zod`.
 
 ## Quickstart
 
@@ -44,7 +44,7 @@ const adapter = new MongoContactAdapter({
 const mailer = await Mailer.init({
   db,
   adapter,
-  redis: { url: process.env.REDIS_URL! },
+  queue: { driver: 'bull', redis: { url: process.env.REDIS_URL! } },
   providers: {
     sendgrid: new SendGridProvider({
       apiKey: process.env.SENDGRID_API_KEY!,
@@ -73,7 +73,7 @@ Run a separate worker process for queue jobs:
 
 ```ts
 const mailer = await Mailer.init({ /* same config */ })
-await mailer.startWorkers()  // BullMQ consumers
+await mailer.startWorkers()  // queue consumers (Bull or Agenda, per your queue.driver)
 ```
 
 See [`examples/express-mongo/`](./examples/express-mongo) for a complete working example.
@@ -85,7 +85,7 @@ A self-hosted library you `npm install` into your Express + MongoDB app. Fire ev
 - **Embedded, not external.** No third-party sync, no per-contact pricing.
 - **Both transactional and marketing in one engine.** Right defaults per kind (suppression scope, sender identity, circuit-breaker behavior).
 - **Provider-agnostic.** SendGrid + NullProvider ship; Postmark / SES / Resend pluggable.
-- **BullMQ + Redis** for queue + delayed-job scheduling.
+- **Pluggable queue** — BullMQ + Redis (default) or Agenda + Mongo (no Redis required).
 - **MJML** templates with click + open tracking, plain-text auto-derivation, scope-aware suppression at send time.
 - **React admin SPA** (Vite-bundled, served as static assets — no build step in your app).
 

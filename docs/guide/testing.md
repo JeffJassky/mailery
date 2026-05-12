@@ -28,11 +28,11 @@ await stop()
 | `provider` | `NullProvider`. Inspect `.sent` to assert on dispatched sends. Call `.reset()` between tests. |
 | `adapter` | `MemoryContactAdapter` (unless you passed your own). Has helper methods `.upsert(contact)` and `.delete(externalId)`. |
 | `memoryAdapter` | Same reference as `adapter` if mailery created it for you; `null` if you provided your own. |
-| `stop()` | Tears down Mongo, Redis (mock), and BullMQ queues. Call in `afterAll`. |
+| `stop()` | Tears down Mongo and queue state. Call in `afterAll`. |
 
 ## Driving the runner
 
-The harness runs in **queueless mode** (`redis: null`). BullMQ queues are no-ops. Tests drive the runner directly:
+The harness runs in **queueless mode** (`queue: { driver: 'noop' }`). All four queues are no-ops. Tests drive the runner directly:
 
 ```ts
 import { runTick, processOneRunStep, dispatchSend } from 'mailery'

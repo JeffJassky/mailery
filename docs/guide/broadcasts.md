@@ -63,7 +63,7 @@ Every recipient is re-checked at send time. A contact who unsubscribes between s
 
 ## Cancelling
 
-Cancel a scheduled broadcast from the admin UI before its `scheduledAt`. Once dispatch starts, you can pause new send-job enqueues, but emails already in the BullMQ queue will go out (BullMQ doesn't support mass-cancel; mailery polls the queue and stops feeding).
+Cancel a scheduled broadcast from the admin UI before its `scheduledAt`. Once dispatch starts, you can pause new send-job enqueues, but emails already in the queue will go out (mailery stops feeding the queue; it doesn't mass-cancel jobs already enqueued).
 
 ## Send-rate shaping
 

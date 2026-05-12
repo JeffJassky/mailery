@@ -40,7 +40,7 @@ import { Mailer, MongoContactAdapter, SendGridProvider, createAdminRouter, creat
 const mailer = await Mailer.init({
   db,
   adapter: new MongoContactAdapter({ db, collection: 'users' }),
-  redis: { url: process.env.REDIS_URL! },
+  queue: { driver: 'bull', redis: { url: process.env.REDIS_URL! } },
   providers: { sendgrid: new SendGridProvider({ apiKey: process.env.SENDGRID_API_KEY! }) },
   defaultProvider: 'sendgrid',
   publicUrl: 'https://yourdomain.com',

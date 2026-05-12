@@ -1,6 +1,6 @@
 # Introduction
 
-**mailery** is an embedded email automation library for Node.js + MongoDB apps. You `npm install` it into your Express server, point it at MongoDB + Redis + a transactional email provider, and you get:
+**mailery** is an embedded email automation library for Node.js + MongoDB apps. You `npm install` it into your Express server, point it at MongoDB + a transactional email provider (and a queue backend — either Redis or your existing Mongo), and you get:
 
 - **Triggered flows** — fire an event from your business code (`user.created`, `cart.abandoned`, etc.), mailery routes them through wait / condition / branch / send / tag steps.
 - **Broadcasts** — one-off campaigns to a segment of your contacts, with a confirmation gate above a configurable recipient threshold.
@@ -11,7 +11,7 @@
 
 ## What mailery is not
 
-- **Not a SaaS.** Self-hosted only. Your MongoDB, your Redis, your sender domain.
+- **Not a SaaS.** Self-hosted only. Your MongoDB, your sender domain.
 - **Not a SMTP server.** Sends always go through a transactional provider (SendGrid in V1; Postmark / SES / Resend pluggable).
 - **Not multi-tenant.** One deployment serves one app. Run separate deployments per account.
 - **Not a CRM.** Mailery doesn't own contact identity — your `users` collection does. Mailery reads it through a tiny `ContactAdapter`.
@@ -49,12 +49,12 @@ mailery sits inside your app process. Your user record IS the contact. Events fi
 │  ┌─────────────────────────────────────┐ │                       │
 │  │  worker process                     │ │                       │
 │  │    mailer.startWorkers()            │─┘                       │
-│  │      BullMQ → SendGrid → recipients                          │
+│  │      queue → SendGrid → recipients                           │
 │  └─────────────────────────────────────┘                         │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-You run two processes from the same codebase: a **web** process serving HTTP + tracking endpoints, and a **worker** process running BullMQ consumers. Both share the same Mongo + Redis.
+You run two processes from the same codebase: a **web** process serving HTTP + tracking endpoints, and a **worker** process running queue consumers. Both share the same Mongo. The queue backend is pluggable — BullMQ on Redis (default), or Agenda on Mongo. See [Queue drivers](./queues).
 
 ## Next steps
 
