@@ -25,7 +25,10 @@ describe('unsubscribe tokens', () => {
     const expiresAt = new Date(Date.now() + 1000)
     const token = signUnsubscribeToken({ email: 'user@example.com', scope: 'marketing', expiresAt }, SECRET)
     const [body, sig] = token.split('.')
-    const tampered = `${body}.${sig!.slice(0, -2)}AA`
+    // Flip the last character to a guaranteed-different base64url char.
+    const last = sig!.slice(-1)
+    const replacement = last === 'A' ? 'B' : 'A'
+    const tampered = `${body}.${sig!.slice(0, -1)}${replacement}`
     expect(verifyUnsubscribeToken(tampered, SECRET)).toBeNull()
   })
 
