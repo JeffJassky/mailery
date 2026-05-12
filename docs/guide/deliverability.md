@@ -4,6 +4,10 @@ Email deliverability is mostly DNS. mailery handles tracking, suppression, compl
 
 This guide walks through the single biggest deliverability lever: **authenticating your sender domain** with SendGrid (SPF + DKIM + DMARC).
 
+::: tip Skip the manual DNS dance
+If your DNS is on Cloudflare, you can run `npx mailery setup-sendgrid` and the entire walkthrough below (domain auth, DNS records, Signed Event Webhook, Event Webhook URL) becomes a single command. See [Automated setup](#automated-setup-cloudflare) at the bottom of this page.
+:::
+
 ## What "authenticating a domain" means
 
 Three DNS records prove to recipient servers that you are who you say you are:
@@ -154,3 +158,91 @@ await Mailer.init({
 With this registry set, a `kind: 'marketing'` template can't be published with a `fromEmail` on `mail.yourapp.com`, and vice versa. See [Configuration → Sender domains](./configuration#sender-domains-reputation-isolation).
 
 Optional but recommended: route the two kinds through different providers as well (`defaultTransactionalProvider: 'postmark'` with `defaultProvider: 'sendgrid'` is a common pairing). Postmark's IP pools are optimized for transactional inbox placement; SendGrid handles marketing volume well.
+
+## Automated setup (Cloudflare)
+
+If your DNS is hosted on Cloudflare, mailery ships a one-shot CLI that wires up everything covered above — domain authentication, DNS records, Signed Event Webhook key, Event Webhook URL — without clicking through dashboards.
+
+```bash
+npx mailery setup-sendgrid \
+  --domain news.example.com \
+  --webhook-url https://example.com/m/webhooks/sendgrid \
+  --cloudflare
+```
+
+Or run it with no args for an interactive walkthrough that asks for each value:
+
+```bash
+npx mailery setup-sendgrid
+```
+
+The wizard prompts for domains (one line, comma-separated for multiple), webhook URL (defaulting to `https://<apex>/m/webhooks/sendgrid`), whether to use Cloudflare, the API tokens themselves if missing from your environment, and the force flag. It echoes back a summary and asks to confirm before any API call. Pass `--no-interactive` to suppress the prompts (CI / scripts).
+
+### What it does
+
+| Step | Source → target |
+|---|---|
+| Look up the Cloudflare Zone ID | Cloudflare `GET /zones?name=...` |
+| Create or reuse the SendGrid domain authentication | SendGrid `POST /whitelabel/domains` (or finds an existing one with the same domain) |
+| Publish each CNAME to Cloudflare DNS | Cloudflare `POST /zones/:id/dns_records` (with `proxied: false` — critical, DKIM breaks otherwise) |
+| Trigger SendGrid's validation check | SendGrid `POST /whitelabel/domains/:id/validate` |
+| Enable Signed Event Webhook + fetch the ECDSA public key | SendGrid `PATCH /user/webhooks/event/settings/signed` + `GET` |
+| Configure Event Webhook URL + event toggles (delivered, open, click, bounce, dropped, spamreport, unsubscribe) | SendGrid `PATCH /user/webhooks/event/settings` |
+| Print the env-var line to copy into your `.env` or secret manager | stdout |
+
+### Setup credentials
+
+The script reads two env vars. Put them in your shell rc (e.g. `~/.zshrc`) so they're available wherever you run the script:
+
+```bash
+# ~/.zshrc
+export SENDGRID_API_KEY="SG.xxx"          # full access, or at least Sender Authentication + Mail Settings
+export CLOUDFLARE_API_TOKEN="cf-xxx"      # see below for the exact permissions
+```
+
+The Cloudflare token needs **Zone:Read** + **DNS:Edit** for the zone you're publishing into. Generate one in the Cloudflare dashboard → My Profile → API Tokens → Create Token → "Edit zone DNS" template → restrict to the specific zone (e.g. `example.com`).
+
+### Idempotency
+
+Both the SendGrid and Cloudflare halves are fully idempotent. The script:
+
+- **Reads before it writes.** Domain auth: fetched first; only created when missing. Signed webhook: only PATCHes if signing is off. Event webhook: only PATCHes if URL or toggle values differ. Cloudflare records: only POSTs if no matching record exists, only PUTs if content drifted.
+- **Errors before it overwrites destructive state.** If a different webhook URL is already configured, the script refuses to clobber it without `--force`.
+- **Is safe to re-run.** A second invocation against a fully-configured install issues only GET requests and exits 0.
+
+Use the same command in a deploy script, a Makefile, or just whenever DNS / SendGrid setup feels off — re-running converges to the desired state without surprises.
+
+### Multiple sender domains in one run
+
+If you isolate marketing from transactional (recommended — see [Reputation isolation](#reputation-isolation-separate-domains-for-marketing-vs-transactional)), pass `--domain` more than once and the script handles all of them in a single invocation. Domain auth + DNS publish runs per-domain; the Event Webhook itself is an account-level setting and is only configured once at the end.
+
+```bash
+npx mailery setup-sendgrid \
+  --domain news.example.com \
+  --domain mail.example.com \
+  --webhook-url https://example.com/m/webhooks/sendgrid \
+  --cloudflare
+```
+
+You can also comma-separate: `--domain news.example.com,mail.example.com`.
+
+### Flags reference
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--domain` | required | The domain to authenticate (e.g. `news.example.com`). Repeat or comma-separate to authenticate multiple. |
+| `--subdomain` | `em` | The sub-label SendGrid uses for the link branding CNAME. |
+| `--webhook-url` | required | Public URL where SendGrid POSTs event webhooks. Account-level, configured once. |
+| `--cloudflare` | off | Publish DNS records via the Cloudflare API. Requires `CLOUDFLARE_API_TOKEN`. |
+| `--cloudflare-zone` | inferred per domain | Override the parent zone (for multi-label public suffixes like `.co.uk`). |
+| `--force` | off | Allow overwriting an existing event webhook URL. |
+
+### Without Cloudflare
+
+Drop the `--cloudflare` flag and the script still does the SendGrid half — it prints the CNAMEs you need to publish to your DNS provider, then enables the webhook on the SendGrid side. Once your DNS is up, re-run the same command and it'll detect the records and trigger SendGrid's validation step.
+
+```bash
+npx mailery setup-sendgrid \
+  --domain news.example.com \
+  --webhook-url https://example.com/m/webhooks/sendgrid
+```

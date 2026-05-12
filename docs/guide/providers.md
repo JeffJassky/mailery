@@ -17,6 +17,10 @@ new SendGridProvider({
 
 ### One-time setup on SendGrid side
 
+::: tip Automated path (Cloudflare DNS)
+The whole setup below collapses into one command if your DNS is on Cloudflare: `npx mailery setup-sendgrid --domain X --webhook-url Y --cloudflare`. It's idempotent and safe to re-run. See [Deliverability → Automated setup](./deliverability#automated-setup-cloudflare) for the full walkthrough.
+:::
+
 #### 1. Authenticate your sender domain (SPF / DKIM / DMARC)
 
 Without DKIM, expect <10% inbox placement at Gmail. Full step-by-step is in [Deliverability → SendGrid setup](./deliverability#sendgrid-setup) — covers the dashboard path, the DNS records to add, and how to verify everything is passing.

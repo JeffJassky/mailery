@@ -147,3 +147,16 @@ expect(provider.sent[0]?.subject).toContain('Welcome')
 ```
 
 For a complete working example, see [`examples/express-mongo`](https://github.com/JeffJassky/mailery/tree/main/examples/express-mongo) in the repo.
+
+## 9. Wire up SendGrid for production
+
+When you move from `NullProvider` to real sends, you need to point your sender domain at SendGrid (SPF + DKIM + DMARC) and configure SendGrid's Event Webhook to post back to mailery. If your DNS is on Cloudflare, this is one command:
+
+```bash
+npx mailery setup-sendgrid \
+  --domain news.example.com \
+  --webhook-url https://yourdomain.com/m/webhooks/sendgrid \
+  --cloudflare
+```
+
+It's idempotent — safe to re-run, only writes when state drifts. See [Deliverability → Automated setup](./deliverability#automated-setup-cloudflare) for what it does and how to set up the required `SENDGRID_API_KEY` + `CLOUDFLARE_API_TOKEN`. If you're not on Cloudflare, drop `--cloudflare` and the script prints the CNAMEs to paste into your DNS provider, then handles SendGrid setup the rest of the way.
