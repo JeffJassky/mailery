@@ -82,3 +82,24 @@ export type {
   HealthStatus,
   FlowGoal,
 } from '../shared/enums.js'
+
+// Option lists for tooling / admin UIs — flow step kinds, predicate kinds,
+// segment filter kinds, dedupe policies.
+export {
+  FLOW_STEP_KINDS,
+  defaultFlowStep,
+  PREDICATE_KINDS,
+  defaultPredicate,
+  predicateKind,
+  SEGMENT_FILTER_KINDS,
+  defaultSegmentFilter,
+  DEDUPE_POLICIES,
+} from '../shared/options.js'
+export type {
+  FlowStepKindOption,
+  PredicateKindOption,
+  PredicateKind,
+  SegmentFilterKindOption,
+  SegmentFilterKind,
+  DedupePolicyOption,
+} from '../shared/options.js'

@@ -1,40 +1,174 @@
-/* Flow detail — vertical step builder */
+/* Flow detail — visual step editor */
 import React from 'react'
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
 import { sample } from '../lib/mock'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
+import {
+  FLOW_STEP_KINDS,
+  defaultFlowStep,
+  PREDICATE_KINDS,
+  defaultPredicate,
+  predicateKind,
+  type PredicateKind,
+} from '../../shared/options.js'
 
-const FALLBACK_STEPS = [
-  { kind: 'wait', label: 'Wait', meta: '1 day', icon: 'Clock', iconClass: 'wait' },
-  { kind: 'condition', label: "If: not fired 'Activated app'", meta: 'Skip if user has already activated', icon: 'Branch', iconClass: 'condition' },
-  { kind: 'send', label: 'Send · Try a starter storyboard', meta: 'templates/activation-rescue-1 · marketing', icon: 'Mail', iconClass: 'send', sends: 142, opens: '61%', clicks: '18%' },
-  { kind: 'wait', label: 'Wait', meta: '3 days', icon: 'Clock', iconClass: 'wait' },
-  { kind: 'branch', label: 'Branch: opened previous email?', meta: 'Two paths', icon: 'Branch', iconClass: 'condition' },
-  { kind: 'tag', label: "Tag · add 'engaged-rescue'", meta: 'Routed through host adapter', icon: 'Tag', iconClass: 'tag' },
-  { kind: 'exit', label: 'Exit', meta: 'Goal reached', icon: 'Exit', iconClass: 'exit' },
-]
+type FlowStep = any
 
-export function FlowDetail({ slug = 'activation-rescue' }: any) {
+const STEP_TYPES = FLOW_STEP_KINDS
+
+function summarizeStep(s: FlowStep): { kind: string; label: string; meta: string; icon: string; iconClass: string } {
+  const def = STEP_TYPES.find((t) => t.value === s.type) ?? STEP_TYPES[STEP_TYPES.length - 1]!
+  let label = def.label
+  let meta = ''
+  switch (s.type) {
+    case 'wait':
+      meta = `${s.value} ${s.unit}`
+      break
+    case 'condition':
+      label = 'If: ' + (predicateSummary(s.test) || 'predicate')
+      meta = `if false: ${s.ifFalse}`
+      break
+    case 'branch':
+      label = 'Branch: ' + (predicateSummary(s.test) || 'predicate')
+      meta = `${(s.ifTrueSteps ?? []).length} true / ${(s.ifFalseSteps ?? []).length} false`
+      break
+    case 'send':
+      label = `Send · ${s.templateSlug || '(no template)'}`
+      meta = s.providerOverride ? `via ${s.providerOverride}` : 'default provider'
+      break
+    case 'tag':
+      meta = [...(s.addTags ?? []).map((t: string) => `+${t}`), ...(s.removeTags ?? []).map((t: string) => `-${t}`)].join(', ') || '—'
+      break
+    case 'fire_event':
+      label = `Fire · ${s.eventName || '(empty)'}`
+      meta = 'synthetic event'
+      break
+    case 'webhook':
+      meta = s.url || '(no url)'
+      break
+    case 'exit':
+      meta = s.reason ?? '—'
+      break
+  }
+  return { kind: def.value, label, meta, icon: def.icon, iconClass: def.iconClass }
+}
+
+function predicateSummary(p: any): string {
+  if (!p) return ''
+  if ('hasTag' in p) return `has tag "${p.hasTag}"`
+  if ('notHasTag' in p) return `not tag "${p.notHasTag}"`
+  if ('hasFiredEvent' in p) return `fired "${p.hasFiredEvent}"`
+  if ('notHasFiredEvent' in p) return `not fired "${p.notHasFiredEvent}"`
+  if ('fieldEquals' in p) return `${p.fieldEquals.field} = ${JSON.stringify(p.fieldEquals.value)}`
+  if ('subscriptionStatus' in p) return `subscription = ${p.subscriptionStatus}`
+  if ('all' in p) return `all of ${p.all.length}`
+  if ('any' in p) return `any of ${p.any.length}`
+  if ('not' in p) return `not (…)`
+  return 'predicate'
+}
+
+export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
   const fallbackFlow = sample.flows.find((f) => f.slug === slug) ?? sample.flows[1]!
-  const { data: flow } = useLive(() => api.flow(slug), fallbackFlow as any)
+  const { data: flow, refetch } = useLive(() => api.flow(slug), fallbackFlow as any)
 
-  const steps = stepsToCanvas((flow as any)?.steps ?? (flow as any)?.draft?.steps ?? [])
-  const canvas = steps.length > 0 ? steps : FALLBACK_STEPS
-  const [selectedStep, setSelectedStep] = React.useState(0)
-  const [tab, setTab] = React.useState('editor')
+  const [steps, setSteps] = React.useState<FlowStep[]>([])
+  const [trigger, setTrigger] = React.useState<{ eventName: string; once: boolean }>({ eventName: '', once: true })
+  const [selectedIdx, setSelectedIdx] = React.useState(0)
+  const [dirty, setDirty] = React.useState(false)
+  const [saveStatus, setSaveStatus] = React.useState<string | null>(null)
+  const [showAddPicker, setShowAddPicker] = React.useState<number | null>(null)
 
-  const StepIcon = ({ name }: { name: string }) => {
-    const I = (Icons as any)[name] || Icons.Mail
-    return <I size={18} />
+  // Hydrate state from live flow on load / refetch.
+  React.useEffect(() => {
+    if (!flow) return
+    const incoming = (flow as any)?.draft?.steps ?? (flow as any)?.steps ?? []
+    setSteps(Array.isArray(incoming) ? incoming : [])
+    if ((flow as any)?.trigger?.eventName) {
+      setTrigger({ eventName: (flow as any).trigger.eventName, once: (flow as any).trigger.once !== false })
+    }
+    setDirty(false)
+  }, [flow])
+
+  function insertStep(at: number, type: string) {
+    const newStep = defaultFlowStep(type as any)
+    const next = [...steps.slice(0, at), newStep, ...steps.slice(at)]
+    setSteps(next)
+    setSelectedIdx(at)
+    setShowAddPicker(null)
+    setDirty(true)
+  }
+
+  function deleteStep(at: number) {
+    const next = steps.filter((_, i) => i !== at)
+    setSteps(next)
+    setSelectedIdx(Math.min(at, next.length - 1))
+    setDirty(true)
+  }
+
+  function updateStep(at: number, patch: Partial<FlowStep>) {
+    setSteps(steps.map((s, i) => (i === at ? { ...s, ...patch } : s)))
+    setDirty(true)
+  }
+
+  function moveStep(at: number, dir: -1 | 1) {
+    const j = at + dir
+    if (j < 0 || j >= steps.length) return
+    const next = [...steps]
+    ;[next[at], next[j]] = [next[j]!, next[at]!]
+    setSteps(next)
+    setSelectedIdx(j)
+    setDirty(true)
+  }
+
+  async function saveDraft() {
+    setSaveStatus('Saving…')
+    try {
+      await api.updateFlowDraft(slug, {
+        steps,
+        trigger: { eventName: trigger.eventName, once: trigger.once },
+      })
+      setDirty(false)
+      setSaveStatus('Saved')
+      refetch()
+    } catch (err: any) {
+      setSaveStatus(`Save failed: ${err?.message ?? err}`)
+    }
+  }
+
+  async function publish() {
+    if (dirty) await saveDraft().catch(() => {})
+    setSaveStatus('Publishing…')
+    try {
+      const res = await api.publishFlow(slug)
+      setSaveStatus(`Published v${res.version}`)
+      refetch()
+    } catch (err: any) {
+      setSaveStatus(`Publish failed: ${err?.message ?? err}`)
+    }
+  }
+
+  async function togglePauseResume() {
+    try {
+      if ((flow as any).enabled) await api.pauseFlow(slug)
+      else await api.resumeFlow(slug)
+      refetch()
+    } catch (err: any) {
+      setSaveStatus(`${err?.message ?? err}`)
+    }
   }
 
   const version = (flow as any).version ?? 1
   const active = (flow as any).active ?? (flow as any).stats?.activeRuns ?? 0
   const sends7d = (flow as any).sends7d ?? (flow as any).stats?.sendsLast7Days ?? 0
   const completed = (flow as any).stats?.completedRuns ?? 0
-  const triggerName = (flow as any).trigger?.eventName ?? 'event'
+  const selected = steps[selectedIdx] ?? null
+  const StepIcon = ({ name }: { name: string }) => {
+    const I = (Icons as any)[name] || Icons.Mail
+    return <I size={18} />
+  }
+  void setRoute
 
   return (
     <>
@@ -44,9 +178,11 @@ export function FlowDetail({ slug = 'activation-rescue' }: any) {
         actions={
           <>
             <span className={'pill ' + ((flow as any).enabled ? 'green' : 'neutral')}><span className="dot" />{(flow as any).enabled ? 'Enabled' : 'Disabled'}</span>
-            <button className="btn"><Icons.Pause size={14} />Pause</button>
-            <button className="btn"><Icons.Code size={14} />View JSON</button>
-            <button className="btn btn-primary"><Icons.Rocket size={14} />Publish draft</button>
+            <button className="btn" onClick={togglePauseResume}>
+              {(flow as any).enabled ? <><Icons.Pause size={14} />Pause</> : <><Icons.Play size={14} />Resume</>}
+            </button>
+            <button className="btn" onClick={saveDraft} disabled={!dirty}><Icons.Copy size={14} />Save draft</button>
+            <button className="btn btn-primary" onClick={publish}><Icons.Rocket size={14} />Publish</button>
           </>
         }
       />
@@ -54,83 +190,91 @@ export function FlowDetail({ slug = 'activation-rescue' }: any) {
       <div className="kpis">
         <div className="kpi"><div className="kpi-label">Active runs</div><div className="kpi-value">{active}</div><div className="kpi-meta subtle">Right now</div></div>
         <div className="kpi"><div className="kpi-label">Sends · 7d</div><div className="kpi-value">{sends7d}</div></div>
-        <div className="kpi"><div className="kpi-label">Completed runs</div><div className="kpi-value">{completed.toLocaleString()}</div><div className="kpi-meta subtle">All-time</div></div>
-        <div className="kpi"><div className="kpi-label">Version</div><div className="kpi-value">v{version}</div>{(flow as any).draft && <div className="kpi-meta"><span className="pill amber"><span className="dot" />Draft v{version + 1}</span></div>}</div>
-      </div>
-
-      <div className="tabs">
-        <div className={'tab' + (tab === 'editor' ? ' active' : '')} onClick={() => setTab('editor')}>Editor</div>
-        <div className={'tab' + (tab === 'runs' ? ' active' : '')} onClick={() => setTab('runs')}>Active runs<span className="tab-count">{active}</span></div>
-        <div className={'tab' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>History</div>
-        <div className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>Settings</div>
+        <div className="kpi"><div className="kpi-label">Completed runs</div><div className="kpi-value">{Number(completed).toLocaleString()}</div><div className="kpi-meta subtle">All-time</div></div>
+        <div className="kpi">
+          <div className="kpi-label">Version</div>
+          <div className="kpi-value">v{version}</div>
+          <div className="kpi-meta">{saveStatus ? <span className="text-xs">{saveStatus}</span> : (dirty ? <span className="pill amber"><span className="dot" />Unsaved</span> : null)}</div>
+        </div>
       </div>
 
       <div className="split split-asym">
         <div className="card">
           <div className="card-head">
             <span className="card-title">Steps</span>
-            <span className="card-sub">{canvas.length} steps · pinned to v{version} for in-flight runs</span>
-            <div className="card-actions">
-              <div className="seg">
-                <span className="seg-item active">Visual</span>
-                <span className="seg-item">JSON</span>
-              </div>
-            </div>
+            <span className="card-sub">{steps.length} steps · click to edit</span>
           </div>
           <div className="flow-canvas">
             <div className="flow-trigger">
               <div className="flow-trigger-icon"><Icons.Rocket size={16} /></div>
-              <div>
+              <div style={{ flex: 1 }}>
                 <div className="flow-trigger-label">Trigger</div>
-                <div className="flow-trigger-name">Event · "{triggerName}"</div>
-                <div className="flow-trigger-meta">Once per contact · {active} entered recently</div>
+                <div className="hstack" style={{ gap: 6 }}>
+                  <span className="flow-trigger-name">Event ·</span>
+                  <input
+                    className="input"
+                    style={{ flex: 1, padding: '4px 8px', fontSize: 13 }}
+                    placeholder="Created"
+                    value={trigger.eventName}
+                    onChange={(e) => { setTrigger({ ...trigger, eventName: e.target.value }); setDirty(true) }}
+                  />
+                </div>
+                <div className="flow-trigger-meta">
+                  <label className="hstack" style={{ gap: 6, marginTop: 6 }}>
+                    <input type="checkbox" checked={trigger.once} onChange={(e) => { setTrigger({ ...trigger, once: e.target.checked }); setDirty(true) }} />
+                    <span className="text-xs">Once per contact</span>
+                  </label>
+                </div>
               </div>
             </div>
-            <div className="flow-connector" />
 
-            {canvas.map((s, i) => (
-              <React.Fragment key={i}>
-                <div className={'flow-step ' + s.iconClass + (selectedStep === i ? ' selected' : '')} onClick={() => setSelectedStep(i)}>
-                  <div className="flow-step-icon"><StepIcon name={s.icon} /></div>
-                  <div className="flow-step-body">
-                    <div className="flow-step-kind">{s.kind}</div>
-                    <div className="flow-step-title">{s.label}</div>
-                    <div className="flow-step-meta">{s.meta}</div>
-                  </div>
-                  {s.sends != null && (
-                    <div className="flow-step-aside">
-                      <div className="flow-step-aside-num">{s.sends}</div>
-                      <div>sent</div>
-                      <div style={{ marginTop: 4 }}>opens {s.opens}</div>
-                      <div>clicks {s.clicks}</div>
+            <AddStepButton onPick={(t) => insertStep(0, t)} expanded={showAddPicker === 0} setExpanded={(b) => setShowAddPicker(b ? 0 : null)} />
+
+            {steps.map((s, i) => {
+              const summary = summarizeStep(s)
+              return (
+                <React.Fragment key={i}>
+                  <div className={'flow-step ' + summary.iconClass + (selectedIdx === i ? ' selected' : '')} onClick={() => setSelectedIdx(i)}>
+                    <div className="flow-step-icon"><StepIcon name={summary.icon} /></div>
+                    <div className="flow-step-body">
+                      <div className="flow-step-kind">{summary.kind}</div>
+                      <div className="flow-step-title">{summary.label}</div>
+                      <div className="flow-step-meta">{summary.meta}</div>
                     </div>
-                  )}
-                </div>
-                <div style={{ position: 'relative', height: 24, display: 'flex', alignItems: 'center', flexDirection: 'column' }}>
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                    <div className="flow-connector" style={{ height: 24 }} />
+                    <div className="flow-step-aside" style={{ alignItems: 'center', gap: 4 }}>
+                      <button className="icon-btn" onClick={(e) => { e.stopPropagation(); moveStep(i, -1) }} title="Move up"><Icons.Chevron size={12} style={{ transform: 'rotate(-90deg)' }} /></button>
+                      <button className="icon-btn" onClick={(e) => { e.stopPropagation(); moveStep(i, 1) }} title="Move down"><Icons.Chevron size={12} style={{ transform: 'rotate(90deg)' }} /></button>
+                    </div>
                   </div>
-                  <div className="flow-add" title="Insert step"><Icons.Plus size={14} /></div>
-                </div>
-              </React.Fragment>
-            ))}
+                  <AddStepButton onPick={(t) => insertStep(i + 1, t)} expanded={showAddPicker === i + 1} setExpanded={(b) => setShowAddPicker(b ? i + 1 : null)} />
+                </React.Fragment>
+              )
+            })}
+
+            {steps.length === 0 && (
+              <div className="text-xs subtle" style={{ padding: 16, textAlign: 'center' }}>
+                Empty flow. Add your first step above.
+              </div>
+            )}
           </div>
         </div>
 
         <div className="card">
           <div className="card-head">
             <span className="card-title">Step settings</span>
-            <span className="card-sub">Step {selectedStep + 1}</span>
+            <span className="card-sub">{selected ? `Step ${selectedIdx + 1} · ${selected.type}` : 'Select a step'}</span>
+            {selected && (
+              <div className="card-actions">
+                <button className="btn btn-sm btn-danger" onClick={() => deleteStep(selectedIdx)}><Icons.X size={12} />Delete</button>
+              </div>
+            )}
           </div>
           <div className="card-body">
-            <div className="text-xs subtle">Step type</div>
-            <div className="seg" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', margin: '6px 0 16px' }}>
-              <span className="seg-item">Wait</span>
-              <span className="seg-item active">Send</span>
-              <span className="seg-item">Branch</span>
-              <span className="seg-item">Tag</span>
-            </div>
-            <div className="field-hint">Detail editor lands in a later release. For now, edit flow JSON directly in MongoDB.</div>
+            {selected ? (
+              <StepEditor step={selected} onChange={(patch) => updateStep(selectedIdx, patch)} />
+            ) : (
+              <div className="text-xs subtle">Click a step in the canvas to edit it, or use the + button to add one.</div>
+            )}
           </div>
         </div>
       </div>
@@ -138,28 +282,371 @@ export function FlowDetail({ slug = 'activation-rescue' }: any) {
   )
 }
 
-function stepsToCanvas(steps: any[]): Array<{ kind: string; label: string; meta: string; icon: string; iconClass: string; sends?: number; opens?: string; clicks?: string }> {
-  if (!Array.isArray(steps)) return []
-  return steps.map((s) => {
-    switch (s.type) {
-      case 'wait':
-        return { kind: 'wait', label: 'Wait', meta: `${s.value} ${s.unit}`, icon: 'Clock', iconClass: 'wait' }
-      case 'condition':
-        return { kind: 'condition', label: 'Condition', meta: `if false: ${s.ifFalse}`, icon: 'Branch', iconClass: 'condition' }
-      case 'branch':
-        return { kind: 'branch', label: 'Branch', meta: 'Two paths', icon: 'Branch', iconClass: 'condition' }
-      case 'send':
-        return { kind: 'send', label: `Send · ${s.templateSlug}`, meta: s.providerOverride ? `via ${s.providerOverride}` : 'default provider', icon: 'Mail', iconClass: 'send' }
-      case 'tag':
-        return { kind: 'tag', label: 'Tag', meta: [...(s.addTags ?? []).map((t: string) => `+${t}`), ...(s.removeTags ?? []).map((t: string) => `-${t}`)].join(', ') || '—', icon: 'Tag', iconClass: 'tag' }
-      case 'fire_event':
-        return { kind: 'fire_event', label: `Fire · ${s.eventName}`, meta: 'synthetic event', icon: 'Activity', iconClass: 'send' }
-      case 'webhook':
-        return { kind: 'webhook', label: 'Webhook', meta: s.url, icon: 'Webhook', iconClass: 'tag' }
-      case 'exit':
-        return { kind: 'exit', label: 'Exit', meta: s.reason ?? '—', icon: 'Exit', iconClass: 'exit' }
-      default:
-        return { kind: 'unknown', label: 'Unknown step', meta: JSON.stringify(s).slice(0, 60), icon: 'Mail', iconClass: 'send' }
-    }
-  })
+function AddStepButton({ onPick, expanded, setExpanded }: { onPick: (t: string) => void; expanded: boolean; setExpanded: (b: boolean) => void }) {
+  return (
+    <div style={{ position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column' }}>
+      <div className="flow-connector" style={{ height: 16 }} />
+      {expanded ? (
+        <div className="card" style={{ padding: 8, display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 480, marginBottom: 8 }}>
+          {STEP_TYPES.map((t) => (
+            <button key={t.value} className="btn btn-sm" onClick={() => onPick(t.value)}>{t.label}</button>
+          ))}
+          <button className="btn btn-sm btn-ghost" onClick={() => setExpanded(false)}>Cancel</button>
+        </div>
+      ) : (
+        <button className="flow-add" onClick={() => setExpanded(true)} title="Insert step"><Icons.Plus size={14} /></button>
+      )}
+      <div className="flow-connector" style={{ height: 16 }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Per-type step editors
+// ---------------------------------------------------------------------------
+
+function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Partial<FlowStep>) => void }) {
+  switch (step.type) {
+    case 'wait':
+      return (
+        <div className="field">
+          <label className="field-label">Wait duration</label>
+          <div className="hstack" style={{ gap: 8 }}>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              style={{ width: 100 }}
+              value={step.value}
+              onChange={(e) => onChange({ value: Math.max(1, Number(e.target.value)) })}
+            />
+            <select
+              className="select"
+              value={step.unit}
+              onChange={(e) => onChange({ unit: e.target.value })}
+              style={{ flex: 1 }}
+            >
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+              <option value="days">days</option>
+              <option value="weeks">weeks</option>
+            </select>
+          </div>
+          <div className="field-hint">The runner schedules a delayed wakeup; no CPU until then.</div>
+        </div>
+      )
+
+    case 'condition':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">If predicate is FALSE</label>
+            <div className="seg">
+              <span className={'seg-item' + (step.ifFalse === 'exit' ? ' active' : '')} onClick={() => onChange({ ifFalse: 'exit' })}>Exit the run</span>
+              <span className={'seg-item' + (step.ifFalse === 'continue' ? ' active' : '')} onClick={() => onChange({ ifFalse: 'continue' })}>Skip next step</span>
+            </div>
+          </div>
+          <PredicateEditor predicate={step.test} onChange={(test) => onChange({ test })} />
+        </>
+      )
+
+    case 'branch':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">Predicate (JSON)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
+              defaultValue={JSON.stringify(step.test, null, 2)}
+              onBlur={(e) => {
+                try { onChange({ test: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">If TRUE — steps (JSON array)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
+              defaultValue={JSON.stringify(step.ifTrueSteps ?? [], null, 2)}
+              onBlur={(e) => {
+                try { onChange({ ifTrueSteps: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">If FALSE — steps (JSON array)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
+              defaultValue={JSON.stringify(step.ifFalseSteps ?? [], null, 2)}
+              onBlur={(e) => {
+                try { onChange({ ifFalseSteps: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+          </div>
+          <div className="field-hint">Branch's nested step arrays are edited as JSON. For typical two-arm logic, prefer a <span className="mono">condition</span> step with <span className="mono">ifFalse: 'exit'</span>.</div>
+        </>
+      )
+
+    case 'send':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">Template</label>
+            <TemplatePicker value={step.templateSlug} onChange={(v) => onChange({ templateSlug: v })} />
+          </div>
+          <div className="field">
+            <label className="field-label">Provider override</label>
+            <input
+              className="input"
+              placeholder="(use default)"
+              value={step.providerOverride ?? ''}
+              onChange={(e) => onChange({ providerOverride: e.target.value || undefined })}
+            />
+            <div className="field-hint">Leave blank to use the default provider for this template's kind.</div>
+          </div>
+          <div className="field">
+            <label className="field-label">Vars (JSON, optional)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
+              defaultValue={JSON.stringify(step.vars ?? {}, null, 2)}
+              onBlur={(e) => {
+                try { onChange({ vars: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+            <div className="field-hint">Per-step variables available in the template as <span className="mono">{'{{vars.x}}'}</span>.</div>
+          </div>
+        </>
+      )
+
+    case 'tag':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">Tags to ADD</label>
+            <input
+              className="input"
+              placeholder="engaged, vip (comma-separated)"
+              value={(step.addTags ?? []).join(', ')}
+              onChange={(e) => onChange({ addTags: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">Tags to REMOVE</label>
+            <input
+              className="input"
+              placeholder="new-signup, cold"
+              value={(step.removeTags ?? []).join(', ')}
+              onChange={(e) => onChange({ removeTags: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })}
+            />
+          </div>
+          <div className="field-hint">Routes through your adapter's <span className="mono">addTags</span> / <span className="mono">removeTags</span> if defined, else mailer's tag collection.</div>
+        </>
+      )
+
+    case 'fire_event':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">Event name</label>
+            <input
+              className="input"
+              placeholder="Engaged via flow"
+              value={step.eventName ?? ''}
+              onChange={(e) => onChange({ eventName: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">Properties (JSON, optional)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
+              defaultValue={JSON.stringify(step.properties ?? {}, null, 2)}
+              onBlur={(e) => {
+                try { onChange({ properties: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+          </div>
+        </>
+      )
+
+    case 'webhook':
+      return (
+        <>
+          <div className="field">
+            <label className="field-label">URL</label>
+            <input
+              className="input"
+              placeholder="https://analytics.example/event"
+              value={step.url ?? ''}
+              onChange={(e) => onChange({ url: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">Method</label>
+            <select className="select" value={step.method ?? 'POST'} onChange={(e) => onChange({ method: e.target.value })}>
+              <option>POST</option>
+              <option>PUT</option>
+            </select>
+          </div>
+          <div className="field">
+            <label className="field-label">Payload (JSON, optional)</label>
+            <textarea
+              className="input"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
+              defaultValue={JSON.stringify(step.payload ?? {}, null, 2)}
+              onBlur={(e) => {
+                try { onChange({ payload: JSON.parse(e.target.value) }) } catch { /* ignore */ }
+              }}
+            />
+            <div className="field-hint">If blank, mailer sends <span className="mono">{'{ externalId, flowRunId }'}</span>.</div>
+          </div>
+          <div className="field">
+            <label className="field-label">On failure</label>
+            <select className="select" value={step.failureMode ?? 'soft'} onChange={(e) => onChange({ failureMode: e.target.value })}>
+              <option value="soft">Log + continue (default)</option>
+              <option value="fail_run">Fail the flow run</option>
+            </select>
+          </div>
+        </>
+      )
+
+    case 'exit':
+      return (
+        <div className="field">
+          <label className="field-label">Exit reason (optional)</label>
+          <input
+            className="input"
+            placeholder="goal_reached"
+            value={step.reason ?? ''}
+            onChange={(e) => onChange({ reason: e.target.value })}
+          />
+          <div className="field-hint">Recorded on the flow_run for filtering exited runs by reason.</div>
+        </div>
+      )
+
+    default:
+      return <div className="text-xs subtle">Unknown step type: {step.type}</div>
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Predicate editor (handles common cases visually; falls back to JSON)
+// ---------------------------------------------------------------------------
+
+function PredicateEditor({ predicate, onChange }: { predicate: any; onChange: (p: any) => void }) {
+  const kind: PredicateKind | '__json' = predicateKind(predicate) ?? '__json'
+  const setKind = (k: string) => {
+    if (k === '__json') onChange(predicate)
+    else onChange(defaultPredicate(k as PredicateKind))
+  }
+
+  return (
+    <div className="field">
+      <label className="field-label">Predicate</label>
+      <select className="select" value={kind} onChange={(e) => setKind(e.target.value)} style={{ marginBottom: 8 }}>
+        {PREDICATE_KINDS.map((k) => (
+          <option key={k.value} value={k.value}>
+            {k.label}{k.noisy ? ' (noisy)' : ''}
+          </option>
+        ))}
+        <option value="__json">raw JSON (advanced)</option>
+      </select>
+
+      {kind === 'hasTag' && (
+        <input className="input" placeholder="vip" value={predicate.hasTag ?? ''} onChange={(e) => onChange({ hasTag: e.target.value })} />
+      )}
+      {kind === 'notHasTag' && (
+        <input className="input" placeholder="cold" value={predicate.notHasTag ?? ''} onChange={(e) => onChange({ notHasTag: e.target.value })} />
+      )}
+      {kind === 'fieldEquals' && (
+        <div className="hstack" style={{ gap: 8 }}>
+          <input className="input" placeholder="field" style={{ flex: 1 }} value={predicate.fieldEquals?.field ?? ''} onChange={(e) => onChange({ fieldEquals: { field: e.target.value, value: predicate.fieldEquals?.value } })} />
+          <input className="input" placeholder="value" style={{ flex: 1 }} value={String(predicate.fieldEquals?.value ?? '')} onChange={(e) => onChange({ fieldEquals: { field: predicate.fieldEquals?.field, value: e.target.value } })} />
+        </div>
+      )}
+      {kind === 'fieldExists' && (
+        <input className="input" placeholder="customerType" value={predicate.fieldExists ?? ''} onChange={(e) => onChange({ fieldExists: e.target.value })} />
+      )}
+      {(kind === 'hasFiredEvent' || kind === 'notHasFiredEvent') && (
+        <input
+          className="input"
+          placeholder="Activated app"
+          value={(kind === 'hasFiredEvent' ? predicate.hasFiredEvent : predicate.notHasFiredEvent) ?? ''}
+          onChange={(e) => onChange({ [kind]: e.target.value })}
+        />
+      )}
+      {kind === 'subscriptionStatus' && (
+        <select className="select" value={predicate.subscriptionStatus} onChange={(e) => onChange({ subscriptionStatus: e.target.value })}>
+          <option>subscribed</option>
+          <option>unsubscribed</option>
+          <option>pending_doi</option>
+          <option>bounced</option>
+          <option>complained</option>
+        </select>
+      )}
+      {(kind === 'hasOpenedExcludingBots' || kind === 'hasClickedExcludingBots') && (
+        <div className="vstack" style={{ gap: 6 }}>
+          <input className="input" placeholder="Template slug (optional)" value={(predicate[kind] as any).templateSlug ?? ''} onChange={(e) => onChange({ [kind]: { ...predicate[kind], templateSlug: e.target.value || undefined } })} />
+          <label className="hstack" style={{ gap: 6 }}>
+            <input type="checkbox" checked={(predicate[kind] as any).sinceFlowStart === true} onChange={(e) => onChange({ [kind]: { ...predicate[kind], sinceFlowStart: e.target.checked || undefined } })} />
+            <span className="text-xs">Since this flow run started</span>
+          </label>
+          <input className="input" placeholder="Within days (optional)" type="number" value={(predicate[kind] as any).withinDays ?? ''} onChange={(e) => onChange({ [kind]: { ...predicate[kind], withinDays: Number(e.target.value) || undefined } })} />
+        </div>
+      )}
+      {(kind === 'openedAtLeastN' || kind === 'clickedAtLeastN') && (
+        <div className="hstack" style={{ gap: 8 }}>
+          <input className="input" type="number" min={1} style={{ flex: 1 }} placeholder="count" value={(predicate[kind] as any).count ?? 1} onChange={(e) => onChange({ [kind]: { ...predicate[kind], count: Math.max(1, Number(e.target.value)) } })} />
+          <input className="input" type="number" min={1} style={{ flex: 1 }} placeholder="within days" value={(predicate[kind] as any).withinDays ?? 7} onChange={(e) => onChange({ [kind]: { ...predicate[kind], withinDays: Math.max(1, Number(e.target.value)) } })} />
+        </div>
+      )}
+      {kind === '__json' && (
+        <textarea
+          className="input"
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
+          defaultValue={JSON.stringify(predicate, null, 2)}
+          onBlur={(e) => {
+            try { onChange(JSON.parse(e.target.value)) } catch { /* ignore */ }
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Template picker
+// ---------------------------------------------------------------------------
+
+function TemplatePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { data: templates } = useLive(() => api.templates(), [] as any[])
+
+  if (!templates || templates.length === 0) {
+    return <input className="input" placeholder="welcome-1" value={value} onChange={(e) => onChange(e.target.value)} />
+  }
+
+  const matched = templates.find((t: any) => t.slug === value)
+  return (
+    <>
+      <select className="select" value={matched ? value : '__custom'} onChange={(e) => onChange(e.target.value === '__custom' ? value : e.target.value)}>
+        {templates.map((t: any) => (
+          <option key={t.slug} value={t.slug}>{t.slug} — {t.name}</option>
+        ))}
+        <option value="__custom">(custom slug…)</option>
+      </select>
+      {!matched && (
+        <input
+          className="input"
+          style={{ marginTop: 6 }}
+          placeholder="welcome-1"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </>
+  )
 }
