@@ -13,6 +13,13 @@ import { fileURLToPath } from 'node:url'
 import { ObjectId } from 'mongodb'
 
 import type { Mailer } from '../mailer.js'
+import {
+  applyTracking,
+  compileMailyTemplate,
+  compileTemplate,
+  renderTemplate,
+} from '../templates/render.js'
+import { signUnsubscribeToken } from '../tokens.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -325,6 +332,519 @@ function apiRouter(mailer: Mailer): Router {
         resource: { collection: 'mailer_health' },
       })
       res.json({ ok: true })
+    }),
+  )
+
+  // ----- Flows: create / edit / publish ------------------------------------
+  r.post(
+    '/flows',
+    asyncHandler(async (req, res) => {
+      const { slug, name, description, trigger, goal, audience } = req.body ?? {}
+      if (!slug || !name || !trigger?.eventName) {
+        return res.status(400).json({ error: 'validation_failed', message: 'slug, name, and trigger.eventName required' })
+      }
+      const now = new Date()
+      const doc = {
+        slug,
+        name,
+        description: description ?? '',
+        trigger: { type: 'event' as const, eventName: trigger.eventName, once: trigger.once !== false },
+        enabled: false,
+        steps: [],
+        version: 0,
+        draft: {
+          steps: [],
+          notes: 'Initial draft',
+          lastModifiedBy: (req as any).actor ?? 'unknown',
+          lastModifiedAt: now,
+        },
+        goal: goal ?? 'activation',
+        audience: audience ?? '',
+        expectedVolumePerWeek: null,
+        stats: { activeRuns: 0, completedRuns: 0, sendsTotal: 0, sendsLast7Days: 0 },
+        lastTriggerScanAt: null,
+        publishedAt: null,
+        publishedBy: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      try {
+        await c.flows.insertOne(doc as any)
+      } catch (err: any) {
+        if (err?.code === 11000) return res.status(409).json({ error: 'slug_taken' })
+        throw err
+      }
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'flow.create',
+        resource: { collection: 'mailer_flows', slug },
+      })
+      return res.json({ ok: true, slug })
+    }),
+  )
+
+  r.patch(
+    '/flows/:slug/draft',
+    asyncHandler(async (req, res) => {
+      const flow = await c.flows.findOne({ slug: req.params.slug })
+      if (!flow) return res.status(404).json({ error: 'not_found' })
+      const { steps, notes, trigger, name, description, goal, audience } = req.body ?? {}
+
+      const set: Record<string, unknown> = {
+        'draft.lastModifiedBy': (req as any).actor,
+        'draft.lastModifiedAt': new Date(),
+        updatedAt: new Date(),
+      }
+      if (Array.isArray(steps)) set['draft.steps'] = steps
+      if (typeof notes === 'string') set['draft.notes'] = notes
+      if (trigger?.eventName) set.trigger = { type: 'event' as const, eventName: trigger.eventName, once: trigger.once !== false }
+      if (typeof name === 'string') set.name = name
+      if (typeof description === 'string') set.description = description
+      if (typeof goal === 'string') set.goal = goal
+      if (typeof audience === 'string') set.audience = audience
+
+      await c.flows.updateOne({ _id: flow._id }, { $set: set })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'flow.draft.update',
+        resource: { collection: 'mailer_flows', id: flow._id, slug: flow.slug },
+        diffSummary: `Updated draft (${steps ? `${steps.length} steps` : 'metadata only'})`,
+      })
+      return res.json({ ok: true })
+    }),
+  )
+
+  r.post(
+    '/flows/:slug/publish',
+    asyncHandler(async (req, res) => {
+      const flow = await c.flows.findOne({ slug: req.params.slug })
+      if (!flow) return res.status(404).json({ error: 'not_found' })
+      const draftSteps = flow.draft?.steps ?? flow.steps
+      if (!Array.isArray(draftSteps) || draftSteps.length === 0) {
+        return res.status(400).json({ error: 'empty_flow', message: 'flow has no steps to publish' })
+      }
+      const nextVersion = (flow.version ?? 0) + 1
+      const now = new Date()
+      await c.flowVersions.insertOne({
+        flowId: flow._id!,
+        version: nextVersion,
+        steps: draftSteps,
+        trigger: flow.trigger,
+        publishedAt: now,
+        publishedBy: (req as any).actor,
+      })
+      await c.flows.updateOne(
+        { _id: flow._id },
+        {
+          $set: {
+            steps: draftSteps,
+            version: nextVersion,
+            enabled: true,
+            draft: null,
+            publishedAt: now,
+            publishedBy: (req as any).actor,
+            updatedAt: now,
+          },
+        },
+      )
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'flow.publish',
+        resource: { collection: 'mailer_flows', id: flow._id, slug: flow.slug },
+        diffSummary: `Published v${nextVersion}`,
+      })
+      return res.json({ ok: true, version: nextVersion })
+    }),
+  )
+
+  r.delete(
+    '/flows/:slug',
+    asyncHandler(async (req, res) => {
+      const flow = await c.flows.findOne({ slug: req.params.slug })
+      if (!flow) return res.status(404).json({ error: 'not_found' })
+      const everRan = await c.flowRuns.countDocuments({ flowId: flow._id }, { limit: 1 })
+      if (everRan > 0) return res.status(409).json({ error: 'has_runs', message: 'flow has runs — pause it instead' })
+      await c.flows.deleteOne({ _id: flow._id })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'flow.delete',
+        resource: { collection: 'mailer_flows', id: flow._id, slug: flow.slug },
+      })
+      return res.json({ ok: true })
+    }),
+  )
+
+  // ----- Templates: create / edit / publish --------------------------------
+  r.post(
+    '/templates',
+    asyncHandler(async (req, res) => {
+      const { slug, name, kind, subject, preheader, fromName, fromEmail } = req.body ?? {}
+      if (!slug || !name || !kind) {
+        return res.status(400).json({ error: 'validation_failed', message: 'slug, name, kind required' })
+      }
+      if (kind !== 'marketing' && kind !== 'transactional') {
+        return res.status(400).json({ error: 'validation_failed', message: 'kind must be marketing or transactional' })
+      }
+      const now = new Date()
+      try {
+        await c.templates.insertOne({
+          slug,
+          name,
+          description: '',
+          kind,
+          fromName: fromName ?? mailer.config.fromDefaults?.name ?? 'Mailery',
+          fromEmail: fromEmail ?? mailer.config.fromDefaults?.email ?? 'noreply@example.com',
+          replyTo: null,
+          providerOverride: null,
+          subject: subject ?? `Untitled — ${name}`,
+          preheader: preheader ?? '',
+          body: { mjml: '', editorJson: null, html: '', plainText: '', compiledAt: null },
+          variablesSchema: {},
+          draft: {
+            subject: subject ?? `Untitled — ${name}`,
+            preheader: preheader ?? '',
+            mjml: '',
+            editorJson: null,
+            notes: 'Initial draft',
+            lastModifiedBy: (req as any).actor,
+            lastModifiedAt: now,
+          },
+          tags: [],
+          trackOpens: kind === 'marketing',
+          trackClicks: kind === 'marketing',
+          stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
+          publishedAt: null,
+          publishedBy: null,
+          createdAt: now,
+          updatedAt: now,
+        } as any)
+      } catch (err: any) {
+        if (err?.code === 11000) return res.status(409).json({ error: 'slug_taken' })
+        throw err
+      }
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'template.create',
+        resource: { collection: 'mailer_templates', slug },
+      })
+      return res.json({ ok: true, slug })
+    }),
+  )
+
+  r.patch(
+    '/templates/:slug/draft',
+    asyncHandler(async (req, res) => {
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+
+      const { subject, preheader, mjml, editorJson, notes, name, fromName, fromEmail, replyTo, kind, trackOpens, trackClicks } = req.body ?? {}
+
+      const set: Record<string, unknown> = {
+        'draft.lastModifiedBy': (req as any).actor,
+        'draft.lastModifiedAt': new Date(),
+        updatedAt: new Date(),
+      }
+      if (typeof subject === 'string') set['draft.subject'] = subject
+      if (typeof preheader === 'string') set['draft.preheader'] = preheader
+      if (typeof mjml === 'string') set['draft.mjml'] = mjml
+      if (editorJson !== undefined) set['draft.editorJson'] = editorJson
+      if (typeof notes === 'string') set['draft.notes'] = notes
+      if (typeof name === 'string') set.name = name
+      if (typeof fromName === 'string') set.fromName = fromName
+      if (typeof fromEmail === 'string') set.fromEmail = fromEmail
+      if (typeof replyTo === 'string' || replyTo === null) set.replyTo = replyTo
+      if (kind === 'marketing' || kind === 'transactional') set.kind = kind
+      if (typeof trackOpens === 'boolean') set.trackOpens = trackOpens
+      if (typeof trackClicks === 'boolean') set.trackClicks = trackClicks
+
+      await c.templates.updateOne({ _id: tpl._id }, { $set: set })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'template.draft.update',
+        resource: { collection: 'mailer_templates', id: tpl._id, slug: tpl.slug },
+      })
+      return res.json({ ok: true })
+    }),
+  )
+
+  r.post(
+    '/templates/:slug/publish',
+    asyncHandler(async (req, res) => {
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+      const draft = tpl.draft
+      if (!draft) return res.status(400).json({ error: 'no_draft' })
+
+      let compiled: { html: string; plainText: string; errors: any[] }
+      if (draft.editorJson) {
+        compiled = await compileMailyTemplate(draft.editorJson)
+      } else if (draft.mjml) {
+        compiled = await compileTemplate(draft.mjml)
+      } else {
+        return res.status(400).json({ error: 'empty_draft', message: 'draft has no MJML or editorJson content' })
+      }
+
+      const now = new Date()
+      const nextVersion = await c.templateVersions.countDocuments({ templateId: tpl._id }) + 1
+      await c.templateVersions.insertOne({
+        templateId: tpl._id!,
+        version: nextVersion,
+        mjml: draft.mjml,
+        html: compiled.html,
+        plainText: compiled.plainText,
+        subject: draft.subject,
+        preheader: draft.preheader,
+        publishedAt: now,
+        publishedBy: (req as any).actor,
+      })
+
+      await c.templates.updateOne(
+        { _id: tpl._id },
+        {
+          $set: {
+            subject: draft.subject,
+            preheader: draft.preheader,
+            body: {
+              mjml: draft.mjml,
+              editorJson: draft.editorJson,
+              html: compiled.html,
+              plainText: compiled.plainText,
+              compiledAt: now,
+            },
+            draft: null,
+            publishedAt: now,
+            publishedBy: (req as any).actor,
+            updatedAt: now,
+          },
+        },
+      )
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'template.publish',
+        resource: { collection: 'mailer_templates', id: tpl._id, slug: tpl.slug },
+        diffSummary: `Published v${nextVersion}`,
+      })
+      return res.json({ ok: true, version: nextVersion, warnings: compiled.errors })
+    }),
+  )
+
+  r.post(
+    '/templates/:slug/preview',
+    asyncHandler(async (req, res) => {
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+
+      const useDraft = req.body?.useDraft !== false
+      let html = ''
+      let plainText = ''
+      if (useDraft && tpl.draft) {
+        const compiled = tpl.draft.editorJson
+          ? await compileMailyTemplate(tpl.draft.editorJson)
+          : await compileTemplate(tpl.draft.mjml || '<mjml><mj-body></mj-body></mjml>')
+        html = compiled.html
+        plainText = compiled.plainText
+      } else {
+        html = tpl.body.html
+        plainText = tpl.body.plainText
+      }
+
+      const sampleContact = req.body?.sampleContact ?? {
+        externalId: 'preview-contact',
+        email: 'preview@example.com',
+        tags: [],
+        fields: { firstName: 'Alex' },
+      }
+      const renderCtx = {
+        contact: sampleContact,
+        vars: req.body?.vars ?? {},
+        unsubscribeUrl: `${mailer.config.publicUrl}/m/unsub/preview`,
+        senderAddress: mailer.config.senderAddress,
+      }
+
+      const previewTpl = { ...tpl, body: { ...tpl.body, html, plainText } }
+      const rendered = await renderTemplate(previewTpl as any, renderCtx, { helpers: mailer.config.handlebarsHelpers })
+      return res.json({ subject: rendered.subject, preheader: rendered.preheader, html: rendered.html, plainText: rendered.plainText })
+    }),
+  )
+
+  r.post(
+    '/templates/:slug/send-test',
+    asyncHandler(async (req, res) => {
+      const { to, sampleData } = req.body ?? {}
+      if (!to) return res.status(400).json({ error: 'to_required' })
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+
+      const contact = sampleData?.contact ?? {
+        externalId: 'test-recipient',
+        email: to,
+        tags: [],
+        fields: { firstName: 'Test' },
+      }
+      contact.email = to
+
+      const renderCtx = {
+        contact,
+        vars: sampleData?.vars ?? {},
+        unsubscribeUrl: `${mailer.config.publicUrl}/m/unsub/test`,
+        senderAddress: mailer.config.senderAddress,
+      }
+      const rendered = await renderTemplate(tpl as any, renderCtx, { helpers: mailer.config.handlebarsHelpers })
+      const tracking = applyTracking(rendered.html, {
+        sendId: `test-${Date.now()}`,
+        publicUrl: mailer.config.publicUrl,
+        trackOpens: false,
+        trackClicks: false,
+      })
+
+      const provider = mailer.providers[tpl.providerOverride ?? mailer.config.defaultProvider]!
+      const result = await provider.send({
+        to,
+        fromName: rendered.fromName,
+        fromEmail: rendered.fromEmail,
+        subject: `[TEST] ${rendered.subject}`,
+        html: tracking.html,
+        text: rendered.plainText,
+      })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'template.send-test',
+        resource: { collection: 'mailer_templates', slug: tpl.slug },
+        diffSummary: `to=${to}`,
+      })
+      // Avoid unused — sign helper is exposed for future preview routes.
+      void signUnsubscribeToken
+      return res.json({ ok: true, providerId: result.providerId })
+    }),
+  )
+
+  // ----- Broadcasts: create / patch / schedule / cancel --------------------
+  r.post(
+    '/broadcasts',
+    asyncHandler(async (req, res) => {
+      const { slug, name, templateSlug, segmentDefinition } = req.body ?? {}
+      if (!slug || !name || !templateSlug) {
+        return res.status(400).json({ error: 'validation_failed', message: 'slug, name, templateSlug required' })
+      }
+      const now = new Date()
+      try {
+        await c.broadcasts.insertOne({
+          slug,
+          name,
+          templateSlug,
+          segmentDefinition: segmentDefinition ?? { filters: [{ kind: 'subscriptionStatus', equals: 'subscribed' }] },
+          status: 'draft',
+          scheduledAt: null,
+          startedAt: null,
+          completedAt: null,
+          confirmationRequired: true,
+          confirmedCount: null,
+          confirmedAt: null,
+          confirmedBy: null,
+          recipientCount: null,
+          stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0 },
+          createdAt: now,
+          createdBy: (req as any).actor,
+          updatedAt: now,
+        } as any)
+      } catch (err: any) {
+        if (err?.code === 11000) return res.status(409).json({ error: 'slug_taken' })
+        throw err
+      }
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'broadcast.create',
+        resource: { collection: 'mailer_broadcasts', slug },
+      })
+      return res.json({ ok: true, slug })
+    }),
+  )
+
+  r.patch(
+    '/broadcasts/:slug',
+    asyncHandler(async (req, res) => {
+      const b = await c.broadcasts.findOne({ slug: req.params.slug })
+      if (!b) return res.status(404).json({ error: 'not_found' })
+      if (b.status !== 'draft') return res.status(409).json({ error: 'not_draft' })
+      const { name, templateSlug, segmentDefinition } = req.body ?? {}
+      const set: Record<string, unknown> = { updatedAt: new Date() }
+      if (typeof name === 'string') set.name = name
+      if (typeof templateSlug === 'string') set.templateSlug = templateSlug
+      if (segmentDefinition) set.segmentDefinition = segmentDefinition
+      await c.broadcasts.updateOne({ _id: b._id }, { $set: set })
+      return res.json({ ok: true })
+    }),
+  )
+
+  r.post(
+    '/broadcasts/:slug/segment/count',
+    asyncHandler(async (req, res) => {
+      const segmentDefinition = req.body?.segmentDefinition
+      if (!segmentDefinition?.filters) return res.status(400).json({ error: 'segment_required' })
+      const t0 = Date.now()
+      // Stage A: host-side via adapter. For V1 we just translate the first
+      // host-side filter we recognize; richer segmentation lands later.
+      const hostFilter: any = {}
+      for (const f of segmentDefinition.filters) {
+        if (f.kind === 'hasTag') hostFilter.hasTag = f.tag
+        if (f.kind === 'fieldEquals') hostFilter.fieldEquals = { field: f.field, value: f.value }
+      }
+      const stageA = await mailer.adapter.count(hostFilter)
+      // Stage B + suppression are estimated for the live counter; the real
+      // numbers come at dispatch time when the cursor is streamed.
+      return res.json({ stageA, stageB: stageA, afterSuppression: stageA, computedMs: Date.now() - t0 })
+    }),
+  )
+
+  r.post(
+    '/broadcasts/:slug/schedule',
+    asyncHandler(async (req, res) => {
+      const b = await c.broadcasts.findOne({ slug: req.params.slug })
+      if (!b) return res.status(404).json({ error: 'not_found' })
+      if (b.status !== 'draft') return res.status(409).json({ error: 'not_draft' })
+      const { scheduledAt, confirmedCount, respectRecipientTimezone } = req.body ?? {}
+      if (!scheduledAt) return res.status(400).json({ error: 'scheduledAt_required' })
+      const scheduled = new Date(scheduledAt)
+      if (Number.isNaN(scheduled.getTime())) return res.status(400).json({ error: 'bad_scheduledAt' })
+
+      const threshold = mailer.config.broadcastConfirmationThreshold
+      if (typeof confirmedCount !== 'number') {
+        return res.status(400).json({ error: 'confirmedCount_required' })
+      }
+
+      const set: Record<string, unknown> = {
+        status: 'scheduled',
+        scheduledAt: scheduled,
+        confirmedCount,
+        confirmedAt: new Date(),
+        confirmedBy: (req as any).actor,
+        updatedAt: new Date(),
+      }
+      if (respectRecipientTimezone) set.respectRecipientTimezone = true
+
+      await c.broadcasts.updateOne({ _id: b._id }, { $set: set })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'broadcast.schedule',
+        resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
+        diffSummary: `scheduled at ${scheduled.toISOString()} · confirmedCount=${confirmedCount} · threshold=${threshold}`,
+      })
+      return res.json({ ok: true })
+    }),
+  )
+
+  r.post(
+    '/broadcasts/:slug/cancel',
+    asyncHandler(async (req, res) => {
+      const b = await c.broadcasts.findOne({ slug: req.params.slug })
+      if (!b) return res.status(404).json({ error: 'not_found' })
+      await c.broadcasts.updateOne({ _id: b._id }, { $set: { status: 'cancelled', updatedAt: new Date() } })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'broadcast.cancel',
+        resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
+      })
+      return res.json({ ok: true })
     }),
   )
 

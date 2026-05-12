@@ -36,6 +36,18 @@ export async function compileTemplate(mjml: string): Promise<CompileResult> {
   return { html: out.html, plainText, errors: out.errors ?? [] }
 }
 
+/**
+ * Compile Maily editor JSON (Tiptap-shape) → HTML via `@maily-to/render`, then
+ * derive plain text. Called at template publish time when the template was
+ * authored via the WYSIWYG editor.
+ */
+export async function compileMailyTemplate(content: unknown): Promise<CompileResult> {
+  const { render } = await import('@maily-to/render')
+  const html = await render(content as any)
+  const plainText = derivePlaintext(html)
+  return { html, plainText, errors: [] }
+}
+
 /** Auto-derive plain text from compiled HTML. */
 export function derivePlaintext(html: string): string {
   return htmlToText(html, {

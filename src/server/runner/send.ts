@@ -18,6 +18,7 @@ import {
 import { signUnsubscribeToken } from '../tokens.js'
 import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
+import { recordHealthCounter } from './health.js'
 import type { RunnerContext } from './index.js'
 
 export async function handleSend(
@@ -89,6 +90,7 @@ export async function handleSend(
       bodyHash: sha256(rendered.html),
       status: 'queued',
       renderedFrom: rendered.fromName ? { name: rendered.fromName, email: rendered.fromEmail } : undefined,
+      vars: step.vars ?? {},
     }),
   )
 
@@ -147,7 +149,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   const renderCtx = buildRenderContext(
     contact,
     run,
-    {}, // vars persisted on flow step if any; future: read from a snapshot
+    send.vars ?? {},
     ctx,
   )
   const rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
@@ -208,11 +210,13 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
         },
       },
     )
+    await recordHealthCounter(ctx, 'sent')
   } catch (err: any) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
       { $set: { status: 'failed', errorMessage: String(err?.message ?? err) } },
     )
+    await recordHealthCounter(ctx, 'failedToSend')
     if (ctx.config.onSendFailure) {
       try {
         await ctx.config.onSendFailure({ send, error: err })
@@ -273,6 +277,7 @@ interface NewSendInput {
   status: SendDoc['status']
   errorMessage?: string
   renderedFrom?: { name: string; email: string }
+  vars?: Record<string, unknown>
 }
 
 function newSendDoc(input: NewSendInput): SendDoc {
@@ -298,6 +303,7 @@ function newSendDoc(input: NewSendInput): SendDoc {
     bounceType: null,
     bounceReason: null,
     links: [],
+    vars: input.vars ?? {},
     openedAt: null,
     openCount: 0,
     firstClickAt: null,

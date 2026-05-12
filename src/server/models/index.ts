@@ -164,7 +164,10 @@ export interface FlowRunDoc {
 export interface TemplateDraft {
   subject: string
   preheader: string
+  /** MJML source (when template is authored as MJML). Empty string if Maily-authored. */
   mjml: string
+  /** Maily editor JSON (when template is authored via the WYSIWYG editor). null otherwise. */
+  editorJson: Record<string, unknown> | null
   notes: string
   lastModifiedBy: string
   lastModifiedAt: Date
@@ -183,7 +186,10 @@ export interface TemplateDoc {
   subject: string
   preheader: string
   body: {
+    /** MJML source (set when published from MJML). */
     mjml: string
+    /** Maily editor JSON (set when published from the WYSIWYG editor). null otherwise. */
+    editorJson: Record<string, unknown> | null
     html: string
     plainText: string
     compiledAt: Date | null
@@ -253,6 +259,8 @@ export interface SendDoc {
   bounceReason: string | null
   /** Pre-send map: every rewritten link's linkId → original URL. Lookup target on click. */
   links: Array<{ linkId: string; url: string }>
+  /** Render-time vars from the flow step or one-off send. Re-applied at dispatch. */
+  vars: Record<string, unknown>
   openedAt: Date | null
   openCount: number
   firstClickAt: Date | null
@@ -293,6 +301,8 @@ export interface BroadcastDoc {
   confirmedAt: Date | null
   confirmedBy: string | null
   recipientCount: number | null
+  /** When true, dispatch fires each recipient at their local-timezone equivalent of `scheduledAt`. */
+  respectRecipientTimezone?: boolean
   stats: {
     sent: number
     delivered: number

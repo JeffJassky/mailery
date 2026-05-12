@@ -8,21 +8,84 @@ import { useLive } from '../lib/use-live'
 
 export function Templates({ setRoute }: any) {
   const [tab, setTab] = React.useState('all')
-  const { data: templates } = useLive(() => api.templates(), sample.templates)
+  const { data: templates, refetch } = useLive(() => api.templates(), sample.templates)
   const filtered = templates.filter((t: any) => (tab === 'all' ? true : t.kind === tab))
+
+  const [creating, setCreating] = React.useState(false)
+  const [createForm, setCreateForm] = React.useState({ slug: '', name: '', kind: 'marketing' as 'marketing' | 'transactional', subject: '' })
+  const [createError, setCreateError] = React.useState<string | null>(null)
+
+  async function submitCreate(e: React.FormEvent) {
+    e.preventDefault()
+    setCreateError(null)
+    try {
+      await api.createTemplate({
+        slug: createForm.slug.trim(),
+        name: createForm.name.trim(),
+        kind: createForm.kind,
+        subject: createForm.subject.trim(),
+      })
+      setCreating(false)
+      setCreateForm({ slug: '', name: '', kind: 'marketing', subject: '' })
+      refetch()
+      setRoute({ screen: 'template-editor', slug: createForm.slug.trim() })
+    } catch (err: any) {
+      setCreateError(String(err?.message ?? err))
+    }
+  }
 
   return (
     <>
       <PageHead
         title="Templates"
-        desc="Email content · MJML source, auto-derived plain text."
+        desc="Email content · MJML source or Maily WYSIWYG."
         actions={
           <>
             <button className="btn"><Icons.Code size={14} />Import MJML</button>
-            <button className="btn btn-primary"><Icons.Plus size={14} />New template</button>
+            <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New template</button>
           </>
         }
       />
+
+      {creating && (
+        <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+          <div className="card-head" style={{ padding: 0, marginBottom: 12 }}>
+            <span className="card-title">New template</span>
+            <span className="grow" />
+            <button className="icon-btn" onClick={() => setCreating(false)}><Icons.X size={14} /></button>
+          </div>
+          <form onSubmit={submitCreate} className="vstack" style={{ gap: 12 }}>
+            <div className="hstack" style={{ gap: 12 }}>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Slug</label>
+                <input className="input" placeholder="welcome-day-1" value={createForm.slug} onChange={(e) => setCreateForm({ ...createForm, slug: e.target.value })} required />
+              </div>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Name</label>
+                <input className="input" placeholder="Welcome · day 1" value={createForm.name} onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} required />
+              </div>
+            </div>
+            <div className="hstack" style={{ gap: 12 }}>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Kind</label>
+                <select className="select" value={createForm.kind} onChange={(e) => setCreateForm({ ...createForm, kind: e.target.value as 'marketing' | 'transactional' })}>
+                  <option value="marketing">Marketing</option>
+                  <option value="transactional">Transactional</option>
+                </select>
+              </div>
+              <div className="field" style={{ flex: 2, marginBottom: 0 }}>
+                <label className="field-label">Subject</label>
+                <input className="input" placeholder="Welcome to Mailery" value={createForm.subject} onChange={(e) => setCreateForm({ ...createForm, subject: e.target.value })} />
+              </div>
+            </div>
+            {createError && <div className="text-xs" style={{ color: 'var(--red-fg)' }}>{createError}</div>}
+            <div className="hstack" style={{ gap: 8 }}>
+              <button type="submit" className="btn btn-primary">Create + open editor</button>
+              <button type="button" className="btn" onClick={() => setCreating(false)}>Cancel</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className="tabs">
         <div className={'tab' + (tab === 'all' ? ' active' : '')} onClick={() => setTab('all')}>All<span className="tab-count">{templates.length}</span></div>

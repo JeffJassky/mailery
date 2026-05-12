@@ -69,6 +69,7 @@ export default defineConfig({
           text: 'Operating',
           items: [
             { text: 'Providers', link: '/guide/providers' },
+            { text: 'Deliverability', link: '/guide/deliverability' },
             { text: 'Deployment', link: '/guide/deployment' },
             { text: 'Admin UI', link: '/guide/admin-ui' },
             { text: 'Testing', link: '/guide/testing' },

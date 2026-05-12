@@ -31,7 +31,7 @@ beforeAll(async () => {
     providerOverride: null,
     subject: 'Hi',
     preheader: '',
-    body: { mjml: '', html: compiled.html, plainText: compiled.plainText, compiledAt: new Date() },
+    body: { mjml: '', html: compiled.html, plainText: compiled.plainText, compiledAt: new Date(), editorJson: null },
     variablesSchema: {},
     draft: null,
     tags: [],

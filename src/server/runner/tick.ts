@@ -6,6 +6,9 @@
 
 import { processNewlyFiredEventTriggers } from './triggers.js'
 import { sweepStrandedFlowRuns } from './sweep.js'
+import { processScheduledBroadcasts as dispatchScheduled } from './broadcasts.js'
+import { evaluateHealth } from './health.js'
+import { promoteSoftBounces } from './bounce-promotion.js'
 import type { RunnerContext } from './index.js'
 
 export async function runTick(ctx: RunnerContext): Promise<void> {
@@ -20,6 +23,12 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await processScheduledBroadcasts(ctx).catch((err) => {
     console.error('mailery: broadcast dispatch failed', err)
+  })
+  await evaluateHealth(ctx).catch((err) => {
+    console.error('mailery: health evaluation failed', err)
+  })
+  await promoteSoftBounces(ctx).catch((err) => {
+    console.error('mailery: soft-bounce promotion failed', err)
   })
 }
 
@@ -72,8 +81,5 @@ async function drainOutbox(ctx: RunnerContext): Promise<void> {
  * count exceeds the configured cap (broadcastEnqueueMaxWaiting).
  */
 async function processScheduledBroadcasts(ctx: RunnerContext): Promise<void> {
-  // V1: stub — broadcast dispatch implementation lands alongside the broadcast
-  // REST endpoints in Phase 2. Leaves the scheduling row in place; the next
-  // tick will retry until human intervention.
-  void ctx
+  await dispatchScheduled(ctx)
 }

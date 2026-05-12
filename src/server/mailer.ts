@@ -37,7 +37,7 @@ import {
 } from './models/index.js'
 import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
-import { sha256Hex } from './tokens.js'
+import { sha256Hex, signDoiToken } from './tokens.js'
 import {
   closeBullQueues,
   closeQueues,
@@ -309,6 +309,16 @@ export class Mailer {
     const status = this.config.requireDoubleOptIn ? 'pending_doi' : 'subscribed'
     const now = new Date()
 
+    // Generate a DOI token up front when DOI is required. We store its hash
+    // (not the raw token) on the subscription doc for audit.
+    let doiToken: string | null = null
+    let doiTokenHash: string | null = null
+    if (status === 'pending_doi') {
+      const expiresAt = new Date(now.getTime() + this.config.doiTokenLifetimeDays * 86_400_000)
+      doiToken = signDoiToken({ externalId: parsed.externalId, expiresAt }, this.config.unsubscribeSecret)
+      doiTokenHash = sha256Hex(doiToken)
+    }
+
     await this.collections.subscriptions.updateOne(
       { externalId: parsed.externalId },
       {
@@ -318,6 +328,7 @@ export class Mailer {
           emailAtSubscribe: contact.email,
           subscribedAt: status === 'subscribed' ? (parsed.consentTimestamp ?? now) : null,
           updatedAt: now,
+          ...(doiTokenHash ? { doiTokenHash, doiRequestedAt: now } : {}),
         },
         $setOnInsert: {
           externalId: parsed.externalId,
@@ -325,7 +336,7 @@ export class Mailer {
           unsubscribedAt: null,
           unsubscribeReason: null,
           doiTokenHash: null,
-          doiRequestedAt: status === 'pending_doi' ? now : null,
+          doiRequestedAt: null,
           doiConfirmedAt: null,
           doiIp: parsed.consentIp ?? null,
           doiUserAgent: parsed.consentUserAgent ?? null,
@@ -333,6 +344,27 @@ export class Mailer {
       },
       { upsert: true },
     )
+
+    // Send the DOI confirmation email (best-effort — failures here don't
+    // unwind the subscription; the host can poll pending DOI rows + re-fire).
+    if (status === 'pending_doi' && doiToken) {
+      const tpl = await this.collections.templates.findOne({ slug: this.config.doiTemplateSlug })
+      if (!tpl) {
+        console.warn(`mailery: DOI required but template "${this.config.doiTemplateSlug}" not found — skipping confirmation email`)
+        return
+      }
+      const dedupeKey = `doi:${parsed.externalId}:${now.toISOString().slice(0, 10)}`
+      try {
+        await this.sendOneOff({
+          templateSlug: tpl.slug,
+          externalId: parsed.externalId,
+          vars: { confirmDoiUrl: `${this.config.publicUrl}/m/confirm-doi/${doiToken}` },
+          dedupeKey,
+        })
+      } catch (err) {
+        console.error('mailery: DOI confirmation send failed', err)
+      }
+    }
   }
 
   async unsubscribe(email: string, opts: Omit<UnsubscribeInput, 'email'>): Promise<void> {
@@ -533,6 +565,7 @@ export class Mailer {
       bounceType: null,
       bounceReason: null,
       links: [],
+      vars: parsed.vars ?? {},
       openedAt: null,
       openCount: 0,
       firstClickAt: null,
@@ -625,6 +658,10 @@ export class Mailer {
 
     for (const evt of batch) {
       try {
+        // The stored `raw` wraps the normalized event we captured at ingest;
+        // pull details back out so applyWebhookEvent has the bounce reason etc.
+        const normalized = (evt.raw as any)?.normalized
+        const details = normalized?.details ?? {}
         await applyWebhookEvent(
           {
             type: evt.normalizedType,
@@ -632,7 +669,7 @@ export class Mailer {
             providerMessageId: evt.providerMessageId,
             email: evt.email,
             occurredAt: evt.occurredAt,
-            details: {},
+            details,
           },
           this.runnerContext,
         )

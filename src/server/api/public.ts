@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { ObjectId } from 'mongodb'
 
-import { sha256Hex, verifyUnsubscribeToken } from '../tokens.js'
+import { sha256Hex, verifyUnsubscribeToken, verifyDoiToken } from '../tokens.js'
 import type { Mailer } from '../mailer.js'
 
 export interface PublicRouterOptions {
@@ -173,6 +173,40 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   })
 
   // -------------------------------------------------------------------------
+  // GET /confirm-doi/:token
+  // -------------------------------------------------------------------------
+  router.get('/confirm-doi/:token', async (req: Request, res: Response) => {
+    const token = (req.params as any).token as string
+    const decoded = verifyDoiToken(token, mailer.config.unsubscribeSecret)
+    if (!decoded) {
+      return res.status(400).type('html').send('<!doctype html><html><body><p>Confirmation link is invalid or expired.</p></body></html>')
+    }
+    const now = new Date()
+    const result = await mailer.collections.subscriptions.updateOne(
+      { externalId: decoded.externalId, status: 'pending_doi' },
+      {
+        $set: {
+          status: 'subscribed',
+          subscribedAt: now,
+          doiConfirmedAt: now,
+          doiIp: req.ip ?? null,
+          doiUserAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+          updatedAt: now,
+        },
+      },
+    )
+    if (result.matchedCount === 0) {
+      return res.status(200).type('html').send('<!doctype html><html><body><p>Already confirmed. Thanks.</p></body></html>')
+    }
+    try {
+      await mailer.fire('subscription.confirmed', decoded.externalId, {}, `doi-confirmed:${decoded.externalId}`)
+    } catch {
+      /* swallow — subscription is confirmed regardless */
+    }
+    return res.status(200).type('html').send('<!doctype html><html><body><p>Thanks — you\'re subscribed.</p></body></html>')
+  })
+
+  // -------------------------------------------------------------------------
   // POST /webhooks/:provider
   // -------------------------------------------------------------------------
   router.post('/webhooks/:provider', async (req: Request, res: Response) => {
@@ -192,6 +226,10 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     // Always 200 fast — fail-open, retry inbound is wasted bandwidth.
     res.status(200).end()
 
+    // Preserve the original provider payload alongside each normalized event so the
+    // audit trail isn't reduced to just our extracted fields. The raw body is the
+    // full provider response array; we record it once per parsed event for clarity.
+    const rawBodyRef = req.body as unknown
     for (const evt of events) {
       try {
         await mailer.collections.webhookEvents.updateOne(
@@ -207,7 +245,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
               occurredAt: evt.occurredAt,
               receivedAt: new Date(),
               processed: false,
-              raw: evt.details,
+              raw: { normalized: evt, providerBody: rawBodyRef },
             },
           },
           { upsert: true },

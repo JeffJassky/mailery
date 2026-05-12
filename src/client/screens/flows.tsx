@@ -8,7 +8,28 @@ import { useLive } from '../lib/use-live'
 
 export function Flows({ setRoute }: any) {
   const [tab, setTab] = React.useState('all')
-  const { data: flows } = useLive(() => api.flows(), sample.flows)
+  const { data: flows, refetch } = useLive(() => api.flows(), sample.flows)
+  const [creating, setCreating] = React.useState(false)
+  const [createForm, setCreateForm] = React.useState({ slug: '', name: '', eventName: '', goal: 'activation' })
+  const [creatingError, setCreatingError] = React.useState<string | null>(null)
+
+  async function submitCreate(e: React.FormEvent) {
+    e.preventDefault()
+    setCreatingError(null)
+    try {
+      await api.createFlow({
+        slug: createForm.slug.trim(),
+        name: createForm.name.trim(),
+        trigger: { eventName: createForm.eventName.trim(), once: true },
+        goal: createForm.goal,
+      })
+      setCreating(false)
+      setCreateForm({ slug: '', name: '', eventName: '', goal: 'activation' })
+      refetch()
+    } catch (err: any) {
+      setCreatingError(String(err?.message ?? err))
+    }
+  }
 
   const filtered = flows.filter((f: any) =>
     tab === 'all' ? true : tab === 'enabled' ? f.enabled : !f.enabled,
@@ -17,14 +38,57 @@ export function Flows({ setRoute }: any) {
     <>
       <PageHead
         title="Flows"
-        desc="Event-triggered and segment-based automations."
+        desc="Event-triggered automations."
         actions={
           <>
             <button className="btn"><Icons.Download size={14} />Export JSON</button>
-            <button className="btn btn-primary"><Icons.Plus size={14} />New flow</button>
+            <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New flow</button>
           </>
         }
       />
+
+      {creating && (
+        <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+          <div className="card-head" style={{ padding: 0, marginBottom: 12 }}>
+            <span className="card-title">New flow</span>
+            <span className="grow" />
+            <button className="icon-btn" onClick={() => setCreating(false)}><Icons.X size={14} /></button>
+          </div>
+          <form onSubmit={submitCreate} className="vstack" style={{ gap: 12 }}>
+            <div className="hstack" style={{ gap: 12 }}>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Slug</label>
+                <input className="input" placeholder="welcome-series" value={createForm.slug} onChange={(e) => setCreateForm({ ...createForm, slug: e.target.value })} required />
+              </div>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Name</label>
+                <input className="input" placeholder="Welcome Series" value={createForm.name} onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} required />
+              </div>
+            </div>
+            <div className="hstack" style={{ gap: 12 }}>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Trigger event</label>
+                <input className="input" placeholder="Created" value={createForm.eventName} onChange={(e) => setCreateForm({ ...createForm, eventName: e.target.value })} required />
+              </div>
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="field-label">Goal</label>
+                <select className="select" value={createForm.goal} onChange={(e) => setCreateForm({ ...createForm, goal: e.target.value })}>
+                  <option>activation</option>
+                  <option>conversion</option>
+                  <option>retention</option>
+                  <option>reactivation</option>
+                  <option>transactional</option>
+                </select>
+              </div>
+            </div>
+            {creatingError && <div className="text-xs" style={{ color: 'var(--red-fg)' }}>{creatingError}</div>}
+            <div className="hstack" style={{ gap: 8 }}>
+              <button type="submit" className="btn btn-primary">Create (disabled, draft only)</button>
+              <button type="button" className="btn" onClick={() => setCreating(false)}>Cancel</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className="tabs">
         <div className={'tab' + (tab === 'all' ? ' active' : '')} onClick={() => setTab('all')}>All<span className="tab-count">{flows.length}</span></div>

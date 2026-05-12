@@ -59,6 +59,10 @@ export interface MailerConfig {
   requireDoubleOptIn?: boolean
   unsubscribeTokenLifetimeDays?: number
   transactionalRespectUnsubscribe?: boolean
+  /** Slug of the transactional template sent for DOI confirmation. Defaults to 'doi-confirmation'. */
+  doiTemplateSlug?: string
+  /** How long the DOI token stays valid. Default 7 days. */
+  doiTokenLifetimeDays?: number
 
   // ---- Circuit breaker ------------------------------------------------------
   circuitBreaker?: Partial<CircuitBreakerThresholds>
@@ -98,6 +102,8 @@ export type ResolvedConfig = Required<
     | 'requireDoubleOptIn'
     | 'unsubscribeTokenLifetimeDays'
     | 'transactionalRespectUnsubscribe'
+    | 'doiTemplateSlug'
+    | 'doiTokenLifetimeDays'
     | 'broadcastConfirmationThreshold'
     | 'broadcastEnqueueBatchSize'
     | 'broadcastEnqueueMaxWaiting'
@@ -123,6 +129,8 @@ export const DEFAULTS = {
   requireDoubleOptIn: false,
   unsubscribeTokenLifetimeDays: 90,
   transactionalRespectUnsubscribe: false,
+  doiTemplateSlug: 'doi-confirmation',
+  doiTokenLifetimeDays: 7,
   broadcastConfirmationThreshold: 1000,
   broadcastEnqueueBatchSize: 1000,
   broadcastEnqueueMaxWaiting: 5000,
@@ -156,6 +164,8 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     requireDoubleOptIn: c.requireDoubleOptIn ?? DEFAULTS.requireDoubleOptIn,
     unsubscribeTokenLifetimeDays: c.unsubscribeTokenLifetimeDays ?? DEFAULTS.unsubscribeTokenLifetimeDays,
     transactionalRespectUnsubscribe: c.transactionalRespectUnsubscribe ?? DEFAULTS.transactionalRespectUnsubscribe,
+    doiTemplateSlug: c.doiTemplateSlug ?? DEFAULTS.doiTemplateSlug,
+    doiTokenLifetimeDays: c.doiTokenLifetimeDays ?? DEFAULTS.doiTokenLifetimeDays,
     broadcastConfirmationThreshold: c.broadcastConfirmationThreshold ?? DEFAULTS.broadcastConfirmationThreshold,
     broadcastEnqueueBatchSize: c.broadcastEnqueueBatchSize ?? DEFAULTS.broadcastEnqueueBatchSize,
     broadcastEnqueueMaxWaiting: c.broadcastEnqueueMaxWaiting ?? DEFAULTS.broadcastEnqueueMaxWaiting,

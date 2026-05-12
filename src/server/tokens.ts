@@ -82,3 +82,54 @@ function b64urlDecode(s: string): Buffer {
 export function sha256Hex(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex')
 }
+
+// ---------------------------------------------------------------------------
+// Double opt-in tokens
+// ---------------------------------------------------------------------------
+
+export interface DoiTokenPayload {
+  externalId: string
+  expiresAt: Date
+}
+
+/**
+ * Sign a DOI confirmation token. Same shape as the unsubscribe token, but
+ * scoped to "this externalId confirmed their subscription."
+ */
+export function signDoiToken(payload: DoiTokenPayload, secret: string): string {
+  const body = JSON.stringify({
+    i: payload.externalId,
+    x: payload.expiresAt.getTime(),
+    k: 'doi',
+  })
+  const bodyB64 = b64url(Buffer.from(body, 'utf8'))
+  const hmac = crypto.createHmac('sha256', secret).update(bodyB64).digest()
+  return `${bodyB64}.${b64url(hmac)}`
+}
+
+export function verifyDoiToken(token: string, secret: string, now: Date = new Date()): DoiTokenPayload | null {
+  const parts = token.split('.')
+  if (parts.length !== 2) return null
+  const [bodyB64, sigB64] = parts as [string, string]
+
+  const expected = crypto.createHmac('sha256', secret).update(bodyB64).digest()
+  let actual: Buffer
+  try {
+    actual = b64urlDecode(sigB64)
+  } catch {
+    return null
+  }
+  if (expected.length !== actual.length) return null
+  if (!crypto.timingSafeEqual(expected, actual)) return null
+
+  let body: { i?: string; x?: number; k?: string }
+  try {
+    body = JSON.parse(b64urlDecode(bodyB64).toString('utf8'))
+  } catch {
+    return null
+  }
+  if (!body.i || typeof body.x !== 'number' || body.k !== 'doi') return null
+  if (body.x < now.getTime()) return null
+
+  return { externalId: body.i, expiresAt: new Date(body.x) }
+}

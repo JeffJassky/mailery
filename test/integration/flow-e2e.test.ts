@@ -55,7 +55,7 @@ describe('end-to-end flow run', () => {
       providerOverride: null,
       subject: 'Hi {{contact.fields.firstName}}',
       preheader: 'Welcome',
-      body: { mjml: '', html: tplCompile.html, plainText: tplCompile.plainText, compiledAt: new Date() },
+      body: { mjml: '', editorJson: null, html: tplCompile.html, plainText: tplCompile.plainText, compiledAt: new Date() },
       variablesSchema: {},
       draft: null,
       tags: [],

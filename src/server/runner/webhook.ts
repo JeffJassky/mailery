@@ -6,6 +6,7 @@
 import type { NormalizedEvent } from '../../shared/types.js'
 import type { RunnerContext } from './index.js'
 import { sha256Hex } from '../tokens.js'
+import { recordHealthCounter } from './health.js'
 
 export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerContext): Promise<void> {
   const send = await ctx.collections.sends.findOne(
@@ -23,6 +24,7 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
           { $set: { status: 'delivered', deliveredAt: event.occurredAt } },
         )
       }
+      await recordHealthCounter(ctx, 'delivered')
       break
 
     case 'open':
@@ -80,6 +82,8 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
           { $set: { status: 'bounced', updatedAt: new Date() } },
         )
       }
+      await recordHealthCounter(ctx, 'bounced')
+      await recordHealthCounter(ctx, bounceType === 'hard' ? 'hardBounced' : 'softBounced')
       break
     }
 
@@ -96,6 +100,7 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
         { emailAtSubscribe: event.email },
         { $set: { status: 'complained', updatedAt: new Date() } },
       )
+      await recordHealthCounter(ctx, 'complained')
       break
 
     case 'unsubscribe':
