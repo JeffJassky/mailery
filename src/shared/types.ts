@@ -125,6 +125,8 @@ export interface NormalizedEvent {
 
 export interface MailProvider {
   readonly name: string
+  /** Per-provider send rate cap (per second). Used by the send-queue rate limiter. */
+  readonly sendRatePerSecond?: number
   send(args: SendArgs): Promise<SendResult>
   verifyWebhook(rawBody: Buffer, headers: Record<string, string>): Promise<boolean>
   parseWebhookEvents(payload: unknown, headers: Record<string, string>): NormalizedEvent[]
