@@ -16,6 +16,12 @@ export default defineConfig({
       },
     },
   },
+  markdown: {
+    // MJML is XML-shaped; alias it to HTML so Shiki highlights it correctly.
+    languageAlias: {
+      mjml: 'html',
+    },
+  },
   head: [
     ['link', { rel: 'icon', href: '/mailery/favicon.ico' }],
     ['meta', { name: 'theme-color', content: '#f97316' }],
