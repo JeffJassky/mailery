@@ -6,7 +6,11 @@ import { Dashboard } from './screens/dashboard'
 import { Flows } from './screens/flows'
 import { FlowDetail } from './screens/flow-detail'
 import { Templates } from './screens/templates'
-import { TemplateEditor } from './screens/template-editor'
+// Maily editor is heavy (~1MB before split). Lazy-load it so the rest of the
+// SPA stays fast — the Maily chunk only loads when a user opens a template.
+const TemplateEditor = React.lazy(() =>
+  import('./screens/template-editor').then((m) => ({ default: m.TemplateEditor })),
+)
 import { Broadcasts } from './screens/broadcasts'
 import { BroadcastNew } from './screens/broadcast-new'
 import { Contacts } from './screens/contacts'
@@ -25,7 +29,14 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
   flows:             { Comp: (_r, setRoute) => <Flows setRoute={setRoute} />,                           crumbs: () => ['Mailery', 'Flows'] },
   'flow-detail':     { Comp: (r, setRoute) => <FlowDetail slug={r.slug} setRoute={setRoute} />,         crumbs: (r) => ['Mailery', 'Flows', r.slug || 'activation-rescue'] },
   templates:         { Comp: (_r, setRoute) => <Templates setRoute={setRoute} />,                       crumbs: () => ['Mailery', 'Templates'] },
-  'template-editor': { Comp: (r, setRoute) => <TemplateEditor slug={r.slug} setRoute={setRoute} />,     crumbs: (r) => ['Mailery', 'Templates', r.slug || 'welcome-1'] },
+  'template-editor': {
+    Comp: (r, setRoute) => (
+      <React.Suspense fallback={<div style={{ padding: 32, color: 'var(--fg-subtle)' }}>Loading editor…</div>}>
+        <TemplateEditor slug={r.slug} setRoute={setRoute} />
+      </React.Suspense>
+    ),
+    crumbs: (r) => ['Mailery', 'Templates', r.slug || 'welcome-1'],
+  },
   broadcasts:        { Comp: (_r, setRoute) => <Broadcasts setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Broadcasts'] },
   'broadcast-new':   { Comp: (_r, setRoute) => <BroadcastNew setRoute={setRoute} />,                    crumbs: () => ['Mailery', 'Broadcasts', 'New'] },
   contacts:          { Comp: (_r, setRoute) => <Contacts setRoute={setRoute} />,                        crumbs: () => ['Mailery', 'Contacts'] },
