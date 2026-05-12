@@ -39,12 +39,15 @@ import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
 import { sha256Hex } from './tokens.js'
 import {
+  closeBullQueues,
   closeQueues,
   closeWorkers,
   createQueues,
   createWorkers,
   makeRedis,
+  noopQueues,
   scheduleTick,
+  type BullQueues,
   type Queues,
   type Workers,
 } from './queues/index.js'
@@ -61,12 +64,13 @@ export class Mailer {
   readonly collections: Collections
   readonly adapter: ContactAdapter
   readonly providers: Record<string, MailProvider>
-  readonly redis: IORedis
+  readonly redis: IORedis | null
   readonly queues: Queues
   readonly config: ResolvedConfig
   readonly events: EventRegistry
 
   private workers: Workers | null = null
+  private bullQueues: BullQueues | null
   private runnerContext: RunnerContext
 
   private constructor(args: {
@@ -75,8 +79,9 @@ export class Mailer {
     collections: Collections
     adapter: ContactAdapter
     providers: Record<string, MailProvider>
-    redis: IORedis
+    redis: IORedis | null
     queues: Queues
+    bullQueues: BullQueues | null
     events: EventRegistry
   }) {
     this.config = args.config
@@ -86,6 +91,7 @@ export class Mailer {
     this.providers = args.providers
     this.redis = args.redis
     this.queues = args.queues
+    this.bullQueues = args.bullQueues
     this.events = args.events
 
     this.runnerContext = {
@@ -108,9 +114,23 @@ export class Mailer {
     const collections = getCollections(config.db, config.collectionPrefix)
     await ensureIndexes(config.db, config.collectionPrefix)
 
-    const redis = makeRedis(config.redis)
-    const queues = createQueues(redis)
-    await scheduleTick(queues, config.tickIntervalSeconds)
+    // Allow opt-out from BullMQ entirely. Useful for tests, and for hosts that
+    // want to run mailer in a queueless mode (synchronous-only). Triggered by
+    // `redis: null` in the config.
+    let redis: IORedis | null = null
+    let queues: Queues
+    let bullQueues: BullQueues | null = null
+    if (config.redis === null) {
+      queues = noopQueues()
+    } else {
+      redis = makeRedis(config.redis)
+      const created = createQueues(redis)
+      queues = created.queues
+      bullQueues = created.bullQueues
+      if (!config.workerless) {
+        await scheduleTick(bullQueues, config.tickIntervalSeconds)
+      }
+    }
 
     return new Mailer({
       config,
@@ -120,6 +140,7 @@ export class Mailer {
       providers: config.providers,
       redis,
       queues,
+      bullQueues,
       events: new EventRegistry(),
     })
   }
@@ -493,6 +514,7 @@ export class Mailer {
 
   async startWorkers(): Promise<void> {
     if (this.workers) return
+    if (!this.redis) throw new Error('startWorkers requires a Redis connection (redis was null in config)')
     const provider = this.providers[this.config.defaultProvider]
     const sendRate = provider?.sendRatePerSecond ?? this.config.sendRatePerSecond
 
@@ -551,8 +573,15 @@ export class Mailer {
       await closeWorkers(this.workers)
       this.workers = null
     }
-    await closeQueues(this.queues)
-    await this.redis.quit()
+    if (this.bullQueues) {
+      await closeBullQueues(this.bullQueues)
+      this.bullQueues = null
+    } else {
+      await closeQueues(this.queues)
+    }
+    if (this.redis) {
+      await this.redis.quit().catch(() => {})
+    }
   }
 
   /** Used internally by the admin router and tests; not part of the public API. */

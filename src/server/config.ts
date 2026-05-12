@@ -3,6 +3,7 @@
  */
 
 import type { Db } from 'mongodb'
+import type IORedis from 'ioredis'
 import type Handlebars from 'handlebars'
 import type {
   ContactAdapter,
@@ -36,7 +37,11 @@ export interface MailerConfig {
   adapter: ContactAdapter
 
   // ---- Queue ----------------------------------------------------------------
-  redis: RedisOptions
+  /**
+   * Connection options, a pre-built ioredis instance, or `null` to opt out of
+   * BullMQ entirely (synchronous-only mode — used by tests).
+   */
+  redis: RedisOptions | IORedis | null
 
   // ---- Providers ------------------------------------------------------------
   providers: Record<string, MailProvider>

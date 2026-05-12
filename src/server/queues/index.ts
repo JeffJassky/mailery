@@ -15,11 +15,46 @@ import IORedis, { type RedisOptions as IORedisOptions } from 'ioredis'
 
 import type { RedisOptions } from '../config.js'
 
+/**
+ * Minimal queue surface the runner depends on. Production wraps BullMQ; tests
+ * can supply a no-op implementation.
+ */
+export interface QueueAPI {
+  add(name: string, data: unknown, opts?: { delay?: number; attempts?: number; backoff?: { type: 'exponential'; delay: number }; jobId?: string }): Promise<unknown>
+  getWaitingCount(): Promise<number>
+  close(): Promise<void>
+}
+
 export interface Queues {
-  tick: Queue
-  advance: Queue
-  send: Queue
-  webhook: Queue
+  tick: QueueAPI
+  advance: QueueAPI
+  send: QueueAPI
+  webhook: QueueAPI
+}
+
+function adaptBullQueue(q: Queue): QueueAPI {
+  return {
+    add: (name, data, opts) => q.add(name, data, opts),
+    getWaitingCount: () => q.getWaitingCount(),
+    close: () => q.close(),
+  }
+}
+
+export function noopQueueAPI(): QueueAPI {
+  return {
+    add: async () => undefined,
+    getWaitingCount: async () => 0,
+    close: async () => undefined,
+  }
+}
+
+export function noopQueues(): Queues {
+  return {
+    tick: noopQueueAPI(),
+    advance: noopQueueAPI(),
+    send: noopQueueAPI(),
+    webhook: noopQueueAPI(),
+  }
 }
 
 export interface QueueNames {
@@ -30,18 +65,21 @@ export interface QueueNames {
 }
 
 export function namespacedQueueNames(prefix: string): QueueNames {
-  // BullMQ queue names — `mailer:` is the conventional namespace.
-  // The collection prefix is unrelated; BullMQ data lives in Redis.
+  // BullMQ disallows `:` in queue names; use dashes for the namespace.
   void prefix
   return {
-    tick: 'mailer:tick',
-    advance: 'mailer:advance',
-    send: 'mailer:send',
-    webhook: 'mailer:webhook',
+    tick: 'mailer-tick',
+    advance: 'mailer-advance',
+    send: 'mailer-send',
+    webhook: 'mailer-webhook',
   }
 }
 
-export function makeRedis(opts: RedisOptions): IORedis {
+export function makeRedis(opts: RedisOptions | IORedis): IORedis {
+  // Pre-built instance — used by tests with ioredis-mock and by hosts that
+  // want to share a connection with other parts of their app.
+  if (isRedisLike(opts)) return opts
+
   const config: IORedisOptions = {
     maxRetriesPerRequest: null, // BullMQ requirement
     enableReadyCheck: false,
@@ -60,21 +98,41 @@ export function makeRedis(opts: RedisOptions): IORedis {
   })
 }
 
-export function createQueues(redis: IORedis): Queues {
+function isRedisLike(x: unknown): x is IORedis {
+  return !!x && typeof x === 'object' && typeof (x as any).get === 'function' && typeof (x as any).set === 'function'
+}
+
+export function createQueues(redis: IORedis): { queues: Queues; bullQueues: BullQueues } {
   const names = namespacedQueueNames('')
   const qOpts: QueueOptions = { connection: redis }
-  return {
+  const bullQueues: BullQueues = {
     tick: new Queue(names.tick, qOpts),
     advance: new Queue(names.advance, qOpts),
     send: new Queue(names.send, qOpts),
     webhook: new Queue(names.webhook, qOpts),
   }
+  return {
+    queues: {
+      tick: adaptBullQueue(bullQueues.tick),
+      advance: adaptBullQueue(bullQueues.advance),
+      send: adaptBullQueue(bullQueues.send),
+      webhook: adaptBullQueue(bullQueues.webhook),
+    },
+    bullQueues,
+  }
 }
 
-/** Register the repeating mailer:tick job. Idempotent (BullMQ dedupes by jobId). */
-export async function scheduleTick(queues: Queues, intervalSeconds: number): Promise<void> {
-  await queues.tick.upsertJobScheduler(
-    'mailer:tick:repeat',
+export interface BullQueues {
+  tick: Queue
+  advance: Queue
+  send: Queue
+  webhook: Queue
+}
+
+/** Register the repeating mailer-tick job. Idempotent (BullMQ dedupes by jobId). */
+export async function scheduleTick(bullQueues: BullQueues, intervalSeconds: number): Promise<void> {
+  await bullQueues.tick.upsertJobScheduler(
+    'mailer-tick-repeat',
     { every: intervalSeconds * 1000 },
     { name: 'tick', data: {} },
   )
@@ -134,6 +192,10 @@ export function createWorkers(input: CreateWorkersInput): Workers {
 
 export async function closeQueues(queues: Queues): Promise<void> {
   await Promise.all([queues.tick.close(), queues.advance.close(), queues.send.close(), queues.webhook.close()])
+}
+
+export async function closeBullQueues(b: BullQueues): Promise<void> {
+  await Promise.all([b.tick.close(), b.advance.close(), b.send.close(), b.webhook.close()])
 }
 
 export async function closeWorkers(workers: Workers): Promise<void> {
