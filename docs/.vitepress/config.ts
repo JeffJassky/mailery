@@ -7,19 +7,22 @@ export default defineConfig({
   base: '/mailery/',
   lastUpdated: true,
   cleanUrls: true,
-  // Change Vue's template delimiters so {{ }} (Handlebars syntax in our examples)
-  // is treated as plain text in markdown, not Vue interpolation.
-  vue: {
-    template: {
-      compilerOptions: {
-        delimiters: ['{[{', '}]}'],
-      },
-    },
-  },
   markdown: {
     // MJML is XML-shaped; alias it to HTML so Shiki highlights it correctly.
     languageAlias: {
       mjml: 'html',
+    },
+    // Wrap inline code in `v-pre` so Handlebars `{{ }}` inside backticks
+    // isn't parsed as Vue interpolation. Fenced code blocks get v-pre by
+    // VitePress already; this fills in the inline-code gap.
+    config: (md) => {
+      const defaultInline = md.renderer.rules.code_inline
+      md.renderer.rules.code_inline = (tokens, idx, options, env, self) => {
+        const rendered = defaultInline
+          ? defaultInline(tokens, idx, options, env, self)
+          : self.renderToken(tokens, idx, options)
+        return rendered.replace(/^<code/, '<code v-pre')
+      }
     },
   },
   head: [
