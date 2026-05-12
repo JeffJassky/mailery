@@ -171,9 +171,13 @@ export async function setupSendgrid(opts: SetupSendgridOpts): Promise<SetupSendg
 
   // ---- Account-level: Enable Signed Event Webhook + fetch public key -----
   info('SendGrid → checking Signed Event Webhook…')
+  // SendGrid's GET /user/webhooks/event/settings/signed only returns
+  // `{ public_key }`. A non-empty key implies signing is already enabled —
+  // re-PATCHing `enabled: true` rotates the keypair, silently breaking
+  // signature verification everywhere the old key was deployed.
   const signed = await sg.getSignedWebhookSettings()
   let webhookKey: string
-  if (signed.enabled && signed.public_key) {
+  if (signed.public_key) {
     info('  = signing already enabled; reusing existing public key')
     webhookKey = signed.public_key
   } else {

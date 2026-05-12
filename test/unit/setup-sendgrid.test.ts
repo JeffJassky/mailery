@@ -62,10 +62,12 @@ function sgRoutes(opts: { existingDomain?: boolean; existingWebhookUrl?: string 
       body: { id: req.body?.domain === 'mail.example.com' ? 43 : 42, domain: req.body?.domain ?? 'example.com', subdomain: 'em', username: 'u1', valid: false, dns: SAMPLE_DNS },
     })],
     [/^POST .*\/whitelabel\/domains\/\d+\/validate$/, () => ({ status: 200, body: { valid: true } })],
-    [/^PATCH .*\/user\/webhooks\/event\/settings\/signed$/, () => { signingEnabled = true; return { status: 200, body: { enabled: true } } }],
+    [/^PATCH .*\/user\/webhooks\/event\/settings\/signed$/, () => { signingEnabled = true; return { status: 200, body: { enabled: true, public_key: PUBLIC_KEY } } }],
+    // Real SendGrid GET returns only `{ public_key }` — no `enabled` field.
+    // Empty string when signing is off; populated when on.
     [/^GET .*\/user\/webhooks\/event\/settings\/signed$/, () => ({
       status: 200,
-      body: signingEnabled ? { enabled: true, public_key: PUBLIC_KEY } : { enabled: false },
+      body: { public_key: signingEnabled ? PUBLIC_KEY : '' },
     })],
     [/^GET .*\/user\/webhooks\/event\/settings$/, () => ({
       status: 200,
@@ -196,6 +198,28 @@ describe('setupSendgrid', () => {
         fetchFn: fn,
         logger: {},
       })).rejects.toThrow(/already configured.*--force/)
+    })
+
+    it('does NOT re-enable signing (and rotate the key) when --force is set but signing is already on', async () => {
+      // Regression: --force is documented as "replace existing webhook URL".
+      // It used to also re-PATCH /signed which rotates SendGrid's keypair,
+      // silently breaking signature verification on inbound events.
+      const { fn, calls } = buildFetch(sgRoutes({
+        existingDomain: true,
+        existingWebhookUrl: 'https://OLD.example.com/m/webhooks/sendgrid',
+        signingEnabled: true,
+      }))
+      const result = await setupSendgrid({
+        domains: ['example.com'],
+        webhookUrl: 'https://NEW.example.com/m/webhooks/sendgrid',
+        force: true,
+        env: { SENDGRID_API_KEY: VALID_SG_KEY },
+        fetchFn: fn,
+        logger: {},
+      })
+      expect(result.webhookKey).toBe(PUBLIC_KEY)
+      const signedPatch = calls.filter((c) => c.method === 'PATCH' && /\/user\/webhooks\/event\/settings\/signed$/.test(c.url))
+      expect(signedPatch).toEqual([])
     })
 
     it('overwrites with --force', async () => {
