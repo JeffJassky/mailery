@@ -1,0 +1,58 @@
+{
+  "name": "mailery",
+  "version": "0.0.0",
+  "description": "Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, segmentation, tracking, and an admin UI you mount inside your Express app.",
+  "license": "MIT",
+  "author": "Jeff Jassky <jeff@jeffjassky.com>",
+  "homepage": "https://jeffjassky.github.io/mailery/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JeffJassky/mailery.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JeffJassky/mailery/issues"
+  },
+  "keywords": [
+    "email",
+    "automation",
+    "drip",
+    "newsletter",
+    "mongodb",
+    "express",
+    "mailchimp-alternative",
+    "mailerlite-alternative",
+    "self-hosted"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "yarn typecheck && yarn build",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitepress": "^1.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
