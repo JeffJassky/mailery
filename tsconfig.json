@@ -16,6 +16,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "tsup.config.ts", "vitest.config.ts"],
-  "exclude": ["node_modules", "dist", "docs"]
+  "include": ["src/server", "src/shared", "src/testing", "test", "tsup.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist", "docs", "src/client", "examples"]
 }

@@ -33,6 +33,7 @@ This document is the **design spec**. It precedes any implementation. The packag
 | 11 | [`configuration.md`](./11-configuration.md) | Initialization options, env vars, mounting. |
 | 12 | [`testing.md`](./12-testing.md) | Test strategy, fixtures, CI. |
 | 13 | [`roadmap.md`](./13-roadmap.md) | Phased build plan. |
+| 14 | [`admin-api.md`](./14-admin-api.md) | REST surface the React admin SPA consumes. |
 | ★ | [`INVARIANTS.md`](./INVARIANTS.md) | **Non-negotiable rules.** Every PR checks against these. |
 | ★ | [`DIRECT_DB.md`](./DIRECT_DB.md) | Advanced: configuring flows/templates via direct MongoDB writes. |
 

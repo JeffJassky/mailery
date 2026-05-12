@@ -1,29 +1,60 @@
 # 09 — Admin UI
 
-A mountable Express router. Server-rendered HTML + htmx for interactivity. No SPA bundle, no build step on consumer apps.
+A mountable Express router that serves a **prebuilt React SPA** and the REST endpoints the SPA consumes. No build step required in consumer apps — the SPA is bundled at library publish time and shipped inside the npm tarball.
 
 ## Mounting
 
 ```ts
-import { Mailer } from '@your-org/mailer'
+import { Mailer, createAdminRouter } from 'mailery'
 
 const mailer = await Mailer.init({ /* ... */ })
 
 // Gate with the host's existing auth middleware
-app.use('/admin/mailer', requireAdmin, mailer.adminRouter())
+app.use('/admin/mailer', requireAdmin, createAdminRouter())
 ```
 
-The router serves at any base path — `/admin/mailer`, `/internal/email`, whatever. URLs are relative within the router.
+The router mounts at exactly **`/admin/mailer`** in V1 — the SPA's asset URLs are baked in at build time. (Future: configurable mount path via runtime base-href injection.)
 
 ## Tech choices
 
-- **Server-rendered HTML** via simple Handlebars layouts (reused from the templating layer).
-- **htmx** (~14KB gzipped) for interactivity — partial page updates, form submissions, lazy-loaded panels.
-- **Alpine.js** (~7KB) for any small bits of client-side state (open/close menus, tab switching).
-- **Pico.css** or a tiny custom CSS file for styling — purposely minimal so it integrates visually into whatever host UI it's mounted under.
-- **No build step on consumer apps.** Static assets ship in the package and are served by the router (`/admin/mailer/static/*`).
+- **React 18** + Vite-bundled SPA, shipped as static files at `dist/admin/spa/index.html` + `dist/admin/spa/index-<hash>.{js,css}`.
+- **No bundler in consumer apps.** The host installs `mailery`, mounts the router, and the prebuilt SPA loads in the operator's browser.
+- **Bundle size**: ~232 KB JS / ~63 KB gzipped, ~18 KB CSS / ~4 KB gzipped (V1 baseline). Targets <300 KB gzipped through Phase 3.
+- **Hand-rolled CSS variables** for design tokens (see `src/client/styles.css`). No Tailwind, no CSS-in-JS. Tokens cover light + dark themes, accent color, density.
+- **Lucide-style hand-rolled icons** as inline SVG components (no icon-pack dependency).
+- **State management**: React local state. No Redux/Zustand. The screens are mostly read-only — REST fetch + render.
+- **Client-side routing**: simple `useState({ screen, slug, id })`. Hash-based URLs (future) for deep linking.
 
-The "no SPA, no build" choice is deliberate. The admin UI is for monitoring and small operations — not for being beautiful. Adding a React/Vue dependency would be the largest dependency the library has, for the smallest value-add.
+Why React over htmx: the mockup polish (see `plans/design/client/`) is past the threshold where server-rendered HTML feels like a downgrade. A 60 KB gzipped bundle behind your auth gate is acceptable for an admin surface.
+
+## Layout structure
+
+The SPA's source lives at `src/client/`:
+
+```
+src/client/
+├── index.html              # Vite entry
+├── vite.config.ts          # base: '/admin/mailer/_assets/'
+├── tsconfig.json
+├── main.tsx                # ReactDOM.createRoot mount
+├── app.tsx                 # routing + theme state
+├── components/
+│   ├── icons.tsx           # SVG icon set
+│   └── shell.tsx           # Sidebar, Topbar, PageHead, StatusPill
+├── screens/                # one file per route
+│   ├── dashboard.tsx
+│   ├── flows.tsx flow-detail.tsx
+│   ├── templates.tsx template-editor.tsx
+│   ├── broadcasts.tsx broadcast-new.tsx
+│   ├── contacts.tsx contact-detail.tsx
+│   ├── sends.tsx send-detail.tsx
+│   ├── suppressions.tsx audit.tsx health.tsx
+└── lib/
+    ├── api.ts              # fetch wrappers for /admin/mailer/api/*
+    └── mock.ts             # sample data for dev / Storybook
+```
+
+The build pipeline (`yarn build:client`) outputs to `dist/admin/spa/`. The server router (`src/server/api/admin.ts`) serves it.
 
 ## Views
 
@@ -179,16 +210,17 @@ Real-time view of `mailer_health`:
 - Recent trips (table)
 - Manual resume button (if tripped) — requires confirmation, audit-logged
 
-## htmx patterns
+## Live-update patterns
 
-Most pages are server-rendered full pages. Interactive bits use htmx partials:
+The SPA polls or subscribes for fresh data. V1 uses periodic GETs against the REST API (`14-admin-api.md`):
 
-- **Live preview pane** when editing a template: form fields have `hx-post="/templates/:slug/preview" hx-target="#preview-iframe" hx-trigger="keyup changed delay:500ms"`
-- **Live segment counts** when editing a broadcast or segment
-- **Inline status updates** on dashboard auto-refresh: `hx-get="/dashboard/widgets/health" hx-trigger="every 10s"`
-- **Audit log infinite scroll**: `hx-get="/audit?cursor=..." hx-trigger="revealed"`
+- **Dashboard health widget**: refreshes every 10s.
+- **Live segment counts** in the broadcast composer: debounced fetch on segment filter changes (500ms).
+- **Template editor preview pane**: debounced POST to `/api/templates/:slug/preview` on MJML/subject edits (500ms).
+- **Audit log infinite scroll**: paginated fetch on scroll-bottom.
+- **Sends log**: optional auto-refresh toggle (5s) on the live view.
 
-No build step. No bundler. The page source is readable when you View Source.
+V2 may upgrade to Server-Sent Events for true push, but polling is simpler and admins watching the dashboard tolerate 10s latency.
 
 ## Auth
 
@@ -200,13 +232,15 @@ function requireAdmin(req, res, next) {
   next()
 }
 
-app.use('/admin/mailer', requireAdmin, mailer.adminRouter())
+app.use('/admin/mailer', requireAdmin, createAdminRouter())
 ```
+
+The middleware runs before the router, so it covers both the SPA shell and the `/api/*` endpoints.
 
 If the host needs finer-grained permissions inside mailer (e.g. "this user can view but not publish"), pass a permission resolver:
 
 ```ts
-mailer.adminRouter({
+createAdminRouter({
   resolvePermissions: (req) => ({
     canPublishFlows: req.user.roles.includes('email-admin'),
     canSendBroadcasts: req.user.roles.includes('email-admin'),
@@ -216,11 +250,11 @@ mailer.adminRouter({
 })
 ```
 
-Permissions gate the relevant routes; insufficient permission returns 403. UI hides buttons the user can't activate.
+Permissions gate the relevant REST endpoints; insufficient permission returns 403. The SPA reads `GET /api/me/permissions` on boot and hides buttons the user can't activate.
 
 ## Per-request audit context
 
-Every admin-UI mutation grabs the requesting user from `req.user` (host-supplied) and writes it to `mailer_audit_log` as the `actor`. Source IP and User-Agent are recorded too.
+Every mutating REST call grabs the requesting user from `req.user` (host-supplied) and writes it to `mailer_audit_log` as the `actor`. Source IP and User-Agent are recorded too.
 
 The library exposes a hook to extract the actor name:
 
@@ -235,15 +269,13 @@ Defaults to `req.user?.id ?? 'unknown'`.
 
 ## Static assets
 
-The library bundles its CSS and JS as static files:
+The router serves the prebuilt SPA from `dist/admin/spa/` (shipped inside the npm package):
 
 ```
-/admin/mailer/static/pico.min.css
-/admin/mailer/static/htmx.min.js
-/admin/mailer/static/alpine.min.js
-/admin/mailer/static/highlight.min.js
-/admin/mailer/static/mailer.css            ← any custom styles
-/admin/mailer/static/mailer.js             ← any custom behaviors
+/admin/mailer/                      → index.html (SPA shell)
+/admin/mailer/_assets/index-*.js    → SPA bundle
+/admin/mailer/_assets/index-*.css   → styles
+/admin/mailer/api/*                 → JSON REST endpoints (see 14-admin-api.md)
 ```
 
-Served from the npm package via `express.static(node_modules_path)`. No CDN dependency.
+No CDN dependency. Vite-hashed filenames mean the `_assets/*` responses are `Cache-Control: public, max-age=31536000, immutable` — the browser caches them forever, and a new release invalidates everything by changing the hash.
