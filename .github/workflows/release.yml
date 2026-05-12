@@ -23,12 +23,11 @@ jobs:
           node-version: 22
           cache: yarn
           registry-url: 'https://registry.npmjs.org'
-      # Trusted publishing requires npm >= 11.5.1. Node 22's bundled npm may lag.
-      - run: npm install -g npm@latest
       - run: yarn install --frozen-lockfile
       - run: yarn typecheck
       - run: yarn test
       - run: yarn build
-      # npm CLI 11.5.1+ exchanges the GitHub OIDC token for a publish credential.
-      # No NPM_TOKEN secret needed — trust is configured on npmjs.com.
-      - run: npm publish --provenance --access public
+      # Trusted publishing requires npm >= 11.5.1. Node 22's bundled npm may lag,
+      # and `npm install -g npm@latest` has a known self-upgrade race on hosted
+      # runners — use npx so we don't mutate the global install.
+      - run: npx -y npm@latest publish --provenance --access public
