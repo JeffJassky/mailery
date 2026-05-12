@@ -52,20 +52,52 @@ const DEFAULT_CONTENT: JSONContent = {
 
 export function TemplateEditor({ slug = 'welcome-1' }: any) {
   const fallback = sample.templates.find((t) => t.slug === slug) ?? sample.templates[0]
-  const { data: tpl } = useLive(() => api.template(slug), fallback as any)
+  const { data: tpl, refetch } = useLive(() => api.template(slug), fallback as any)
 
   const [view, setView] = React.useState<'design' | 'source' | 'plaintext'>('design')
   const [editorJson, setEditorJson] = React.useState<JSONContent>(DEFAULT_CONTENT)
+  const [subject, setSubject] = React.useState<string>('')
+  const [preheader, setPreheader] = React.useState<string>('')
   const [dirty, setDirty] = React.useState(false)
+  const [status, setStatus] = React.useState<string>('')
+  const [busy, setBusy] = React.useState(false)
   const editorRef = React.useRef<TiptapEditor | null>(null)
+  const hydratedRef = React.useRef(false)
 
   const tplKind = (tpl as any)?.kind ?? 'marketing'
   const tplName = (tpl as any)?.name ?? slug
   const tplSlug = (tpl as any)?.slug ?? slug
-  const subject = (tpl as any)?.subject ?? `Welcome to Mailery, {{contact.fields.firstName}} 👋`
-  const preheader = (tpl as any)?.preheader ?? 'Three things to try in your first 5 minutes.'
+  const initialSubject = (tpl as any)?.draft?.subject ?? (tpl as any)?.subject ?? `Welcome to Mailery, {{contact.fields.firstName}} 👋`
+  const initialPreheader = (tpl as any)?.draft?.preheader ?? (tpl as any)?.preheader ?? 'Three things to try in your first 5 minutes.'
+  const initialEditorJson = (tpl as any)?.draft?.editorJson ?? (tpl as any)?.body?.editorJson ?? null
   const mjmlSource = (tpl as any)?.body?.mjml ?? (tpl as any)?.draft?.mjml ?? ''
   const plainText = (tpl as any)?.body?.plainText ?? ''
+
+  React.useEffect(() => {
+    if (hydratedRef.current) return
+    if (!tpl) return
+    hydratedRef.current = true
+    setSubject(initialSubject)
+    setPreheader(initialPreheader)
+    if (initialEditorJson) setEditorJson(initialEditorJson)
+  }, [tpl, initialSubject, initialPreheader, initialEditorJson])
+
+  async function publish() {
+    setBusy(true)
+    setStatus('Saving draft…')
+    try {
+      await api.updateTemplateDraft(slug, { subject, preheader, editorJson })
+      setStatus('Publishing…')
+      const out = await api.publishTemplate(slug)
+      setStatus(`Published v${out.version}`)
+      setDirty(false)
+      refetch()
+    } catch (e: any) {
+      setStatus(`Error: ${e?.message ?? String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <>
@@ -77,7 +109,8 @@ export function TemplateEditor({ slug = 'welcome-1' }: any) {
             <button className="btn"><Icons.Eye size={14} />Preview</button>
             <button className="btn"><Icons.Send size={14} />Test send</button>
             <button className="btn"><Icons.Copy size={14} />Duplicate</button>
-            <button className="btn btn-primary" disabled={!dirty}><Icons.Rocket size={14} />Publish</button>
+            <button className="btn btn-primary" disabled={busy} onClick={publish}><Icons.Rocket size={14} />Publish</button>
+            {status && <span className="text-xs subtle" style={{ marginLeft: 8 }}>{status}</span>}
           </>
         }
       />
@@ -99,11 +132,11 @@ export function TemplateEditor({ slug = 'welcome-1' }: any) {
           <div style={{ padding: 16 }}>
             <div className="field">
               <label className="field-label">Subject</label>
-              <input className="input" defaultValue={subject} onChange={() => setDirty(true)} />
+              <input className="input" value={subject} onChange={(e) => { setSubject(e.target.value); setDirty(true) }} />
             </div>
             <div className="field">
               <label className="field-label">Preheader</label>
-              <input className="input" defaultValue={preheader} onChange={() => setDirty(true)} />
+              <input className="input" value={preheader} onChange={(e) => { setPreheader(e.target.value); setDirty(true) }} />
             </div>
           </div>
 

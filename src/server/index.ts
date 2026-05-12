@@ -26,10 +26,22 @@ export type { PublicRouterOptions } from './api/public.js'
 // Templates (host apps may want compile + render directly for previews)
 export {
   compileTemplate,
+  compileMailyTemplate,
   derivePlaintext,
   renderTemplate,
   applyTracking,
 } from './templates/render.js'
+
+// Runner internals — exported so test harnesses and advanced hosts can drive
+// the runner inline. In production let `startWorkers()` invoke these.
+export {
+  runTick,
+  processOneRunStep,
+  dispatchSend,
+  applyWebhookEvent,
+  processNewlyFiredEventTriggers,
+  sweepStrandedFlowRuns,
+} from './runner/index.js'
 
 // Models (collection helpers, in case hosts need to query directly)
 export { getCollections, ensureIndexes } from './models/index.js'
