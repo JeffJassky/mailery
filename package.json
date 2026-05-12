@@ -1,6 +1,6 @@
 {
   "name": "mailery",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, tracking, suppression, and an admin UI you mount inside your Express app.",
   "license": "MIT",
   "author": "Jeff Jassky <jeff@jeffjassky.com>",
