@@ -105,6 +105,81 @@ export class Mailer {
     }
   }
 
+  /**
+   * Construct a Mailer from environment variables. Reads:
+   *
+   *   MAILER_MONGODB_URI                — Mongo connection string (required)
+   *   MAILER_MONGODB_DB                 — database name (optional; defaults to the URI default)
+   *   MAILER_REDIS_URL                  — Redis connection URL (required)
+   *   MAILER_PUBLIC_URL                 — base for tracking/unsub URLs (required)
+   *   MAILER_UNSUBSCRIBE_SECRET         — HMAC key (required)
+   *   MAILER_SENDER_ADDRESS             — postal address for CAN-SPAM (optional)
+   *   MAILER_FROM_NAME / MAILER_FROM_EMAIL
+   *   MAILER_DEFAULT_PROVIDER           — defaults to 'sendgrid' if SENDGRID_API_KEY is set
+   *   MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
+   *   MAILER_HOST_USERS_COLLECTION (default 'users')
+   *   MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
+   *   MAILER_HOST_USERS_ID_FIELD (default '_id')
+   *   MAILER_HOST_USERS_TAGS_FIELD
+   *   MAILER_HOST_USERS_TAGS_WRITABLE — '1' or 'true' to enable
+   *
+   * For anything beyond this (custom toContact, custom providers, hooks),
+   * use the programmatic init.
+   */
+  static async fromEnv(): Promise<Mailer> {
+    const env = process.env
+    const required = (k: string) => {
+      const v = env[k]
+      if (!v) throw new Error(`Mailer.fromEnv: missing env var ${k}`)
+      return v
+    }
+
+    const { MongoClient } = await import('mongodb')
+    const mongoClient = await MongoClient.connect(required('MAILER_MONGODB_URI'))
+    const db = env.MAILER_MONGODB_DB ? mongoClient.db(env.MAILER_MONGODB_DB) : mongoClient.db()
+
+    const { MongoContactAdapter } = await import('./adapters/mongo.js')
+    const adapter = new MongoContactAdapter({
+      db,
+      collection: env.MAILER_HOST_USERS_COLLECTION ?? 'users',
+      emailField: env.MAILER_HOST_USERS_EMAIL_FIELD ?? 'email',
+      idField: env.MAILER_HOST_USERS_ID_FIELD ?? '_id',
+      tagsField: env.MAILER_HOST_USERS_TAGS_FIELD,
+      tagsWritable:
+        env.MAILER_HOST_USERS_TAGS_WRITABLE === '1' || env.MAILER_HOST_USERS_TAGS_WRITABLE === 'true',
+    })
+
+    const providers: Record<string, MailProvider> = {}
+    if (env.MAILER_SENDGRID_API_KEY) {
+      const { SendGridProvider } = await import('./providers/sendgrid.js')
+      providers.sendgrid = new SendGridProvider({
+        apiKey: env.MAILER_SENDGRID_API_KEY,
+        webhookVerificationKey: env.MAILER_SENDGRID_WEBHOOK_KEY,
+        sandbox: env.NODE_ENV !== 'production',
+      })
+    }
+    if (Object.keys(providers).length === 0) {
+      throw new Error('Mailer.fromEnv: no provider configured (set MAILER_SENDGRID_API_KEY, ...)')
+    }
+
+    const defaultProvider = env.MAILER_DEFAULT_PROVIDER ?? Object.keys(providers)[0]!
+
+    return Mailer.init({
+      db,
+      adapter,
+      redis: { url: required('MAILER_REDIS_URL') },
+      providers,
+      defaultProvider,
+      publicUrl: required('MAILER_PUBLIC_URL'),
+      unsubscribeSecret: required('MAILER_UNSUBSCRIBE_SECRET'),
+      senderAddress: env.MAILER_SENDER_ADDRESS,
+      fromDefaults:
+        env.MAILER_FROM_NAME && env.MAILER_FROM_EMAIL
+          ? { name: env.MAILER_FROM_NAME, email: env.MAILER_FROM_EMAIL }
+          : undefined,
+    })
+  }
+
   static async init(input: MailerConfig): Promise<Mailer> {
     const config = resolveConfig(input)
     if (!config.providers[config.defaultProvider]) {
