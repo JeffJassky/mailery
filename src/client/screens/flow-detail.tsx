@@ -2,9 +2,9 @@
 import React from 'react'
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
-import { sample } from '../lib/mock'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
+import { LoadState } from '../lib/load-state'
 import {
   FLOW_STEP_KINDS,
   defaultFlowStep,
@@ -69,10 +69,19 @@ function predicateSummary(p: any): string {
   return 'predicate'
 }
 
-export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
-  const fallbackFlow = sample.flows.find((f) => f.slug === slug) ?? sample.flows[1]!
-  const { data: flow, refetch } = useLive(() => api.flow(slug), fallbackFlow as any)
+export function FlowDetail({ slug, setRoute }: any) {
+  const { data: flow, loading, error, refetch } = useLive(() => api.flow(slug))
 
+  if (loading && !flow) {
+    return <LoadState loading error={null} empty={false}><></></LoadState>
+  }
+  if (error || !flow) {
+    return <LoadState loading={false} error={error} empty={!flow} emptyLabel="Flow not found." retry={refetch}><></></LoadState>
+  }
+  return <FlowEditor slug={slug} flow={flow} refetch={refetch} setRoute={setRoute} />
+}
+
+function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any; refetch: () => void; setRoute: any }) {
   const [steps, setSteps] = React.useState<FlowStep[]>([])
   const [trigger, setTrigger] = React.useState<{ eventName: string; once: boolean }>({ eventName: '', once: true })
   const [selectedIdx, setSelectedIdx] = React.useState(0)
@@ -83,10 +92,10 @@ export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
   // Hydrate state from live flow on load / refetch.
   React.useEffect(() => {
     if (!flow) return
-    const incoming = (flow as any)?.draft?.steps ?? (flow as any)?.steps ?? []
+    const incoming = flow?.draft?.steps ?? flow?.steps ?? []
     setSteps(Array.isArray(incoming) ? incoming : [])
-    if ((flow as any)?.trigger?.eventName) {
-      setTrigger({ eventName: (flow as any).trigger.eventName, once: (flow as any).trigger.once !== false })
+    if (flow?.trigger?.eventName) {
+      setTrigger({ eventName: flow.trigger.eventName, once: flow.trigger.once !== false })
     }
     setDirty(false)
   }, [flow])
@@ -151,7 +160,7 @@ export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
 
   async function togglePauseResume() {
     try {
-      if ((flow as any).enabled) await api.pauseFlow(slug)
+      if (flow.enabled) await api.pauseFlow(slug)
       else await api.resumeFlow(slug)
       refetch()
     } catch (err: any) {
@@ -159,10 +168,10 @@ export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
     }
   }
 
-  const version = (flow as any).version ?? 1
-  const active = (flow as any).active ?? (flow as any).stats?.activeRuns ?? 0
-  const sends7d = (flow as any).sends7d ?? (flow as any).stats?.sendsLast7Days ?? 0
-  const completed = (flow as any).stats?.completedRuns ?? 0
+  const version = flow.version ?? 1
+  const active = flow.active ?? flow.stats?.activeRuns ?? 0
+  const sends7d = flow.sends7d ?? flow.stats?.sendsLast7Days ?? 0
+  const completed = flow.stats?.completedRuns ?? 0
   const selected = steps[selectedIdx] ?? null
   const StepIcon = ({ name }: { name: string }) => {
     const I = (Icons as any)[name] || Icons.Mail
@@ -173,13 +182,13 @@ export function FlowDetail({ slug = 'activation-rescue', setRoute }: any) {
   return (
     <>
       <PageHead
-        title={(flow as any).name ?? slug}
-        desc={<span className="mono">flows/{(flow as any).slug ?? slug}</span>}
+        title={flow.name ?? slug}
+        desc={<span className="mono">flows/{flow.slug ?? slug}</span>}
         actions={
           <>
-            <span className={'pill ' + ((flow as any).enabled ? 'green' : 'neutral')}><span className="dot" />{(flow as any).enabled ? 'Enabled' : 'Disabled'}</span>
+            <span className={'pill ' + (flow.enabled ? 'green' : 'neutral')}><span className="dot" />{flow.enabled ? 'Enabled' : 'Disabled'}</span>
             <button className="btn" onClick={togglePauseResume}>
-              {(flow as any).enabled ? <><Icons.Pause size={14} />Pause</> : <><Icons.Play size={14} />Resume</>}
+              {flow.enabled ? <><Icons.Pause size={14} />Pause</> : <><Icons.Play size={14} />Resume</>}
             </button>
             <button className="btn" onClick={saveDraft} disabled={!dirty}><Icons.Copy size={14} />Save draft</button>
             <button className="btn btn-primary" onClick={publish}><Icons.Rocket size={14} />Publish</button>

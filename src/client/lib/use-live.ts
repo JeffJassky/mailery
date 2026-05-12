@@ -1,20 +1,20 @@
 /**
- * Tiny "live or mock" hook. Calls a fetch function; while pending or on error,
- * returns the provided fallback so screens render their mockup-quality state
- * even when the API isn't reachable (offline preview, demo deploys).
+ * useLive — fetch a resource and expose loading/error/data without ever
+ * substituting fake data. `data` is `undefined` until the first successful
+ * response. Screens render their own loading / error / empty UI.
  */
 
 import { useEffect, useRef, useState } from 'react'
 
 export interface LiveResult<T> {
-  data: T
+  data: T | undefined
   loading: boolean
   error: Error | null
   refetch: () => void
 }
 
-export function useLive<T>(fetchFn: () => Promise<T>, fallback: T): LiveResult<T> {
-  const [data, setData] = useState<T>(fallback)
+export function useLive<T>(fetchFn: () => Promise<T>): LiveResult<T> {
+  const [data, setData] = useState<T | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
   const [bump, setBump] = useState(0)

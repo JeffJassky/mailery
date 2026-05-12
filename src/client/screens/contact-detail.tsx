@@ -1,45 +1,39 @@
 /* Contact detail */
 import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
-import { sample } from '../lib/mock'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
+import { LoadState, EmptyRow } from '../lib/load-state'
 
-export function ContactDetail({ id = 'u_2018f' }: any) {
-  const fallbackContact = sample.contacts.find((x) => x.id === id) ?? sample.contacts[0]
-  const fallbackSends = sample.sends.filter((s) => s.to === fallbackContact?.email)
-    .concat(sample.sends.slice(0, 4))
-  const fallbackEvents = [
-    { name: 'Exported', time: '2 h ago', props: "{ format: 'pdf' }" },
-    { name: 'Activated app', time: '2 d ago' },
-    { name: 'Downloaded app', time: '3 d ago' },
-    { name: 'Created', time: '3 d ago' },
-  ]
+export function ContactDetail({ id }: any) {
+  const { data, loading, error, refetch } = useLive(() => api.contact(id))
 
-  const { data } = useLive(() => api.contact(id), {
-    contact: fallbackContact as any,
-    subscription: { source: 'signup' } as any,
-    recentEvents: fallbackEvents as any[],
-    recentSends: fallbackSends as any[],
-    activeRuns: [] as any[],
-  })
+  return (
+    <>
+      <PageHead title={id} desc={<span className="mono">{id}</span>} />
+      <LoadState loading={loading && !data} error={error} empty={!data} emptyLabel="Contact not found." retry={refetch}>
+        {data && <ContactBody data={data} />}
+      </LoadState>
+    </>
+  )
+}
 
-  const c = (data as any).contact ?? fallbackContact
-  const sub = (data as any).subscription ?? {}
-  const events = ((data as any).recentEvents ?? fallbackEvents) as any[]
-  const sends = ((data as any).recentSends ?? fallbackSends) as any[]
-  const runs = ((data as any).activeRuns ?? []) as any[]
+function ContactBody({ data }: { data: any }) {
+  const c = data.contact
+  const sub = data.subscription ?? {}
+  const events = data.recentEvents ?? []
+  const sends = data.recentSends ?? []
+  const runs = data.activeRuns ?? []
 
   const email = c?.email ?? ''
-  const name = c?.name ?? (c?.fields?.firstName ? `${c.fields.firstName} ${c.fields.lastName ?? ''}`.trim() : email)
-  const externalId = c?.externalId ?? id
-  const tier = c?.tier ?? c?.fields?.tier ?? 'Free'
+  const name = c?.fields?.firstName ? `${c.fields.firstName} ${c.fields.lastName ?? ''}`.trim() : email
+  const externalId = c?.externalId
 
   return (
     <>
       <PageHead
         title={name}
-        desc={<><span className="mono">{email}</span> · {tier} · <span className="mono">{externalId}</span></>}
+        desc={<><span className="mono">{email}</span> · <span className="mono">{externalId}</span></>}
         actions={
           <>
             <button className="btn"><Icons.Send size={14} />Resend last</button>
@@ -67,7 +61,7 @@ export function ContactDetail({ id = 'u_2018f' }: any) {
                       </tr>
                     ))
                   ) : (
-                    <tr><td colSpan={4} className="subtle text-xs" style={{ padding: 16 }}>No active runs.</td></tr>
+                    <EmptyRow colSpan={4} label="No active runs." />
                   )}
                 </tbody>
               </table>
@@ -75,25 +69,27 @@ export function ContactDetail({ id = 'u_2018f' }: any) {
           </div>
 
           <div className="card card-pad-0">
-            <div className="card-head"><span className="card-title">Events</span><span className="card-sub">Last 50 · append-only</span></div>
+            <div className="card-head"><span className="card-title">Events</span><span className="card-sub">{events.length === 50 ? 'Last 50 · append-only' : `${events.length} total`}</span></div>
             <div style={{ padding: '4px 16px 12px' }}>
-              {events.map((e: any, i: number) => (
-                <div key={i} className="hstack" style={{ padding: '10px 0', borderBottom: i < events.length - 1 ? '1px solid var(--border)' : '' }}>
-                  <div style={{ width: 24, height: 24, borderRadius: 6, background: 'var(--accent-soft)', color: 'var(--accent-press)', display: 'grid', placeItems: 'center' }}>
-                    <Icons.Activity size={12} />
+              {events.length === 0 ? (
+                <div className="subtle text-xs" style={{ padding: 8 }}>No events recorded.</div>
+              ) : (
+                events.map((e: any, i: number) => (
+                  <div key={String(e._id ?? i)} className="hstack" style={{ padding: '10px 0', borderBottom: i < events.length - 1 ? '1px solid var(--border)' : '' }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 6, background: 'var(--accent-soft)', color: 'var(--accent-press)', display: 'grid', placeItems: 'center' }}>
+                      <Icons.Activity size={12} />
+                    </div>
+                    <div>
+                      <div className="text-sm f500">{e.name}</div>
+                      {e.properties && (
+                        <div className="mono text-xs subtle">{JSON.stringify(e.properties).slice(0, 80)}</div>
+                      )}
+                    </div>
+                    <span className="grow" />
+                    <span className="text-xs subtle">{e.occurredAt ? formatRel(e.occurredAt) : ''}</span>
                   </div>
-                  <div>
-                    <div className="text-sm f500">{e.name}</div>
-                    {(e.props || e.properties) && (
-                      <div className="mono text-xs subtle">
-                        {typeof e.props === 'string' ? e.props : JSON.stringify(e.properties).slice(0, 80)}
-                      </div>
-                    )}
-                  </div>
-                  <span className="grow" />
-                  <span className="text-xs subtle">{e.time ?? (e.occurredAt ? formatRel(e.occurredAt) : '')}</span>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
 
@@ -102,15 +98,19 @@ export function ContactDetail({ id = 'u_2018f' }: any) {
             <table className="table">
               <thead><tr><th>Template</th><th>Status</th><th>Opens</th><th>Clicks</th><th>When</th></tr></thead>
               <tbody>
-                {sends.slice(0, 6).map((s: any, i: number) => (
-                  <tr key={i}>
-                    <td className="mono text-xs">{s.template ?? s.templateSlug}</td>
-                    <td><StatusPill status={s.status} /></td>
-                    <td className="tabular">{s.opens ?? s.openCount ?? 0}</td>
-                    <td className="tabular">{s.clicks ?? s.clickCount ?? 0}</td>
-                    <td className="text-xs subtle">{s.time ?? (s.queuedAt ? formatRel(s.queuedAt) : '')}</td>
-                  </tr>
-                ))}
+                {sends.length === 0 ? (
+                  <EmptyRow colSpan={5} label="No sends for this contact." />
+                ) : (
+                  sends.slice(0, 10).map((s: any, i: number) => (
+                    <tr key={String(s._id ?? i)}>
+                      <td className="mono text-xs">{s.templateSlug}</td>
+                      <td><StatusPill status={s.status} /></td>
+                      <td className="tabular">{s.openCount ?? 0}</td>
+                      <td className="tabular">{s.clickCount ?? 0}</td>
+                      <td className="text-xs subtle">{s.queuedAt ? formatRel(s.queuedAt) : ''}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -139,14 +139,6 @@ export function ContactDetail({ id = 'u_2018f' }: any) {
   fields: c?.fields ?? {},
 }, null, 2)}
               </pre>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head"><span className="card-title">Suppression check</span></div>
-            <div className="card-body" style={{ display: 'grid', gap: 8 }}>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">Not suppressed (marketing)</span></div>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">Not suppressed (transactional)</span></div>
             </div>
           </div>
         </div>

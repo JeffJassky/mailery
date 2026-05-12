@@ -142,6 +142,11 @@ function adaptBullQueue(q: Queue): QueueAPI {
   return {
     add: (name, data, opts) => q.add(name, data as any, opts as any),
     getWaitingCount: () => q.getWaitingCount(),
+    getInFlightCount: async () => {
+      const [active, waiting] = await Promise.all([q.getActiveCount(), q.getWaitingCount()])
+      return active + waiting
+    },
+    getDelayedCount: () => q.getDelayedCount(),
     close: () => q.close(),
   }
 }

@@ -82,49 +82,135 @@ function apiRouter(mailer: Mailer): Router {
   const r = Router()
   const c = mailer.collections
 
-  r.get('/me', (req, res) => {
-    res.json({
-      actor: (req as any).actor,
-      permissions: { canPublish: true, canSendBroadcasts: true, canManageSuppressions: true },
-    })
-  })
+  r.get(
+    '/me',
+    asyncHandler(async (req, res) => {
+      const [flows, templates, broadcasts, contacts, suppressions, health] = await Promise.all([
+        c.flows.estimatedDocumentCount(),
+        c.templates.estimatedDocumentCount(),
+        c.broadcasts.estimatedDocumentCount(),
+        c.subscriptions.countDocuments({ status: 'subscribed' }),
+        c.suppressions.estimatedDocumentCount(),
+        c.health.findOne({ _id: 'singleton' }),
+      ])
+      res.json({
+        actor: (req as any).actor,
+        permissions: { canPublish: true, canSendBroadcasts: true, canManageSuppressions: true },
+        counts: { flows, templates, broadcasts, contacts, suppressions },
+        health: { status: health?.status ?? 'healthy' },
+        providers: {
+          names: Object.keys(mailer.config.providers),
+          default: mailer.config.defaultProvider,
+        },
+      })
+    }),
+  )
 
   // ----- Dashboard ----------------------------------------------------------
   r.get(
     '/dashboard',
     asyncHandler(async (_req, res) => {
-      const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000)
-      const [sentTotal, deliveredCount, bouncedCount, openedCount, clickedCount] = await Promise.all([
+      const now = Date.now()
+      const HOUR = 60 * 60 * 1000
+      const since24h = new Date(now - 24 * HOUR)
+      const since48h = new Date(now - 48 * HOUR)
+
+      const [
+        sentTotal, deliveredCount, bouncedCount, openedCount, clickedCount,
+        sentPrev, deliveredPrev, openedPrev, clickedPrev,
+        hourly,
+      ] = await Promise.all([
         c.sends.countDocuments({ queuedAt: { $gt: since24h } }),
         c.sends.countDocuments({ queuedAt: { $gt: since24h }, status: 'delivered' }),
         c.sends.countDocuments({ queuedAt: { $gt: since24h }, status: 'bounced' }),
         c.sends.countDocuments({ queuedAt: { $gt: since24h }, openedAt: { $ne: null } }),
         c.sends.countDocuments({ queuedAt: { $gt: since24h }, firstClickAt: { $ne: null } }),
+        c.sends.countDocuments({ queuedAt: { $gt: since48h, $lte: since24h } }),
+        c.sends.countDocuments({ queuedAt: { $gt: since48h, $lte: since24h }, status: 'delivered' }),
+        c.sends.countDocuments({ queuedAt: { $gt: since48h, $lte: since24h }, openedAt: { $ne: null } }),
+        c.sends.countDocuments({ queuedAt: { $gt: since48h, $lte: since24h }, firstClickAt: { $ne: null } }),
+        c.sends
+          .aggregate<{ _id: number; sends: number; opens: number }>([
+            { $match: { queuedAt: { $gt: since24h } } },
+            {
+              $project: {
+                hour: {
+                  $toInt: {
+                    $divide: [{ $subtract: [now, { $toLong: '$queuedAt' }] }, HOUR],
+                  },
+                },
+                opened: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] },
+              },
+            },
+            { $group: { _id: '$hour', sends: { $sum: 1 }, opens: { $sum: '$opened' } } },
+          ])
+          .toArray(),
       ])
+
+      const sendSeries = new Array(24).fill(0)
+      const openSeries = new Array(24).fill(0)
+      for (const row of hourly) {
+        const idx = 23 - Math.max(0, Math.min(23, row._id))
+        sendSeries[idx] = row.sends
+        openSeries[idx] = row.opens
+      }
+
+      const delta = (cur: number, prev: number): number | null => {
+        if (prev === 0) return null
+        return (cur - prev) / prev
+      }
+      const rateDelta = (curN: number, curD: number, prevN: number, prevD: number): number | null => {
+        if (prevD === 0 || curD === 0) return null
+        return curN / curD - prevN / prevD
+      }
 
       const health = await c.health.findOne({ _id: 'singleton' })
       const recentFlows = await c.flows.find({ enabled: true }).limit(5).toArray()
       const recentSends = await c.sends.find().sort({ queuedAt: -1 }).limit(6).toArray()
       const recentAudit = await c.auditLog.find().sort({ occurredAt: -1 }).limit(5).toArray()
 
+      const queueCounts = await collectQueueCounts(mailer)
+      const lastSendError = await c.sends
+        .findOne({ status: { $in: ['bounced', 'failed'] } }, { sort: { queuedAt: -1 } })
+      const lastSendOk = await c.sends
+        .findOne({ status: 'delivered' }, { sort: { queuedAt: -1 } })
+      const providerOk =
+        lastSendOk && lastSendError
+          ? new Date(lastSendOk.queuedAt as Date).getTime() >= new Date(lastSendError.queuedAt as Date).getTime()
+          : lastSendOk
+          ? true
+          : lastSendError
+          ? false
+          : null
+
       res.json({
         kpis: {
-          sends: { value: sentTotal, delta: null },
+          sends: { value: sentTotal, delta: delta(sentTotal, sentPrev) },
           deliveredRate: {
-            value: sentTotal === 0 ? 1 : deliveredCount / sentTotal,
-            delta: null,
+            value: sentTotal === 0 ? null : deliveredCount / sentTotal,
+            delta: rateDelta(deliveredCount, sentTotal, deliveredPrev, sentPrev),
             bounced: bouncedCount,
           },
-          openRate: { value: sentTotal === 0 ? 0 : openedCount / sentTotal, delta: null, exclBots: false },
-          clickRate: { value: sentTotal === 0 ? 0 : clickedCount / sentTotal, delta: null },
+          openRate: {
+            value: sentTotal === 0 ? null : openedCount / sentTotal,
+            delta: rateDelta(openedCount, sentTotal, openedPrev, sentPrev),
+            exclBots: false,
+          },
+          clickRate: {
+            value: sentTotal === 0 ? null : clickedCount / sentTotal,
+            delta: rateDelta(clickedCount, sentTotal, clickedPrev, sentPrev),
+          },
         },
+        series: { hourly: { sends: sendSeries, opens: openSeries } },
         health: health
           ? { status: health.status, rates: health.rates }
-          : {
-              status: 'healthy',
-              rates: { hardBounceRate: 0, complaintRate: 0, combinedBounceRate: 0, failureRate: 0 },
-            },
-        queue: { inFlight: 0, delayed: 0, providerOk: true, providerName: mailer.config.defaultProvider },
+          : { status: 'healthy', rates: { hardBounceRate: 0, complaintRate: 0, combinedBounceRate: 0, failureRate: 0 } },
+        queue: {
+          inFlight: queueCounts?.inFlight ?? null,
+          delayed: queueCounts?.delayed ?? null,
+          providerOk,
+          providerName: mailer.config.defaultProvider,
+        },
         recentFlows,
         recentSends,
         recentAudit,
@@ -327,6 +413,18 @@ function apiRouter(mailer: Mailer): Router {
           rates: { bounceRate: 0, hardBounceRate: 0, complaintRate: 0, failureRate: 0 },
         },
       )
+    }),
+  )
+
+  r.get(
+    '/health/trips',
+    asyncHandler(async (_req, res) => {
+      const rows = await c.auditLog
+        .find({ action: { $in: ['health.trip', 'health.resume'] } })
+        .sort({ occurredAt: -1 })
+        .limit(50)
+        .toArray()
+      res.json(rows)
     }),
   )
 
@@ -911,4 +1009,38 @@ function asyncHandler(fn: AsyncHandler) {
   return (req: Request, res: Response, next: NextFunction) => {
     fn(req, res, next).catch(next)
   }
+}
+
+/**
+ * Sum inFlight and delayed across every queue the driver exposes. Returns
+ * `null` for either count when the driver doesn't implement that accessor
+ * (e.g. Agenda/Noop), so the UI can render "—" instead of a misleading 0.
+ */
+async function collectQueueCounts(
+  mailer: Mailer,
+): Promise<{ inFlight: number | null; delayed: number | null }> {
+  const qs = Object.values(mailer.queues) as Array<{
+    getInFlightCount?: () => Promise<number | null>
+    getDelayedCount?: () => Promise<number | null>
+  }>
+  const sum = async (key: 'getInFlightCount' | 'getDelayedCount'): Promise<number | null> => {
+    let total = 0
+    let supported = false
+    for (const q of qs) {
+      const fn = q[key]
+      if (!fn) continue
+      try {
+        const v = await fn.call(q)
+        if (v == null) continue
+        total += v
+        supported = true
+      } catch {
+        // Treat one queue's failure as "unknown" — surface as null upstream.
+        return null
+      }
+    }
+    return supported ? total : null
+  }
+  const [inFlight, delayed] = await Promise.all([sum('getInFlightCount'), sum('getDelayedCount')])
+  return { inFlight, delayed }
 }

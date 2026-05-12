@@ -1,17 +1,30 @@
 /* App shell — sidebar, topbar */
 import React from 'react'
 import { Icons } from './icons'
+import type { MePayload } from '../lib/api'
 
 type Route = { screen: string; slug?: string; id?: string }
+
+const HEALTH_LABEL: Record<string, { text: string; cls: string }> = {
+  healthy: { text: 'Healthy', cls: 'dot' },
+  degraded: { text: 'Degraded', cls: 'dot amber' },
+  tripped: { text: 'Tripped', cls: 'dot red' },
+}
+
+function formatCount(n: number | undefined): string | undefined {
+  if (n == null) return undefined
+  if (n >= 10_000) return `${(n / 1000).toFixed(1)}k`
+  return n.toLocaleString()
+}
 
 export function Sidebar({
   route,
   setRoute,
-  counts,
+  me,
 }: {
   route: Route
   setRoute: (r: Route) => void
-  counts: { flows: number; templates: number; broadcasts: number }
+  me: MePayload | undefined
 }) {
   const Item = ({ icon: Ic, label, badge, screen }: any) => (
     <div
@@ -23,6 +36,10 @@ export function Sidebar({
       {badge != null && <span className="sidebar-link-badge">{badge}</span>}
     </div>
   )
+
+  const counts = me?.counts
+  const status = me?.health.status ?? ''
+  const health = HEALTH_LABEL[status] ?? { text: status || '…', cls: 'dot' }
 
   return (
     <aside className="sidebar">
@@ -42,17 +59,17 @@ export function Sidebar({
       <div className="sidebar-section">
         <div className="sidebar-section-title">Compose</div>
         <nav className="sidebar-nav">
-          <Item icon={Icons.Flows} label="Flows" screen="flows" badge={counts.flows} />
-          <Item icon={Icons.Template} label="Templates" screen="templates" badge={counts.templates} />
-          <Item icon={Icons.Broadcast} label="Broadcasts" screen="broadcasts" badge={counts.broadcasts} />
+          <Item icon={Icons.Flows} label="Flows" screen="flows" badge={formatCount(counts?.flows)} />
+          <Item icon={Icons.Template} label="Templates" screen="templates" badge={formatCount(counts?.templates)} />
+          <Item icon={Icons.Broadcast} label="Broadcasts" screen="broadcasts" badge={formatCount(counts?.broadcasts)} />
         </nav>
       </div>
 
       <div className="sidebar-section">
         <div className="sidebar-section-title">Audience</div>
         <nav className="sidebar-nav">
-          <Item icon={Icons.Contacts} label="Contacts" screen="contacts" badge="12.4k" />
-          <Item icon={Icons.Shield} label="Suppressions" screen="suppressions" badge="218" />
+          <Item icon={Icons.Contacts} label="Contacts" screen="contacts" badge={formatCount(counts?.contacts)} />
+          <Item icon={Icons.Shield} label="Suppressions" screen="suppressions" badge={formatCount(counts?.suppressions)} />
         </nav>
       </div>
 
@@ -65,9 +82,13 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-footer">
-        <span className="dot"></span>
-        <span>All systems normal</span>
-        <span style={{ marginLeft: 'auto' }} className="mono">redis ok</span>
+        <span className={health.cls}></span>
+        <span>{me ? health.text : '…'}</span>
+        {me && (
+          <span style={{ marginLeft: 'auto' }} className="mono text-xs">
+            {me.providers.default}
+          </span>
+        )}
       </div>
     </aside>
   )

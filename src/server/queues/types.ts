@@ -30,6 +30,10 @@ export interface QueueAPI {
   add(name: string, data: unknown, opts?: AddOptions): Promise<unknown>
   /** Approximate count of jobs eligible-but-not-running. Used by broadcast backpressure. */
   getWaitingCount(): Promise<number>
+  /** Active + waiting jobs (runnable now). Returns null when the driver can't expose it. */
+  getInFlightCount?(): Promise<number | null>
+  /** Delayed jobs scheduled for the future. Returns null when unsupported. */
+  getDelayedCount?(): Promise<number | null>
   close(): Promise<void>
 }
 

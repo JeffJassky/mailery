@@ -1,7 +1,7 @@
 /**
  * Typed fetch wrappers against /admin/mailer/api/*. Used by every screen that
- * needs live data; falls back to `lib/mock.ts` when the API endpoint isn't
- * reachable (useful for offline preview).
+ * needs live data. No mock fallback — screens render their own loading /
+ * error / empty UI when a fetch is pending or fails.
  */
 
 const BASE = '/admin/mailer/api'
@@ -17,7 +17,7 @@ async function json<T = unknown>(input: string, init?: RequestInit): Promise<T> 
 }
 
 export const api = {
-  me: () => json<{ actor: string; permissions: Record<string, boolean> }>('/me'),
+  me: () => json<MePayload>('/me'),
   dashboard: () => json<DashboardPayload>('/dashboard'),
 
   // Flows
@@ -69,6 +69,7 @@ export const api = {
     json<{ ok: boolean }>('/suppressions', { method: 'POST', body: JSON.stringify(body) }),
   audit: () => json<any[]>('/audit'),
   health: () => json<any>('/health'),
+  healthTrips: () => json<any[]>('/health/trips'),
   resumeHealth: () => json<{ ok: boolean }>('/health/resume', { method: 'POST' }),
   setupStatus: () => json<SetupStatus>('/setup-status'),
 }
@@ -89,15 +90,29 @@ export interface SetupStatus {
   checks: SetupCheck[]
 }
 
+export interface MePayload {
+  actor: string
+  permissions: Record<string, boolean>
+  counts: { flows: number; templates: number; broadcasts: number; contacts: number; suppressions: number }
+  health: { status: string }
+  providers: { names: string[]; default: string }
+}
+
 export interface DashboardPayload {
   kpis: {
     sends: { value: number; delta: number | null }
-    deliveredRate: { value: number; delta: number | null; bounced: number }
-    openRate: { value: number; delta: number | null; exclBots: boolean }
-    clickRate: { value: number; delta: number | null }
+    deliveredRate: { value: number | null; delta: number | null; bounced: number }
+    openRate: { value: number | null; delta: number | null; exclBots: boolean }
+    clickRate: { value: number | null; delta: number | null }
   }
+  series: { hourly: { sends: number[]; opens: number[] } }
   health: { status: string; rates: Record<string, number> }
-  queue: { inFlight: number; delayed: number; providerOk: boolean; providerName: string }
+  queue: {
+    inFlight: number | null
+    delayed: number | null
+    providerOk: boolean | null
+    providerName: string
+  }
   recentFlows: any[]
   recentSends: any[]
   recentAudit: any[]

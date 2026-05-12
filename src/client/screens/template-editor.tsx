@@ -5,82 +5,45 @@ import type { Editor as TiptapEditor, JSONContent } from '@tiptap/core'
 
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
-import { sample } from '../lib/mock'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
+import { LoadState } from '../lib/load-state'
 
-const DEFAULT_CONTENT: JSONContent = {
-  type: 'doc',
-  content: [
-    {
-      type: 'paragraph',
-      attrs: { textAlign: 'left' },
-      content: [
-        { type: 'text', text: 'Hey ' },
-        {
-          type: 'variable',
-          attrs: { id: 'firstName', label: null, fallback: null, showIfKey: null, each: null },
-        },
-        { type: 'text', text: ',' },
-      ],
-    },
-    {
-      type: 'paragraph',
-      attrs: { textAlign: 'left' },
-      content: [
-        {
-          type: 'text',
-          text: "Welcome — start by clicking around the admin UI, or drop a feature flag on for your team.",
-        },
-      ],
-    },
-    {
-      type: 'button',
-      attrs: {
-        text: 'Open the app',
-        url: 'https://yourdomain.com',
-        alignment: 'left',
-        variant: 'filled',
-        borderRadius: 'smooth',
-        buttonColor: '#f97316',
-        textColor: '#ffffff',
-        showIfKey: null,
-      },
-    },
-  ],
+const EMPTY_DOC: JSONContent = { type: 'doc', content: [{ type: 'paragraph' }] }
+
+export function TemplateEditor({ slug }: any) {
+  const { data: tpl, loading, error, refetch } = useLive(() => api.template(slug))
+
+  return (
+    <LoadState loading={loading && !tpl} error={error} empty={!tpl} emptyLabel="Template not found." retry={refetch}>
+      {tpl && <Body tpl={tpl} slug={slug} refetch={refetch} />}
+    </LoadState>
+  )
 }
 
-export function TemplateEditor({ slug = 'welcome-1' }: any) {
-  const fallback = sample.templates.find((t) => t.slug === slug) ?? sample.templates[0]
-  const { data: tpl, refetch } = useLive(() => api.template(slug), fallback as any)
-
+function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => void }) {
   const [view, setView] = React.useState<'design' | 'source' | 'plaintext'>('design')
-  const [editorJson, setEditorJson] = React.useState<JSONContent>(DEFAULT_CONTENT)
-  const [subject, setSubject] = React.useState<string>('')
-  const [preheader, setPreheader] = React.useState<string>('')
+  const [editorJson, setEditorJson] = React.useState<JSONContent>(EMPTY_DOC)
+  const [subject, setSubject] = React.useState<string>(tpl.draft?.subject ?? tpl.subject ?? '')
+  const [preheader, setPreheader] = React.useState<string>(tpl.draft?.preheader ?? tpl.preheader ?? '')
   const [dirty, setDirty] = React.useState(false)
   const [status, setStatus] = React.useState<string>('')
   const [busy, setBusy] = React.useState(false)
   const editorRef = React.useRef<TiptapEditor | null>(null)
   const hydratedRef = React.useRef(false)
 
-  const tplKind = (tpl as any)?.kind ?? 'marketing'
-  const tplName = (tpl as any)?.name ?? slug
-  const tplSlug = (tpl as any)?.slug ?? slug
-  const initialSubject = (tpl as any)?.draft?.subject ?? (tpl as any)?.subject ?? `Welcome to Mailery, {{contact.fields.firstName}} 👋`
-  const initialPreheader = (tpl as any)?.draft?.preheader ?? (tpl as any)?.preheader ?? 'Three things to try in your first 5 minutes.'
-  const initialEditorJson = (tpl as any)?.draft?.editorJson ?? (tpl as any)?.body?.editorJson ?? null
-  const mjmlSource = (tpl as any)?.body?.mjml ?? (tpl as any)?.draft?.mjml ?? ''
-  const plainText = (tpl as any)?.body?.plainText ?? ''
+  const tplKind = tpl.kind ?? 'marketing'
+  const tplName = tpl.name ?? slug
+  const tplSlug = tpl.slug ?? slug
+  const mjmlSource = tpl.body?.mjml ?? tpl.draft?.mjml ?? ''
+  const plainText = tpl.body?.plainText ?? ''
 
   React.useEffect(() => {
     if (hydratedRef.current) return
-    if (!tpl) return
     hydratedRef.current = true
-    setSubject(initialSubject)
-    setPreheader(initialPreheader)
-    if (initialEditorJson) setEditorJson(initialEditorJson)
-  }, [tpl, initialSubject, initialPreheader, initialEditorJson])
+    const incoming = tpl.draft?.editorJson ?? tpl.body?.editorJson
+    if (incoming) setEditorJson(incoming)
+  }, [tpl])
 
   async function publish() {
     setBusy(true)
@@ -125,7 +88,6 @@ export function TemplateEditor({ slug = 'welcome-1' }: any) {
             </div>
             <div className="card-actions">
               <span className="text-xs subtle">{dirty ? 'Unsaved changes' : 'Saved'}</span>
-              <button className="icon-btn"><Icons.Help size={14} /></button>
             </div>
           </div>
 
@@ -144,9 +106,7 @@ export function TemplateEditor({ slug = 'welcome-1' }: any) {
             <div className="maily-host" style={{ padding: 16, background: 'var(--bg-sunken)', minHeight: 480 }}>
               <MailyEditor
                 contentJson={editorJson}
-                onCreate={(editor) => {
-                  editorRef.current = editor
-                }}
+                onCreate={(editor) => { editorRef.current = editor }}
                 onUpdate={(editor) => {
                   editorRef.current = editor
                   setEditorJson(editor.getJSON())
@@ -182,50 +142,45 @@ export function TemplateEditor({ slug = 'welcome-1' }: any) {
             <div className="card-body">
               <div className="field">
                 <label className="field-label">From name</label>
-                <input className="input" defaultValue={(tpl as any)?.fromName ?? 'Jeff at Mailery'} />
+                <input className="input" defaultValue={tpl.fromName ?? ''} placeholder="(default from mailer config)" />
               </div>
               <div className="field">
                 <label className="field-label">From email</label>
-                <input className="input" defaultValue={(tpl as any)?.fromEmail ?? 'hello@example.com'} />
+                <input className="input" defaultValue={tpl.fromEmail ?? ''} placeholder="(default from mailer config)" />
               </div>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label className="field-label">Reply-to</label>
-                <input className="input" defaultValue={(tpl as any)?.replyTo ?? ''} placeholder="(same as From)" />
+                <input className="input" defaultValue={tpl.replyTo ?? ''} placeholder="(same as From)" />
               </div>
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head"><span className="card-title">Variables</span><span className="card-sub">Used in subject/body</span></div>
-            <div className="card-body">
-              {[
-                ['firstName', 'string', 'required'],
-                ['appUrl', 'url', 'required'],
-                ['logoUrl', 'url', 'optional · default'],
-                ['unsubscribeUrl', 'url', 'auto-injected'],
-              ].map(([n, t, r]) => (
-                <div key={n} className="hstack" style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
-                  <span className="mono text-sm">{n}</span>
-                  <span className="grow" />
-                  <span className="tag">{t}</span>
-                  <span className="text-xs subtle">{r}</span>
-                </div>
-              ))}
+          {Array.isArray(tpl.requiredVariables) && tpl.requiredVariables.length > 0 && (
+            <div className="card">
+              <div className="card-head"><span className="card-title">Variables</span><span className="card-sub">Used in subject/body</span></div>
+              <div className="card-body">
+                {tpl.requiredVariables.map((v: any) => (
+                  <div key={v.name ?? v} className="hstack" style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                    <span className="mono text-sm">{v.name ?? v}</span>
+                    <span className="grow" />
+                    {v.type && <span className="tag">{v.type}</span>}
+                    {v.required != null && <span className="text-xs subtle">{v.required ? 'required' : 'optional'}</span>}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          <div className="card">
-            <div className="card-head"><span className="card-title">Tracking & lint</span></div>
-            <div className="card-body" style={{ display: 'grid', gap: 8 }}>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">Unsubscribe link present</span></div>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">Postal address present</span></div>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">No broken merge tags</span></div>
-              <div className="hstack"><Icons.Warn size={14} style={{ color: 'var(--amber-fg)' }} /><span className="text-sm">Open tracking enabled — beware Apple MPP</span></div>
-              <div className="divider" style={{ margin: '4px 0' }} />
-              <div className="hstack"><span className="text-sm">Track opens</span><span className="grow" /><div className="toggle on"><div className="track"><div className="knob" /></div></div></div>
-              <div className="hstack"><span className="text-sm">Track clicks</span><span className="grow" /><div className="toggle on"><div className="track"><div className="knob" /></div></div></div>
+          {Array.isArray(tpl.lintWarnings) && tpl.lintWarnings.length > 0 && (
+            <div className="card">
+              <div className="card-head"><span className="card-title">Lint warnings</span></div>
+              <div className="card-body" style={{ display: 'grid', gap: 8 }}>
+                {tpl.lintWarnings.map((w: any, i: number) => (
+                  <div key={i} className="hstack"><Icons.Warn size={14} style={{ color: 'var(--amber-fg)' }} /><span className="text-sm">{w.message ?? String(w)}</span></div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </>
