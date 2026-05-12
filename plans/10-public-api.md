@@ -34,22 +34,42 @@ The public router has no auth — it must be reachable by email recipients and p
 
 ## Core methods
 
-### `mailer.fire(eventName, externalId, props?, dedupeKey)`
+### `mailer.registerEvent(name, opts)`
+
+Optional setup call. Declares an event name and the policy the library should use to derive a `dedupeKey` when the caller doesn't pass one. Call at startup, after `Mailer.init`.
+
+```ts
+mailer.registerEvent('Created',          { dedupePolicy: 'once-per-contact' })
+mailer.registerEvent('Downloaded app',   { dedupePolicy: 'once-per-contact' })
+mailer.registerEvent('Viewed Storyboard',{ dedupePolicy: 'once-per-day' })
+mailer.registerEvent('Imported',         { dedupePolicy: 'every-time' })       // each call unique
+```
+
+Policies:
+
+| Policy | Auto-derived key shape | Use when |
+|---|---|---|
+| `once-per-contact` | `${externalId}:${eventName}` | Lifecycle markers ("Created", "Activated") |
+| `once-per-day` | `${externalId}:${eventName}:${YYYY-MM-DD}` | Behaviors that can recur but shouldn't burn a flow every time ("Viewed Storyboard") |
+| `every-time` | `${externalId}:${eventName}:${UUIDv4}` | True every-occurrence events ("Imported a video") |
+
+Registration is optional but recommended — without it, every `fire()` for that name must pass an explicit `dedupeKey`.
+
+### `mailer.fire(eventName, externalId, props?, dedupeKey?)`
 
 Records a behavioral event for a contact. The fundamental method — drives flow triggers, segment evaluation, analytics.
 
 ```ts
-await mailer.fire('Imported', user._id.toString(), { videoSource: 'youtube' }, `${user._id}:Imported`)
+// With registered policy — no key needed:
+await mailer.fire('Created', user._id.toString())
+
+// Without policy — pass an explicit key:
+await mailer.fire('Stripe Webhook', user._id.toString(), { type: 'charge.refunded' }, stripeEvent.id)
 ```
 
-**`dedupeKey` is required** (per `INVARIANTS.md` rule 1). If a fire with the same dedupeKey already exists, this call is a no-op. Pick a key shape:
+Per `INVARIANTS.md` rule 1, every event reaching `mailer_events` has a dedupeKey. If the caller doesn't pass one, the library uses the registered policy for that event name. If neither is available, the library throws at runtime.
 
-- `${externalId}:${eventName}` — for events that should fire at most once per contact
-- `${externalId}:${eventName}:${dateString}` — for once-per-day events
-- `${externalId}:${eventName}:${propertyValue}` — for property-keyed firings
-- `${webhookId}` — for external-webhook-driven events (Stripe events have stable IDs you can use)
-
-The library refuses calls without a dedupeKey at runtime.
+Duplicate-keyed calls are silent no-ops at the unique index.
 
 ### `mailer.fireFromSession(session, eventName, externalId, props, dedupeKey)`
 
@@ -155,22 +175,22 @@ await mailer.scheduleBroadcast({
   segmentDefinition: { filters: [{ kind: 'subscriptionStatus', equals: 'subscribed' }] },
   scheduledAt: new Date('2026-06-01T15:00:00Z'),
   name: 'June Newsletter',
-  createdBy: 'agent:claude',
+  createdBy: 'script:operator',
 })
 ```
 
 ### `mailer.audit({ actor, action, resource, before, after })`
 
-Helper for writing audit log entries — primarily for agents making direct DB writes.
+Helper for writing audit log entries — primarily for scripts making direct DB writes.
 
 ```ts
-// Agent has updated a flow draft directly
+// A script has updated a flow draft directly
 await db.collection('mailer_flows').updateOne(
   { slug: 'activation-rescue' },
   { $set: { 'draft.steps': newSteps, 'draft.lastModifiedAt': new Date() } },
 )
 await mailer.audit({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'flow.draft.update',
   resource: { collection: 'mailer_flows', slug: 'activation-rescue' },
   diffSummary: 'Added two new send steps to draft',
@@ -179,7 +199,7 @@ await mailer.audit({
 
 ## Lower-level access
 
-For agents and tooling that want direct DB:
+For scripts and tooling that want direct DB:
 
 ```ts
 mailer.db                 // mongodb.Db handle (use carefully)
@@ -189,7 +209,7 @@ mailer.providers          // configured providers map
 mailer.adapter            // ContactAdapter instance
 ```
 
-Direct collection access is documented and supported — it's how agents work — but with the audit-log convention from `INVARIANTS.md` rule 10.
+Direct collection access is documented and supported — see `DIRECT_DB.md` — but follow the audit-log convention from `INVARIANTS.md` rule 10.
 
 ## Lifecycle
 
@@ -204,7 +224,7 @@ On a web process you typically skip `startWorkers()` (passing `workerless: true`
 
 | Operation | Idempotency mechanism |
 |---|---|
-| `fire()` | dedupeKey unique index |
+| `fire()` | dedupeKey unique index (caller-passed or policy-derived per `registerEvent`) |
 | `fireFromSession()` | dedupeKey unique index on outbox |
 | `upsertSubscription()` | unique on externalId |
 | `unsubscribe()` | safe to call repeatedly — upserts suppression |

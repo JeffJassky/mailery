@@ -230,8 +230,11 @@ SendGridProvider({
   apiKey: process.env.SENDGRID_API_KEY,
   webhookVerificationKey: process.env.SENDGRID_WEBHOOK_PUBLIC_KEY,
   sandbox: process.env.NODE_ENV !== 'production',
+  sendRatePerSecond: 10,           // shared IP default; raise on dedicated IP
 })
 ```
+
+`sendRatePerSecond` overrides the global `sendRatePerSecond` from `Mailer.init` for jobs targeting this provider. BullMQ's group limiter (`04-queues.md` § Per-provider rate limiting) keys on the provider name.
 
 Required setup on SendGrid side (one-time, documented in README):
 

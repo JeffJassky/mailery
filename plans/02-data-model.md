@@ -1,6 +1,6 @@
 # 02 — Data Model
 
-This is **the contract**. Every collection, every field, every index, every conventional value. AI agents reading this file gain everything they need to configure the system.
+This is **the contract**. Every collection, every field, every index, every conventional value. Read this once to understand the system; refer back when writing migrations or direct-DB scripts.
 
 ## Ownership boundary: host vs. mailer
 
@@ -111,7 +111,7 @@ Two configurations:
 
 Both work transparently for flows, templates, and segments. The only difference is where the bits sit on disk.
 
-**Agents and developers always interact with tags via `mailer.tag()` / `mailer.untag()` or the `{type: 'tag'}` flow step.** They never write to `user.tags` directly, even when they can see it — the abstraction is what lets the storage be swappable.
+**Always interact with tags via `mailer.tag()` / `mailer.untag()` or the `{type: 'tag'}` flow step.** Never write to `user.tags` directly, even when you can see it — the abstraction is what lets the storage be swappable.
 
 A default `MongoContactAdapter` ships out of the box for Mongo hosts:
 
@@ -182,9 +182,9 @@ For broadcasts, mailer uses `getBatch(ids)` to hydrate up to 500 contacts per ro
 
 ## Mailer-owned collections
 
-There are **11 mailer-owned collections** — 7 the agent regularly touches plus 4 operational ones it should leave alone.
+There are **11 mailer-owned collections** — 7 that operators and scripts regularly touch, plus 4 operational ones that should be left alone.
 
-### Agent-facing (7)
+### Frequently-touched (7)
 
 #### 1. `mailer_subscriptions`
 
@@ -332,6 +332,9 @@ A flow definition.
     sendsLast7Days: number,
   },
 
+  // Runner bookkeeping
+  lastTriggerScanAt: Date | null,                  // watermark for event-trigger scanning
+
   publishedAt: Date | null,
   publishedBy: string | null,
   createdAt: Date,
@@ -413,6 +416,7 @@ An email's content.
   fromName: string,
   fromEmail: string,                               // recommend transactional uses tx@yourdomain, marketing uses marketing@yourdomain
   replyTo: string | null,
+  providerOverride: string | null,                 // route through a specific provider instead of the default
 
   subject: string,                                 // Handlebars-allowed
   preheader: string,                               // Handlebars-allowed
@@ -628,7 +632,7 @@ Used only when the adapter doesn't expose host-owned tags. Stores tag applicatio
   _id: ObjectId,
   externalId: string,
   tag: string,
-  appliedBy: 'flow' | 'admin' | 'agent' | 'import',
+  appliedBy: 'flow' | 'admin' | 'script' | 'import',
   appliedAt: Date,
 }
 ```
@@ -637,7 +641,7 @@ Used only when the adapter doesn't expose host-owned tags. Stores tag applicatio
 
 When this collection is in use, `Contact.tags` is populated by mailer from a per-externalId aggregate. Otherwise this collection stays empty.
 
-### Operational (4 — agents should leave alone)
+### Operational (4 — leave alone)
 
 #### 10. `mailer_outbox`
 
@@ -665,7 +669,7 @@ Every mutating action, intended for "who changed what when" queries.
 ```ts
 {
   _id: ObjectId,
-  actor: string,                                   // 'agent' | 'human:jeff@...' | 'system:webhook' | 'system:runner'
+  actor: string,                                   // 'script:operator' | 'human:jeff@...' | 'system:webhook' | 'system:runner'
   action: string,                                  // 'flow.publish' | 'template.update' | ...
   resource: { collection: string, id: string | ObjectId, slug?: string },
 
@@ -683,7 +687,7 @@ Every mutating action, intended for "who changed what when" queries.
 
 **Indexes**: `{ occurredAt: -1 }`, `{ 'resource.collection': 1, 'resource.id': 1, occurredAt: -1 }`, `{ actor: 1, occurredAt: -1 }`
 
-Agent convention: call `mailer.audit({...})` after every direct DB mutation. Documented in `AGENT_GUIDE.md`.
+Convention for direct-DB scripts: call `mailer.audit({...})` after every mutation. Documented in `DIRECT_DB.md`.
 
 #### 12. `mailer_webhook_events`
 
@@ -769,6 +773,14 @@ type Predicate =
   | { hasFiredEvent: string, sinceFlowStart?: boolean, withinDays?: number }
   | { notHasFiredEvent: string, withinDays?: number }
   | { subscriptionStatus: 'subscribed' | 'unsubscribed' | 'pending_doi' | 'bounced' | 'complained' }
+  // Engagement predicates — see INVARIANTS rule 7. Single-event variants are noisy
+  // (Apple MPP, link-scanner bots). Prefer the *ExcludingBots or aggregated variants.
+  | { hasOpened: { templateSlug?: string, sinceFlowStart?: boolean, withinDays?: number } }
+  | { hasClicked: { templateSlug?: string, sinceFlowStart?: boolean, withinDays?: number } }
+  | { hasOpenedExcludingBots: { templateSlug?: string, sinceFlowStart?: boolean, withinDays?: number } }
+  | { hasClickedExcludingBots: { templateSlug?: string, sinceFlowStart?: boolean, withinDays?: number } }
+  | { openedAtLeastN: { count: number, withinDays: number } }
+  | { clickedAtLeastN: { count: number, withinDays: number } }
   | { all: Predicate[] }
   | { any: Predicate[] }
   | { not: Predicate }

@@ -6,12 +6,12 @@ Templates are MJML-source emails with a Handlebars rendering pass for variables.
 
 MJML compiles to bulletproof email HTML that works across Outlook, Gmail, Apple Mail, Yahoo, Thunderbird, mobile clients. Writing raw HTML for email in 2026 is a waste — too many client-specific quirks to keep up with by hand.
 
-MJML is also legible. An agent or developer can read an MJML document and reason about layout. The compiled HTML is unreadable; the MJML is not.
+MJML is also legible. A developer can read an MJML document and reason about layout. The compiled HTML is unreadable; the MJML is not.
 
 ## Rendering pipeline
 
 ```
-Author writes / agent generates MJML source
+Author writes MJML source (via WYSIWYG or source mode)
   │
   ▼
 draft.mjml stored in mailer_templates.draft
@@ -195,6 +195,37 @@ await mailer.templates.preview({
 
 The htmx-driven preview pane refreshes the iframe with this rendered HTML as the operator edits the draft MJML. No round-trip needed for visual feedback during authoring.
 
+## WYSIWYG editor
+
+MJML source is the persisted format, but most operators don't want to write MJML by hand. The admin UI ships a WYSIWYG editor that produces MJML on save.
+
+### Choice: Maily
+
+V1 integrates [**Maily**](https://github.com/arikchakma/maily) (MIT, Tiptap-based, MJML-compatible). Reasons:
+
+- Outputs JSON internally and MJML on export — clean round-trip with our storage format.
+- Tiptap is a Node-friendly framework; integrates without a heavy build step in the host app (we bundle the editor's static assets the same way as `htmx`/`alpine`).
+- Active OSS project, MIT license — safe to embed.
+- Supports the email primitives we need (sections, columns, buttons, images, text styles, merge tags).
+
+Fallbacks if Maily turns out unsuitable in practice: [GrapesJS](https://grapesjs.com) with the MJML preset, or [EasyEmail](https://github.com/zalify/easy-email). Both are heavier integrations.
+
+### Behavior
+
+- Editor opens with the current `draft.mjml` (or the published `body.mjml` if no draft).
+- On save, the editor exports MJML and writes to `draft.mjml`. The library does not store the editor's internal JSON — MJML is the single source of truth.
+- Source mode toggle: a tab lets MJML-fluent authors edit MJML directly. The editor reloads from the MJML on switch back.
+- Merge tag insertion: a "{{ }}" menu in the editor lists the template's `variablesSchema` plus standard helpers (`unsubscribeUrl`, `preferenceCenterUrl`, `viewInBrowserUrl`, `senderAddress`, contact fields exposed by the adapter).
+- Live preview: the right pane shows the compiled HTML, refreshed on each save via the same htmx pipeline as the source-mode preview (`09-admin-ui.md`).
+
+### What stays out of WYSIWYG
+
+- Custom MJML components (`mj-include`, conditional `mj-section`s) — author in source mode.
+- Handlebars block helpers (`{{#if}}...{{/if}}`) — author in source mode; preview renders them.
+- Raw HTML escape hatches — discouraged in email; supported via source mode only.
+
+The WYSIWYG covers the 80% case (founder voice, marketing campaign, monthly newsletter). Power authors drop to source mode for the rest.
+
 ## Versioning and rollback
 
 Each template publish snapshots into `mailer_template_versions`:
@@ -252,7 +283,7 @@ Here's what a real activation-rescue template looks like in storage:
   trackClicks: true,
   tags: ['activation', 'founder-voice'],
   publishedAt: new Date(),
-  publishedBy: 'agent:claude',
+  publishedBy: 'script:operator',
   // stats omitted
 }
 ```

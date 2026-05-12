@@ -65,7 +65,7 @@ Shows:
 
 Actions:
 - Pause / unpause flow (audit-logged)
-- View / edit raw flow JSON (a `<textarea>` editor — agents edit via DB; humans edit via this fallback)
+- View / edit raw flow JSON (a `<textarea>` editor — scripts edit via DB; humans edit via this fallback)
 - Publish draft
 - Manually enroll a contact (admin-only; rare)
 
@@ -88,12 +88,15 @@ Filters: kind (transactional/marketing), tag.
 
 Two-pane view:
 
-- **Left**: form with subject, preheader, MJML source (large `<textarea>` with syntax highlighting via highlight.js)
-- **Right**: live preview iframe — htmx auto-refreshes the iframe after each edit (debounced)
+- **Left**: subject + preheader fields, then a tabbed body editor:
+  - **Design** (default) — Maily WYSIWYG editor (`06-templates.md` § WYSIWYG). Operator drags blocks, edits inline, inserts merge tags from a `{{ }}` menu.
+  - **Source** — MJML `<textarea>` with highlight.js syntax highlighting, for power users.
+  Switching tabs round-trips through MJML — Design tab serializes to MJML on every save; Source tab deserializes back on switch.
+- **Right**: live preview iframe. htmx auto-refreshes after each edit (debounced 500ms).
 
 Actions:
-- Save as draft
-- Publish draft (compiles MJML, writes `body`)
+- Save as draft (writes `draft.mjml`)
+- Publish draft (compiles MJML, derives plain text, writes `body.*`, snapshots to `mailer_template_versions`)
 - Send test → modal asking for an email address and sample variable values
 - View version history → restore prior version
 - Lint → runs through compliance checks (unsubscribe link present, sender address present, no broken merge tags)
@@ -185,7 +188,7 @@ Most pages are server-rendered full pages. Interactive bits use htmx partials:
 - **Inline status updates** on dashboard auto-refresh: `hx-get="/dashboard/widgets/health" hx-trigger="every 10s"`
 - **Audit log infinite scroll**: `hx-get="/audit?cursor=..." hx-trigger="revealed"`
 
-No build step. No bundler. The page source is readable when you View Source — friendly to agents auditing what the admin can do.
+No build step. No bundler. The page source is readable when you View Source.
 
 ## Auth
 

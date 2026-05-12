@@ -33,29 +33,43 @@ Mailer internally wraps this in an `ioredis` connection used by BullMQ.
 
 ## Queue layout
 
-Three queues, each with a single worker:
+Four queues:
 
-| Queue | Purpose | Repeat? |
+| Queue | Purpose | Trigger |
 |---|---|---|
-| `mailer:tick` | Periodic state-machine processor (event → flow_run, advance flow_runs, drain outbox, scheduled broadcasts, reconciliation) | Every 1 minute |
-| `mailer:send` | Actual provider dispatch with retries | One-shot, per send |
-| `mailer:webhook` | Process inbound webhook events asynchronously | One-shot |
+| `mailer:tick` | Recovery sweep + event-trigger scan + broadcast dispatch + outbox drain + reconciliation | Repeating, every 1 minute |
+| `mailer:advance` | Wake a specific flow_run at its `nextActionAt` | Delayed job, scheduled when a `wait` step starts |
+| `mailer:send` | Provider dispatch for a single send row | One-shot, enqueued by the runner's send step |
+| `mailer:webhook` | Process inbound provider webhook events asynchronously | One-shot, enqueued by the webhook endpoint |
 
 ### `mailer:tick`
 
-Repeating job. Cron: `* * * * *`. Worker concurrency: 1 (single source of truth per process). Idempotent — multiple workers across a fleet are safe, only one will pick up a given job interval due to BullMQ's job ID dedupe (`jobId: 'mailer:tick'`).
+Repeating job. Cron: `* * * * *`. Worker concurrency: 1 per process. Idempotent across a fleet via BullMQ's `jobId` dedupe (`jobId: 'mailer:tick'`).
 
-Tick body: see `03-runner.md`.
+Tick body — see `03-runner.md`:
+1. `processNewlyFiredEventTriggers()` — scan `mailer_events` since `flow.lastTriggerScanAt`, create `flow_runs` for new matches.
+2. `sweepStrandedFlowRuns()` — find `flow_runs` with `nextActionAt <= now` that didn't get woken by their delayed job (worker restart, BullMQ data loss).
+3. `processScheduledBroadcasts()` — dispatch broadcasts whose `scheduledAt` has passed.
+4. `drainOutbox()` — promote outbox rows committed by host transactions.
+5. `rollupStats()` (every 15 min) — denormalized counters on `mailer_templates` and `mailer_flows`.
+6. `reconcileWebhookEvents()` (daily) — pull provider Events API for the last 24h, fill gaps.
+
+### `mailer:advance`
+
+One-shot delayed job. Enqueued by `handleWait` (`03-runner.md`) with `delay: ms` matching the wait step's duration. Also enqueued without delay after `handleBranch`, `handleCondition` (when advancing), and after a new flow_run is created — so the runner advances immediately, not on the next minute boundary.
+
+Worker re-loads the run and calls `processOneRunStep`. The tick's recovery sweep covers any wakeup that BullMQ loses.
 
 ### `mailer:send`
 
-Each `send` step in a flow_run, and each broadcast recipient, enqueues a job here. The send worker:
+Each `send` step (and each broadcast recipient) creates a `mailer_sends` row with `status: 'queued'` and enqueues a job here. The send worker:
 
-1. Re-loads the `mailer_sends` document (status check — could have been cancelled)
-2. Re-checks suppression (per `INVARIANTS.md`, suppression is always re-checked at send time, never trusted from enqueue time)
-3. Re-checks circuit breaker (`mailer_health.status`)
-4. Calls `provider.send(...)`
-5. Updates the send record
+1. Re-loads the `mailer_sends` document (status check — could have been cancelled).
+2. Re-checks suppression by `(emailAtSend, scope-for-kind)` — `INVARIANTS.md` rule 3.
+3. Re-checks circuit breaker (`mailer_health.status`) — marketing held when tripped, transactional bypasses (`INVARIANTS.md` rule 6).
+4. Applies tracking rewrites (open pixel, click links) using `sendId`.
+5. Calls `provider.send(...)`.
+6. Updates the send record (`status: 'sent'`, `providerMessageId`, `sentAt`).
 
 Retries (built into BullMQ):
 
@@ -66,7 +80,37 @@ Retries (built into BullMQ):
 }
 ```
 
-After 4 attempts the send is marked `failed`. The flow_run advances past this step (it doesn't block).
+After 4 attempts the send is marked `failed`. The flow_run already advanced past this step at enqueue time, so failed sends do not block subsequent steps.
+
+#### Per-provider rate limiting
+
+Each provider has a `sendRatePerSecond` (default 10/sec for SendGrid shared IPs; configure higher on dedicated IPs). The send worker is configured with BullMQ's group limiter, keyed by provider name:
+
+```ts
+new Worker('mailer:send', handler, {
+  limiter: { max: provider.sendRatePerSecond, duration: 1000, groupKey: 'provider' },
+})
+```
+
+Jobs over the limit sit in BullMQ's delayed set until they can run. Going above provider limits tanks reputation faster than almost anything else.
+
+#### Broadcast enqueue
+
+Broadcasts can have hundreds of thousands of recipients. Naive enqueue creates one BullMQ job per recipient up front, spiking Redis memory. The broadcast worker instead **streams** the segment cursor and bulk-enqueues in pages of `broadcastEnqueueBatchSize` (default 1000), pausing when the queue's waiting-count exceeds `broadcastEnqueueMaxWaiting` (default 5000):
+
+```ts
+async function dispatchBroadcast(broadcast) {
+  const cursor = adapter.query(broadcast.segmentDefinition.filters, { limit: 1000 })
+  for await (const batch of cursor) {
+    while ((await queue.send.getWaitingCount()) > config.broadcastEnqueueMaxWaiting) {
+      await sleep(2000)
+    }
+    await queue.send.addBulk(batch.map(c => ({ name: 'send', data: prepareSend(broadcast, c) })))
+  }
+}
+```
+
+This keeps Redis memory bounded and lets the rate limiter shape actual outflow.
 
 ### `mailer:webhook`
 
@@ -105,6 +149,7 @@ For ops, mailer exposes the underlying queues:
 
 ```ts
 mailer.queues.tick     // BullMQ Queue instance
+mailer.queues.advance
 mailer.queues.send
 mailer.queues.webhook
 ```

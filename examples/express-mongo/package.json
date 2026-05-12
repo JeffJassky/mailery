@@ -1,0 +1,14 @@
+{
+  "name": "mailery-example-express-mongo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types server.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "mongodb": "^6.10.0",
+    "mailery": "file:../.."
+  }
+}

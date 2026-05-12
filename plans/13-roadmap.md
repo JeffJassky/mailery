@@ -57,12 +57,13 @@ Goal: turn the spike into a respectable library.
 
 ## Phase 2 — Admin UI + multi-app extraction (1 week)
 
-Goal: human operators can monitor, agents can configure.
+Goal: human operators can monitor; deploy scripts and developers can configure flows + templates.
 
 **Build:**
 
 - Mountable admin router (htmx + server-rendered HTML).
 - All views from `09-admin-ui.md`: dashboard, flows list/detail, templates list/edit, sends log, contacts search, suppressions, broadcasts, audit log, health.
+- Maily WYSIWYG editor integrated into the template editor (Design tab) + MJML source tab (`06-templates.md` § WYSIWYG).
 - MJML live-preview pane.
 - Send-test for templates.
 - Broadcast scheduling with confirmation gate.
@@ -74,7 +75,7 @@ Goal: human operators can monitor, agents can configure.
 - Install in StoryFolder via the package manager.
 - Add to a second app to prove portability.
 
-**End of Phase 2:** library is installable, two apps using it, agents can configure flows by writing to Mongo, humans can monitor via the admin UI.
+**End of Phase 2:** library is installable, two apps using it, flows configurable by direct DB writes from a deploy script, humans can monitor via the admin UI.
 
 ## Phase 3 — Hardening + polish (1 week)
 
@@ -86,6 +87,9 @@ Goal: production-quality across all the small things.
 - Daily webhook reconciliation against provider Activity APIs.
 - GDPR forget + export endpoints.
 - Double opt-in flow.
+- Deliverability panel: `verifyDomainAuth` per provider, SPF/DKIM/DMARC status surfaced in admin UI, startup warnings on unauthenticated domains (`08-compliance.md` § Deliverability setup).
+- Soft → hard bounce promotion job + config.
+- Per-provider send-rate limiting via BullMQ limiter.
 - Send-time IP / User-Agent logging (opt-in).
 - Linting on template publish (unsubscribe link present, sender address present, valid MJML).
 - The `mailer_leads` collection for pre-user form fills.
@@ -106,7 +110,7 @@ Goal: production-quality across all the small things.
 Three forks based on what we learned:
 
 ### Fork A — Keep it private, run it
-Polish, but don't OSS. Use across all the user's apps. Build internal automation tools (agent integration) without worrying about external developer ergonomics.
+Polish, but don't OSS. Use across all the user's apps. Build internal automation tools without worrying about external developer ergonomics.
 
 ### Fork B — Open source
 - Write up the README, contribute guide, license (probably MIT).
@@ -145,7 +149,6 @@ V1 ships when:
 
 - [ ] StoryFolder runs 4 flows through mailer (activation rescue, Pro welcome, cancel save, monthly newsletter)
 - [ ] At least one other app is running mailer in production
-- [ ] An AI agent has end-to-end configured a flow (drafted email, inserted step, published) without human-in-loop on any individual step
 - [ ] Library has a published version (private npm or local file dep)
 - [ ] All `INVARIANTS.md` rules enforced and tested
 - [ ] Admin UI usable for daily monitoring without needing to drop to direct DB queries

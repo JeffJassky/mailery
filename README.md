@@ -1,21 +1,24 @@
 # mailery
 
-> Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, segmentation, tracking, suppression, and an admin UI you mount inside your Express app.
+> Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, tracking, suppression, compliance, and an admin UI you mount inside your Express app.
 
-**Status:** Design spec only. No code yet. See [`plans/`](./plans/) for the full design.
+**Status:** design spec only. No code yet. See [`plans/`](./plans/) for the full design.
 
 ## What it is
 
-A self-hosted, embeddable email automation library — a developer-first, agent-configurable alternative to MailerLite / Mailchimp / Customer.io.
+A self-hosted library you `npm install` into your Express + MongoDB app. Fire events from your code, define flows + templates as documents in MongoDB, mount the admin UI on a route you gate with your existing auth.
 
-- **Embedded, not external.** `npm install`, mount the router, fire events. No third-party sync.
-- **Mongo schema is the public API.** AI agents read and write flow/template documents directly.
-- **Provider-agnostic.** SendGrid first; Postmark / SES / Resend pluggable.
-- **Queue-agnostic.** BullMQ (Mongo + Redis) primary; Agenda (Mongo-only) supported.
+- **Embedded, not external.** No third-party sync, no per-contact pricing.
+- **Both transactional and marketing in one engine.** Password resets, receipts, drips, newsletters — same pipeline, right defaults per kind.
+- **Provider-agnostic.** SendGrid first; Postmark, SES, Resend pluggable.
+- **BullMQ + Redis** for queue + delayed-job scheduling.
+- **MJML** templates with a WYSIWYG editor (Maily) in the admin UI.
 
 ## Docs
 
-Full documentation: <https://jeffjassky.github.io/mailery/>
+Design spec: [`plans/`](./plans/) — start with [`plans/README.md`](./plans/README.md).
+
+Published docs (once shipped): <https://jeffjassky.github.io/mailery/>
 
 ## Status & roadmap
 

@@ -1,13 +1,13 @@
 {
   "name": "mailery",
   "version": "0.0.0",
-  "description": "Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, segmentation, tracking, and an admin UI you mount inside your Express app.",
+  "description": "Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, tracking, suppression, and an admin UI you mount inside your Express app.",
   "license": "MIT",
   "author": "Jeff Jassky <jeff@jeffjassky.com>",
   "homepage": "https://jeffjassky.github.io/mailery/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JeffJassky/mailery.git"
+    "url": "git+https://github.com/JeffJassky/mailery.git"
   },
   "bugs": {
     "url": "https://github.com/JeffJassky/mailery/issues"
@@ -19,18 +19,26 @@
     "newsletter",
     "mongodb",
     "express",
-    "mailchimp-alternative",
-    "mailerlite-alternative",
-    "self-hosted"
+    "self-hosted",
+    "transactional",
+    "mailerlite-alternative"
   ],
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "require": "./dist/testing.cjs"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -41,16 +49,24 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsup && yarn build:assets",
+    "build:assets": "mkdir -p dist/admin && cp -R src/admin/views dist/admin/views && cp -R src/admin/static dist/admin/static",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "yarn typecheck && yarn build",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "yarn clean && yarn typecheck && yarn test && yarn build",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsup": "^8.3.0",
     "typescript": "^5.6.0",
-    "vitepress": "^1.4.0"
+    "vitepress": "^1.4.0",
+    "vitest": "^2.1.0"
   },
   "publishConfig": {
     "access": "public"

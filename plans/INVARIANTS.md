@@ -1,37 +1,45 @@
 # INVARIANTS
 
-A short list of non-negotiable rules. Every part of the library — every PR, every code review, every agent action — checks against these. Violations are bugs.
+A short list of non-negotiable rules. Every part of the library — every PR, every code review — checks against these. Violations are bugs.
 
-## 1. `fire()` requires a `dedupeKey`
+## 1. Every event firing is idempotent
 
-Every call to `mailer.fire(eventName, externalId, props, dedupeKey)` must pass a `dedupeKey`. The library refuses calls without one. Idempotency is mandatory.
+Every event reaching `mailer_events` has a `dedupeKey`. Duplicate keys are silently dropped at insert time via a unique index. No `fire()` call ever creates two event rows.
 
-Recommended dedupeKey shapes:
+Two paths get you a key:
+
+- **Pass it explicitly**: `mailer.fire(name, externalId, props, dedupeKey)`. Use this when the source has a natural id (Stripe event id, webhook id) or when you need control.
+- **Register a policy and let the library derive it**: `mailer.registerEvent('Created', { dedupePolicy: 'once-per-contact' })`. Then `mailer.fire('Created', externalId)` auto-derives `${externalId}:Created`. Policies: `'once-per-contact'`, `'once-per-day'`, `'every-time'` (key includes a UUID).
+
+The library refuses `fire()` only when both: no `dedupeKey` was passed AND no policy is registered for the event name.
+
+Recommended dedupeKey shapes when constructing by hand:
 - `${externalId}:${eventName}` for events that should fire at most once per contact
-- `${externalId}:${eventName}:${YYYY-MM-DD}` for events that should fire at most once per contact per day
-- `${webhookId}` or `${stripeEventId}` when the source is an external webhook (Stripe etc.)
+- `${externalId}:${eventName}:${YYYY-MM-DD}` for once-per-contact-per-day
+- `${webhookId}` or `${stripeEventId}` for external-webhook-driven events
 
-If you genuinely need an event to fire multiple times, include a sequence number or timestamp in the key.
+## 2. Use `fireFromSession` inside Mongo transactions
 
-## 2. Outbox writes are the source of truth for events in transactions
+If the host fires an event as part of a multi-document Mongo transaction, it must use `mailer.fireFromSession(session, ...)` which writes to `mailer_outbox` inside the transaction. The drain promotes it to `mailer_events` after the transaction commits — so an event never escapes a rolled-back business write.
 
-When the host app does business writes in a Mongo session/transaction, it MUST use `mailer.fireFromSession(session, eventName, externalId, props, dedupeKey)`. That writes to `mailer_outbox` inside the transaction. The drain promotes it to `mailer_events` outside the transaction.
-
-Calling `mailer.fire(...)` from inside a transaction is a bug — the event will be dispatched even if the transaction aborts.
+Outside of transactions, `mailer.fire(...)` writes directly to `mailer_events`. Most hosts won't need the outbox path; it exists for those that do.
 
 ## 3. Suppression is re-checked at send time, never trusted from enqueue time
 
 The send worker re-loads suppression state before every `provider.send(...)`. Don't precompute "this contact is sendable" at flow entry — it's stale by the time the email goes out.
 
-## 4. Transactional and marketing never share a sender identity
+## 4. Transactional and marketing have separate suppression scopes
 
-- Marketing sends use a marketing-scoped From address (e.g. `hello@yourdomain.com`).
-- Transactional sends use a transactional-scoped From address (e.g. `tx@yourdomain.com`).
-- The two domains have separate SendGrid event webhooks (or separate provider accounts).
-- Suppression lists are scoped: marketing suppressions don't block transactional sends.
-- Recommended: separate provider account / API key per kind for reputation isolation.
+Hard rule: suppression lists are scoped (`'marketing'`, `'transactional'`, `'all'`). A user unsubscribing from your newsletter still receives their password reset. The send-time check uses `template.kind` to decide which scopes apply.
 
-A user unsubscribing from your newsletter MUST still receive their password reset.
+Strong recommendation (not enforced): use a distinct From address for transactional vs marketing (e.g. `tx@yourdomain.com` vs `hello@yourdomain.com`), and ideally distinct provider accounts/subusers. This isolates reputation — a marketing complaint storm shouldn't tank password-reset deliverability. Small apps can run both off one address and one account; the library will work, but the reputation risk is theirs to carry.
+
+Config surfaces both:
+
+- `defaultFrom` / `transactionalFrom` in `fromDefaults` / `transactionalFromDefaults` (`11-configuration.md`).
+- `defaultProvider` / `defaultTransactionalProvider`.
+
+When the second of each pair is unset, the first is used and the library logs a warning at startup.
 
 ## 5. Webhook events are deduplicated AND reconciled
 
@@ -48,15 +56,23 @@ When `mailer_health.status === 'tripped'`:
 
 Only a human (admin UI) can clear the trip. The library never auto-resumes.
 
-## 7. Open/click events do not trigger flow branches
+## 7. Open/click predicates exist but are labeled noisy
 
-Apple Mail Privacy Protection pre-fetches all images on inbox arrival, marking every email as "opened" within seconds. Many corporate firewalls also pre-fetch links. A single open or click event is not a meaningful engagement signal.
+`hasOpened` and `hasClicked` predicates are available. Apple Mail Privacy Protection pre-fetches images, and corporate link-protection services pre-fetch URLs — both inflate counts. The library surfaces this:
 
-Predicates `hasOpened` and `hasClicked` are intentionally absent from V1. If a flow needs engagement-based branching, use:
-- A behavioral event the host fires when something product-relevant happens (e.g. user clicked through and used a feature)
-- Aggregated engagement over time (e.g. opened ≥ 3 messages in last 30 days) — V2 candidate
+- Single-open / single-click predicates carry a "noisy signal" badge in the admin UI when used in a flow definition.
+- A bot-filtered variant is available: `hasOpenedExcludingBots`, `hasClickedExcludingBots`, which exclude events whose User-Agent matched the bot list (`Mimecast`, `proofpoint`, `SafeLinks`, common headless browsers).
+- Aggregated predicates (`openedAtLeastN`, `clickedAtLeastN` over a window) are preferred for engagement segmentation.
 
-Don't tempt agents to wire single-event branching by adding the primitive.
+Recommended pattern for "resend to non-openers in 3 days":
+
+```ts
+{ type: 'wait', value: 3, unit: 'days' },
+{ type: 'condition', test: { not: { hasOpenedExcludingBots: { templateSlug: 'newsletter-may', sinceFlowStart: true } } }, ifFalse: 'exit' },
+{ type: 'send', templateSlug: 'newsletter-may-resend' },
+```
+
+Where a product event exists ("user clicked through and used the feature"), prefer it — it's a real engagement signal, not a deliverability signal.
 
 ## 8. Unsubscribe is bulletproof
 
@@ -82,7 +98,7 @@ This protects against the most common bug: a deleted user re-importing through a
 
 Every mutation to `mailer_flows`, `mailer_templates`, `mailer_broadcasts`, `mailer_suppressions`, plus every manual admin action and circuit breaker reset, writes to `mailer_audit_log`. No deletes. No updates. Forever.
 
-If agents make direct DB writes, they should also write an audit row. This is documented in `AGENT_GUIDE.md` but not enforced — direct DB access can bypass us. Audit log presence is a quality signal, not a security boundary.
+Direct-DB scripts should also write an audit row. This is documented in `DIRECT_DB.md` but not enforced — direct DB access can bypass us. Audit log presence is a quality signal, not a security boundary.
 
 ## 11. Broadcasts to >N contacts require confirmation
 
@@ -90,7 +106,7 @@ The admin UI requires the operator to type the exact recipient count before sche
 
 This prevents the "I clicked send instead of preview" disaster that has burned every email marketer at least once.
 
-Programmatic broadcasts (created via direct DB writes by agents) skip this gate. Agents are expected to know what they're doing — but they should also create a `proposal` audit entry rather than direct-publish for cross-app broadcasts.
+Programmatic broadcasts (created via direct DB writes by scripts) skip this gate. The script's author is responsible for the recipient count being correct.
 
 ## 12. Times are always UTC
 

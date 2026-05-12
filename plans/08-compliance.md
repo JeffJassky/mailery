@@ -256,6 +256,64 @@ Hard rule: a complaint always suppresses + marks subscription `complained`, rega
 
 If complaint rate exceeds 0.3% in any rolling-hour window, the circuit breaker trips and marketing sends pause until a human resumes.
 
+## Deliverability setup
+
+Authentication (SPF, DKIM, DMARC) is the single biggest deliverability lever and the easiest one to get wrong. The library doesn't perform DNS surgery on the host's behalf, but it surfaces verification status and warns when sending from an unauthenticated domain.
+
+### Provider domain auth check
+
+Each provider implements an optional `verifyDomainAuth(domain)` method:
+
+```ts
+interface MailProvider {
+  // ...existing methods...
+  verifyDomainAuth?(domain: string): Promise<DomainAuthStatus>
+}
+
+interface DomainAuthStatus {
+  domain: string
+  spf: 'pass' | 'fail' | 'unknown'
+  dkim: 'pass' | 'fail' | 'unknown'
+  dmarc: 'none' | 'quarantine' | 'reject' | 'unknown'
+  details?: object
+  checkedAt: Date
+}
+```
+
+For SendGrid: hits the [Authenticated Domains API](https://docs.sendgrid.com/api-reference/domain-authentication). For Postmark: hits the [Sender Signatures API](https://postmarkapp.com/developer/api/signatures-api). Implementations cache for 1 hour.
+
+### Admin UI surface
+
+A "Deliverability" panel on the dashboard (`09-admin-ui.md`) shows, per configured From-domain:
+
+- SPF / DKIM / DMARC status (✓ / ✗ / ?)
+- Last check timestamp
+- A "How to fix" link per failed row, deep-linking to the provider's setup docs
+- DMARC policy alignment — if `p=none`, suggest moving to `p=quarantine` once the alignment looks clean for 30 days
+- Bulk-sender requirements check (Gmail/Yahoo 2024+): list-unsubscribe configured ✓, complaint rate under 0.3% ✓, one-click POST supported ✓
+
+### Startup warning
+
+On `Mailer.init`, the library calls `verifyDomainAuth` for each configured From-domain (in the background, non-blocking). Failures log a `warn` with remediation steps. Repeat hourly until resolved or muted.
+
+### Bounce promotion
+
+`mailer_sends.bounceType` is normalized per provider (`INVARIANTS.md` rule 13). Soft → hard promotion runs as part of the tick:
+
+```ts
+async function promoteSoftBounces() {
+  // Group soft bounces in the last `softBouncePromotionWindow` days by email.
+  // Any email with >= `softBouncePromotionThreshold` soft bounces gets a hard suppression.
+  // Defaults: 3 soft bounces / 30 days.
+}
+```
+
+Configurable via `softBouncePromotionThreshold` and `softBouncePromotionWindowDays` in `11-configuration.md`.
+
+### Send-rate guard
+
+Each provider has a `sendRatePerSecond` config (default conservative — 10/sec for SendGrid shared IP). The send worker rate-limits via BullMQ's [`limiter`](https://docs.bullmq.io/guide/rate-limiting) feature, capped per provider. Going above provider limits is the second-fastest way to tank reputation (after no DKIM).
+
 ## Audit trail for compliance investigations
 
 If you're audited (or a contact asks "did you send me this?"), the trail is:

@@ -13,12 +13,9 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": "src"
+    "noEmit": true,
+    "types": ["node"]
   },
-  "include": ["src"],
+  "include": ["src", "test", "tsup.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "docs"]
 }

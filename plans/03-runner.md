@@ -1,15 +1,22 @@
 # 03 — The Runner
 
-The runner is a single scheduled job that processes `flow_runs`. It's the engine. This document describes its state machine, idempotency guarantees, and edge cases.
+The runner advances `flow_runs` through their state machine. It has two execution paths:
+
+1. **Delayed-job wakeups** (primary): when a `wait` step finishes, BullMQ delivers a job at the scheduled time. The handler advances exactly that run.
+2. **Tick recovery sweep** (secondary): every minute, a `mailer:tick` job scans for runs whose `nextActionAt` has passed but weren't woken — covers worker restarts, missed schedules, newly-fired events.
+
+The tick is also where newly-fired event triggers are picked up and broadcasts are dispatched.
 
 ## The single tick job
 
 ```ts
 queue.every('mailer:tick', '* * * * *', async () => {
   await processNewlyFiredEventTriggers()
-  await advanceActiveFlowRuns()
+  await sweepStrandedFlowRuns()
   await processScheduledBroadcasts()
-  await retryFailedSends()
+  await drainOutbox()
+  await rollupStats()           // every 15 min in practice; guard by minute mod
+  await reconcileWebhookEvents() // once daily; same gating
 })
 ```
 
@@ -19,7 +26,7 @@ The tick is **safe to run concurrently** (multiple workers on different boxes) b
 
 - Each flow_run advance uses a Mongo `findOneAndUpdate` with optimistic concurrency on `currentStepIndex` — only one worker advances a given run per step
 - Each send uses a unique `dedupeKey` — sends with the same key collide on insert, second insert no-ops
-- Trigger creation uses `{ contactId, flowId }` unique-ish lookup (a flow_run is only created if no active one exists)
+- Trigger creation uses `(externalId, flowId)` lookup before creating a flow_run; concurrent creates collide on a unique compound index
 
 ## Stage 1 — processing newly fired event triggers
 
@@ -28,49 +35,53 @@ async function processNewlyFiredEventTriggers() {
   const eventFlows = await Flows.find({
     enabled: true,
     'trigger.type': 'event',
-  })
+  }).toArray()
 
   for (const flow of eventFlows) {
     const eventName = flow.trigger.eventName
     const since = flow.lastTriggerScanAt ?? flow.createdAt
 
-    // Find events of this name since last scan
     const newEvents = await Events.find({
       name: eventName,
       occurredAt: { $gt: since },
-    }).limit(1000)
+    }).limit(1000).toArray()
 
     for (const event of newEvents) {
-      // Has this contact already entered this flow?
       if (flow.trigger.once) {
         const existing = await FlowRuns.findOne({
-          contactId: event.contactId,
+          externalId: event.externalId,
           flowId: flow._id,
         })
         if (existing) continue
       }
 
-      // Is the contact still emailable?
-      const contact = await Contacts.findById(event.contactId)
-      if (!contact || contact.status !== 'active') continue
+      // Subscription gate (marketing flows require a subscribed contact)
+      const sub = await Subscriptions.findOne({ externalId: event.externalId })
+      if (!sub || sub.status !== 'subscribed') continue
 
-      // Create flow_run, ready to run on next stage
-      await FlowRuns.create({
-        contactId: event.contactId,
-        flowId: flow._id,
-        flowSlug: flow.slug,
-        flowVersion: flow.version,
-        enteredAt: new Date(),
-        status: 'active',
-        currentStepIndex: 0,
-        currentBranchPath: [],
-        nextActionAt: new Date(),                  // process immediately
-        attemptsForCurrentStep: 0,
-        history: [{ stepIndex: -1, action: 'entered', at: new Date() }],
-      })
+      try {
+        await FlowRuns.insertOne({
+          externalId: event.externalId,
+          flowId: flow._id,
+          flowSlug: flow.slug,
+          flowVersion: flow.version,
+          emailAtEntry: sub.emailAtSubscribe,
+          enteredAt: new Date(),
+          status: 'active',
+          currentStepIndex: 0,
+          currentBranchPath: [],
+          nextActionAt: new Date(),       // process immediately on next sweep
+          attemptsForCurrentStep: 0,
+          history: [{ stepIndex: -1, action: 'entered', at: new Date() }],
+        })
+        // Wake the runner now (delayed=0) rather than waiting for the next tick.
+        await queue.enqueue('mailer:advance', { flowRunId: newId })
+      } catch (err) {
+        if (!isDuplicateKey(err)) throw err
+        // Concurrent insert by another worker — fine, skip.
+      }
     }
 
-    // Mark this flow's progress so the next tick doesn't re-scan
     await Flows.updateOne(
       { _id: flow._id },
       { $set: { lastTriggerScanAt: new Date() } },
@@ -79,68 +90,86 @@ async function processNewlyFiredEventTriggers() {
 }
 ```
 
+`lastTriggerScanAt` is stored on `mailer_flows` (added to schema in `02-data-model.md`).
+
 ### Segment-enter and cron triggers
 
-Handled similarly. Segment-enter triggers re-evaluate the segment definition and compare to a prior snapshot per flow (stored on the flow doc). Cron triggers fire on schedule per matching segment.
+Segment-enter triggers re-evaluate the segment definition periodically and create flow_runs for newly-matching contacts. Cron triggers fire on schedule against a segment.
 
 For V1, only `event` triggers are required. The other two are scaffolded but optional.
 
-## Stage 2 — advancing active flow_runs
+## Stage 2 — advancing flow_runs
+
+Two entry points; both call `processOneRunStep`:
 
 ```ts
-async function advanceActiveFlowRuns() {
+// Primary: a delayed job fires at the run's nextActionAt
+worker.on('mailer:advance', async (job) => {
+  await processOneRunStep(job.data.flowRunId)
+})
+
+// Recovery sweep: tick finds runs that should have advanced but didn't
+async function sweepStrandedFlowRuns() {
   const runs = await FlowRuns.find({
     status: 'active',
     nextActionAt: { $lte: new Date() },
   })
-    .limit(500)                                    // bounded; subsequent ticks drain backlog
+    .limit(500)
     .sort({ nextActionAt: 1 })
+    .toArray()
 
   for (const run of runs) {
-    await processOneRunStep(run).catch(err => {
-      console.error('Run advance failed', run._id, err)
-      // Increment attempts; if too many, fail the run
-      // ...
+    await processOneRunStep(run._id).catch(err => {
+      logger.error('Run advance failed', { runId: run._id, err })
     })
   }
 }
 ```
+
+In normal operation, the delayed-job path handles every advance. The sweep only picks up runs that were stranded by worker restarts or BullMQ data loss.
 
 ### `processOneRunStep`
 
 The core state machine. One step transition per call.
 
 ```ts
-async function processOneRunStep(run) {
-  const flow = await Flows.findById(run.flowId)
+async function processOneRunStep(runId) {
+  const run = await FlowRuns.findOne({ _id: runId })
+  if (!run || run.status !== 'active') return
+
+  const flow = await Flows.findOne({ _id: run.flowId })
   const steps = run.flowVersion === flow.version
     ? flow.steps
-    : await getPinnedFlowVersion(run.flowId, run.flowVersion)
+    : (await FlowVersions.findOne({ flowId: run.flowId, version: run.flowVersion })).steps
 
   const step = locateStep(steps, run.currentStepIndex, run.currentBranchPath)
   if (!step) {
-    // Out of steps — flow_run completes
     await completeFlowRun(run, 'completed')
     return
   }
 
-  const contact = await Contacts.findById(run.contactId)
+  // Contact identity lives on the host. Always read through the adapter.
+  const contact = await adapter.getById(run.externalId)
 
-  // Check if contact is still emailable; if not, exit
-  if (!contact || contact.status !== 'active') {
-    await exitFlowRun(run, contact?.status === 'unsubscribed' ? 'unsubscribed' : 'bounced')
-    return
+  // Marketing flows skip remaining steps if the contact is no longer subscribed.
+  // Transactional sends (if any survive past this point) still respect suppressions at send time.
+  const sub = await Subscriptions.findOne({ externalId: run.externalId })
+  if (!sub || sub.status !== 'subscribed') {
+    return exitFlowRun(run, sub?.status ?? 'no_subscription')
+  }
+  if (!contact) {
+    return exitFlowRun(run, 'contact_missing')
   }
 
   switch (step.type) {
-    case 'wait':       return await handleWait(run, step)
-    case 'condition':  return await handleCondition(run, step, contact)
-    case 'branch':     return await handleBranch(run, step, contact)
-    case 'send':       return await handleSend(run, step, contact)
-    case 'tag':        return await handleTag(run, step, contact)
-    case 'fire_event': return await handleFireEvent(run, step, contact)
-    case 'webhook':    return await handleWebhook(run, step, contact)
-    case 'exit':       return await exitFlowRun(run, step.reason || 'exit_step')
+    case 'wait':       return handleWait(run, step)
+    case 'condition':  return handleCondition(run, step, contact)
+    case 'branch':     return handleBranch(run, step, contact)
+    case 'send':       return handleSend(run, step, contact, flow)
+    case 'tag':        return handleTag(run, step, contact)
+    case 'fire_event': return handleFireEvent(run, step, contact)
+    case 'webhook':    return handleWebhook(run, step, contact)
+    case 'exit':       return exitFlowRun(run, step.reason || 'exit_step')
   }
 }
 ```
@@ -154,7 +183,7 @@ async function handleWait(run, step) {
   const ms = unitToMs(step.value, step.unit)
   const nextAt = new Date(Date.now() + ms)
 
-  await FlowRuns.findOneAndUpdate(
+  const updated = await FlowRuns.findOneAndUpdate(
     { _id: run._id, currentStepIndex: run.currentStepIndex },
     {
       $set: { nextActionAt: nextAt },
@@ -169,35 +198,32 @@ async function handleWait(run, step) {
       },
     },
   )
+  if (!updated) return // another worker advanced; their job will run.
+
+  // Schedule a delayed wakeup so the runner processes this run at nextAt.
+  await queue.enqueue('mailer:advance', { flowRunId: run._id }, { delay: ms })
 }
 ```
 
-The optimistic concurrency check (`currentStepIndex: run.currentStepIndex` in the filter) ensures only one worker advances the step. If a concurrent worker already advanced, our update no-ops.
+The optimistic-concurrency filter (`currentStepIndex: run.currentStepIndex`) ensures only one worker schedules the wakeup. If two workers race, the second's update no-ops and they don't schedule a duplicate job.
 
 #### `handleCondition`
 
-Evaluate the predicate. If true, advance to next step normally. If false and `ifFalse === 'exit'`, exit the run. If false and `ifFalse === 'continue'`, skip the next step.
+`condition` is a guard step. It evaluates the predicate. If **true**, the next step runs. If **false**, behavior is governed by `ifFalse`: `'continue'` skips the next step and goes to the one after, `'exit'` ends the flow_run.
 
-Wait, this needs clarification. Re-spec:
-
-> `condition` is a guard step. It evaluates the predicate. If **true**, the next step runs. If **false**, the behavior is governed by `ifFalse`: `'continue'` skips the next step and goes to the one after, `'exit'` ends the flow_run.
-
-For most cases, you want `'exit'` (e.g. "send only if they still haven't activated"). For "do something different if false," use `branch` instead.
+For most cases you want `'exit'` (e.g. "send only if they still haven't activated"). For "do something different if false," use `branch`.
 
 ```ts
 async function handleCondition(run, step, contact) {
   const result = await evaluatePredicate(step.test, contact, run)
 
-  let action: 'advance' | 'skip_one' | 'exit'
   if (result) {
-    action = 'advance'
-  } else if (step.ifFalse === 'continue') {
-    action = 'skip_one'
-  } else {
-    action = 'exit'
+    return advanceStep(run, { action: 'condition_evaluated', details: { result: true } })
   }
-
-  // ... update flow_run accordingly
+  if (step.ifFalse === 'continue') {
+    return advanceStep(run, { action: 'condition_evaluated', details: { result: false, skip: 1 } }, { skip: 1 })
+  }
+  return exitFlowRun(run, 'condition_false')
 }
 ```
 
@@ -206,10 +232,8 @@ async function handleCondition(run, step, contact) {
 ```ts
 async function handleBranch(run, step, contact) {
   const result = await evaluatePredicate(step.test, contact, run)
-  const subSteps = result ? step.ifTrueSteps : step.ifFalseSteps
 
-  // Descend into the chosen branch
-  await FlowRuns.findOneAndUpdate(
+  const updated = await FlowRuns.findOneAndUpdate(
     { _id: run._id, currentStepIndex: run.currentStepIndex },
     {
       $set: {
@@ -226,141 +250,114 @@ async function handleBranch(run, step, contact) {
       },
     },
   )
+  if (!updated) return
+  await queue.enqueue('mailer:advance', { flowRunId: run._id })
 }
 ```
 
-The `currentBranchPath` is a list of `[parentStepIndex, 'true'|'false', childStepIndex]` triples — supports arbitrary nesting depth. `locateStep` walks this path.
+`currentBranchPath` is a list of `[parentStepIndex, 'true'|'false', childStepIndex]` triples — supports arbitrary nesting depth. `locateStep` walks this path.
 
 #### `handleSend`
 
-This is the most important handler. Idempotent send.
+The most important handler. The runner does **not** call the provider inline — it creates the send row and enqueues a `mailer:send` job. The send worker handles provider dispatch and retries.
 
 ```ts
-async function handleSend(run, step, contact) {
+async function handleSend(run, step, contact, flow) {
   const template = await Templates.findOne({ slug: step.templateSlug })
   if (!template) {
-    return await failFlowRun(run, `template not found: ${step.templateSlug}`)
+    return failFlowRun(run, `template not found: ${step.templateSlug}`)
   }
 
   const dedupeKey = `${run._id}:${run.currentStepIndex}`
 
-  // Idempotency check — has this exact step already sent?
+  // Idempotency: has this exact step already produced a send?
   const existing = await Sends.findOne({ dedupeKey })
   if (existing) {
-    // Already sent (possibly by a previous tick that crashed mid-step). Skip but advance.
-    await advanceStep(run, {
+    return advanceStep(run, {
       action: 'sent',
-      stepIndex: run.currentStepIndex,
-      details: { dedupeKey, alreadySent: true },
+      details: { dedupeKey, alreadySent: true, sendId: existing._id },
     })
-    return
   }
 
-  // Suppression check
-  const suppressed = await Suppressions.findOne({ email: contact.email })
-  if (suppressed) {
-    await Sends.create({
-      dedupeKey,
-      contactId: contact._id,
-      templateId: template._id,
-      templateSlug: template.slug,
-      flowRunId: run._id,
-      to: contact.email,
-      fromName: template.fromName,
-      fromEmail: template.fromEmail,
-      subject: template.subject,
-      status: 'suppressed',
-      queuedAt: new Date(),
-    })
-    await advanceStep(run, { action: 'send_skipped', stepIndex: run.currentStepIndex, details: { reason: 'suppressed' } })
-    return
-  }
+  // Provider selection: step override > template override > kind-specific default > default
+  const providerName =
+    step.providerOverride
+    ?? template.providerOverride
+    ?? (template.kind === 'transactional' ? config.defaultTransactionalProvider : null)
+    ?? config.defaultProvider
 
-  // Render
-  const variables = buildVariableContext(contact, run)
-  const rendered = await renderTemplate(template, variables)
+  // Render at send-time (so contact fields are fresh).
+  const vars = buildVariableContext(contact, run, step.vars)
+  const rendered = await renderTemplate(template, vars)
 
-  // Create send row first (so we have an ID to thread through tracking links)
-  const send = await Sends.create({
+  // Persist the send row first (so we have a stable id for tracking links).
+  // Suppression is re-checked by the send worker per INVARIANTS.md rule 3.
+  const sendId = new ObjectId()
+  await Sends.insertOne({
+    _id: sendId,
     dedupeKey,
-    contactId: contact._id,
+    externalId: run.externalId,
+    emailAtSend: contact.email,
     templateId: template._id,
     templateSlug: template.slug,
     flowRunId: run._id,
-    to: contact.email,
+    broadcastId: null,
+    manualSendBy: null,
+    kind: template.kind,
+    provider: providerName,
+    providerMessageId: null,
     fromName: rendered.fromName,
     fromEmail: rendered.fromEmail,
     subject: rendered.subject,
     bodyHash: sha256(rendered.html),
     status: 'queued',
-    queuedAt: new Date(),
-    provider: defaultProvider.name,
+    openedAt: null, openCount: 0,
+    firstClickAt: null, clickCount: 0, clickedLinks: [],
+    unsubscribedAt: null, complainedAt: null,
+    errorMessage: null, bounceType: null, bounceReason: null,
+    queuedAt: new Date(), sentAt: null, deliveredAt: null,
   })
 
-  // Rewrite links + add open pixel using send._id
-  const finalHtml = applyTracking(rendered.html, send._id, template)
+  await queue.enqueue('mailer:send', { sendId, renderedHtml: rendered.html, renderedText: rendered.plainText })
 
-  try {
-    const result = await defaultProvider.send({
-      to: contact.email,
-      fromName: rendered.fromName,
-      fromEmail: rendered.fromEmail,
-      subject: rendered.subject,
-      html: finalHtml,
-      text: rendered.plainText,
-      headers: {
-        'List-Unsubscribe': `<${publicUrl}/m/unsub/${unsubToken(contact.email)}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      },
-      messageMeta: { sendId: send._id.toString() },
-    })
-
-    await Sends.updateOne(
-      { _id: send._id },
-      { $set: { status: 'sent', sentAt: new Date(), providerMessageId: result.providerId } },
-    )
-
-    await advanceStep(run, { action: 'sent', stepIndex: run.currentStepIndex, details: { sendId: send._id } })
-  } catch (err) {
-    await Sends.updateOne(
-      { _id: send._id },
-      { $set: { status: 'failed', errorMessage: err.message } },
-    )
-    // Increment attempts. Retry on next tick if under threshold.
-    await FlowRuns.updateOne(
-      { _id: run._id },
-      { $inc: { attemptsForCurrentStep: 1 } },
-    )
-    if (run.attemptsForCurrentStep + 1 >= MAX_SEND_ATTEMPTS) {
-      await failFlowRun(run, `send failed after ${MAX_SEND_ATTEMPTS} attempts`)
-    }
-  }
+  return advanceStep(run, { action: 'sent', details: { sendId, dedupeKey } })
 }
 ```
 
+The send worker (defined in `04-queues.md`) takes over from here:
+
+1. Re-load the send doc (could have been cancelled).
+2. Re-check suppression by `(emailAtSend, scope)` against `template.kind`.
+3. Re-check circuit breaker (`mailer_health.status`); marketing sends are held when tripped, transactional bypass.
+4. Apply tracking rewrites (open pixel, click links) using `sendId`.
+5. Call `provider.send(...)`.
+6. Update `sends.status` → `'sent'` + `providerMessageId`.
+7. On failure: BullMQ retries up to 4 times (exponential backoff). After exhaustion, send is `'failed'`. The flow_run has already advanced past this step — failed sends do not block subsequent steps.
+
 Key invariants:
 
-- **`dedupeKey` is `${flowRunId}:${stepIndex}`** — a given step in a given run can only ever send one email
-- **Send row created BEFORE provider call** — if the provider call succeeds but our DB write fails, we can recover from the provider's webhook
-- **Status transitions**: `queued` → `sent` → `delivered` (via webhook) → optionally `opened` / `clicked` / `bounced` / `complained`
+- **`dedupeKey = ${flowRunId}:${stepIndex}`** — a given step in a given run produces at most one send row.
+- **Send row created before enqueue** — if the enqueue fails, the row sits in `status: 'queued'` and the next tick can re-enqueue. If the worker fails partway, we have a row to update.
+- **Status transitions**: `queued` → `sent` → `delivered` (via webhook) → optionally `opened` / `clicked` / `bounced` / `complained` / `failed` / `suppressed`.
+- **No flow-run-level send retry counter.** BullMQ owns send retries. `attemptsForCurrentStep` covers non-send step failures (webhook step 5xx, condition predicate errors).
 
 #### `handleTag` / `handleFireEvent`
 
-Simple. Add/remove tags or insert a synthetic event. Advance.
+`handleTag` routes through the adapter's `addTags`/`removeTags` (host-owned tags) or writes to `mailer_contact_tags` (mailer-owned). `handleFireEvent` inserts a synthetic event row (with a dedupeKey derived from `${runId}:${stepIndex}`). Both then call `advanceStep`.
 
 #### `handleWebhook`
 
-POST to a URL. Useful for cross-system integration ("when this flow's third step runs, ping our analytics warehouse"). Treat failures as soft (log, continue) unless the step opts into hard-fail.
+POST to a URL. Useful for cross-system integration ("when this flow's third step runs, ping our analytics warehouse"). On failure: increment `attemptsForCurrentStep`, retry on next tick up to a configurable limit (default 3). After exhaustion, log + advance (soft-fail) unless the step opts into hard-fail (`{ failureMode: 'fail_run' }`).
 
 ## Idempotency guarantees
 
 | Operation | Mechanism |
 |---|---|
-| Don't enter same flow twice for same contact | `flow_runs` lookup by `(contactId, flowId)` for flows with `trigger.once = true` |
+| Don't enter same flow twice for same contact | Unique compound index `(externalId, flowId)` on `mailer_flow_runs` for flows with `trigger.once = true` |
 | Don't advance same step twice | Optimistic concurrency on `currentStepIndex` in `findOneAndUpdate` filter |
-| Don't send same email twice for same step | Unique `dedupeKey` constraint on `sends.dedupeKey` |
-| Don't double-process webhook events | Webhook events keyed on provider message ID + event timestamp; upsert |
-| Don't re-create flow_run if existing exited | When `trigger.once = false`, re-entry is allowed; otherwise prevented |
+| Don't send same email twice for same step | Unique `dedupeKey` constraint on `mailer_sends.dedupeKey` |
+| Don't double-process webhook events | Unique `(provider, providerEventId)` on `mailer_webhook_events` |
+| Don't re-create flow_run if existing exited | When `trigger.once = true`, re-entry is prevented; otherwise allowed |
 
 ## Versioning: what happens when a flow is edited?
 
@@ -371,15 +368,9 @@ Two competing requirements:
 
 Solution: pin `flowVersion` on flow_run creation. When the runner loads steps for a run, it checks `run.flowVersion === flow.version`. If yes, use `flow.steps`. If no, look up the pinned version from `mailer_flow_versions` (a snapshot collection populated on every publish).
 
-```ts
-mailer_flow_versions {
-  flowId, version, steps, publishedAt, publishedBy
-}
-```
+This collection is append-only. Keeps history indefinitely (retention policy in `08-compliance.md`).
 
-This collection is append-only. Keeps history forever (or until a retention policy is added).
-
-Cost: an extra collection. Benefit: agents can confidently edit and republish without worrying about breaking in-flight runs.
+Cost: an extra collection. Benefit: edits and republishes never break in-flight runs.
 
 ## Manual interventions
 
@@ -391,15 +382,16 @@ The admin UI exposes:
 - **Resend a specific send** — clone the send row with a new `dedupeKey` and re-dispatch
 - **Skip a stuck contact past a step** — manually advance their `currentStepIndex`
 
-All such mutations are logged in the run's `history`.
+All such mutations are logged in the run's `history` and `mailer_audit_log`.
 
 ## Retry policy
 
-- **Provider failures** (5xx, network errors): retry up to 3 times with exponential backoff (1m, 5m, 25m). Each retry is a separate tick.
-- **Render failures** (bad MJML, missing variable): no retry. Mark send `failed`, advance flow_run past the send step.
-- **Suppression**: skip cleanly, don't retry, log to `send_skipped`.
-- **Bounce (soft, returned in webhook)**: don't retry from this side. Provider handles soft-bounce retries internally.
-- **Bounce (hard, returned in webhook)**: don't retry. Add to suppressions. Future sends to that contact will skip.
+- **Provider failures** (5xx, network errors): BullMQ retries up to 4 times with exponential backoff (1m, 5m, 25m, 125m). Configurable via `sendRetryAttempts` / `sendRetryBackoff`.
+- **Render failures** (bad MJML, missing required variable): no retry. Mark send `failed`, advance flow_run past the send step.
+- **Suppression**: skip cleanly, mark send `suppressed`, advance flow_run.
+- **Soft bounce** (returned in webhook): no client-side retry. Provider handles soft-bounce retries internally. Three soft bounces for the same address within 30 days promote to a hard bounce (configurable; see `INVARIANTS.md` rule 13).
+- **Hard bounce** (returned in webhook): no retry. Add to suppressions. Future sends to that contact will skip.
+- **Webhook step failure**: increment `attemptsForCurrentStep`; retry on next tick up to `webhookRetryAttempts` (default 3).
 
 ## Observability
 
@@ -407,10 +399,10 @@ The runner emits structured logs (and optionally pushes to a log sink via config
 
 ```
 {level: 'info', event: 'tick_started', batchSize, ...}
-{level: 'info', event: 'flow_run_entered', flowSlug, contactEmail, ...}
+{level: 'info', event: 'flow_run_entered', flowSlug, externalId, ...}
 {level: 'info', event: 'step_processed', flowSlug, stepIndex, stepType, action, ...}
 {level: 'warn', event: 'send_failed', sendId, error, retryCount, ...}
 {level: 'error', event: 'tick_failed', error, durationMs, ...}
 ```
 
-Tick duration is exposed as a metric (`mailer.tick.duration_ms`) for monitoring backlog growth.
+Tick duration is exposed as a metric (`mailer.tick.duration_ms`) for monitoring backlog growth. Delayed-job lag (`mailer:advance` jobs sitting past their `delay`) is the primary backlog signal.

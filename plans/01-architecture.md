@@ -160,7 +160,7 @@ Views:
 - Suppressions list + manual add/remove
 - Broadcasts list + scheduling
 
-The admin UI **reads** everything and supports targeted **mutations** (pause/unpause flow, send test email, manually add suppression, promote template draft to published). Bigger structural changes (adding steps to flows, designing new templates) happen via direct database writes from an agent or developer.
+The admin UI **reads** everything and supports targeted **mutations** (pause/unpause flow, send test email, manually add suppression, promote template draft to published). Bigger structural changes (adding steps to flows, designing new templates) happen via direct database writes from a deploy script or developer.
 
 See [`09-admin-ui.md`](./09-admin-ui.md).
 
@@ -208,13 +208,13 @@ See [`09-admin-ui.md`](./09-admin-ui.md).
 5. Hard bounces and complaints also add the email to `suppressions`
 6. Unsubscribes mark the contact `status: 'unsubscribed'`
 
-### Lifecycle 5: An agent reconfigures a flow
+### Lifecycle 5: A deploy script reconfigures a flow
 
-1. Agent reads `flows` collection to see current setup
-2. Agent reads `templates` collection to find a template to insert
-3. Agent updates `flows.draft.steps`: pushes a new `{ type: 'send', templateSlug: 'new-template' }` step
-4. Agent (or a human via admin UI) publishes: `db.collection('flows').updateOne({ _id }, { $set: { steps: draft.steps, publishedAt: new Date() } })`
-5. Next runner tick uses the new step list for newly-entering flow_runs
+1. Script reads `mailer_flows` to see current setup
+2. Script reads `mailer_templates` to find a template to insert
+3. Script updates `flows.draft.steps`: pushes a new `{ type: 'send', templateSlug: 'new-template' }` step
+4. Script (or a human via admin UI) publishes: `db.collection('mailer_flows').updateOne({ _id }, { $set: { steps: draft.steps, publishedAt: new Date() } })`
+5. Newly-entering flow_runs pick up the new step list
 6. **In-flight flow_runs continue on their original `flowVersion`** (see [`03-runner.md`](./03-runner.md) for versioning details)
 
 ## Trust boundaries

@@ -88,13 +88,18 @@ const mailer = await Mailer.init({
     minSendsBeforeEval: 100,                             // don't trip on tiny sample sizes
   },
 
-  // Broadcast safety
+  // Broadcast safety + throughput
   broadcastConfirmationThreshold: 1000,                  // require typed-count gate above this
+  broadcastEnqueueBatchSize: 1000,                       // recipients enqueued per page when streaming a segment
+  broadcastEnqueueMaxWaiting: 5000,                      // pause enqueue when the send queue's waiting set exceeds this
 
   // Worker behavior
   workerless: false,                                     // set true on web processes that don't run BullMQ workers
   tickIntervalSeconds: 60,
   sendConcurrency: 5,
+  sendRatePerSecond: 10,                                 // global default; provider config overrides per-provider
+  softBouncePromotionThreshold: 3,                       // soft bounces in window → hard suppression
+  softBouncePromotionWindowDays: 30,
 
   // Tracking
   trackOpens: true,                                      // default; per-template overrides

@@ -1,24 +1,28 @@
-# Agent Guide
+# Direct DB Cookbook
 
-**This file is written for AI agents configuring mailer.** It's self-contained — if you've been pointed here without other context, you have everything you need.
+Advanced reference: configuring mailer by reading and writing MongoDB documents directly. Useful when you want to script a flow change, manage templates from infrastructure-as-code, or wire mailer into a deploy pipeline. For day-to-day use, the admin UI (`09-admin-ui.md`) and public API (`10-public-api.md`) are easier.
 
-If you are a human and you want to do these things via UI instead, see `09-admin-ui.md`. If you want to write integration code in a host app, see `10-public-api.md`. This file is about working with mailer via direct MongoDB reads and writes.
+This file is self-contained — point any operator or script at it and it has what they need.
 
 ---
 
 ## What mailer is
 
-Mailer is an embedded email automation library running inside a host SaaS app. It uses MongoDB collections for all of its state. **Configuring mailer means reading from and writing to those collections.**
+Mailer is an embedded email automation library running inside a host SaaS app. It uses MongoDB collections for all of its state. Configuring mailer can mean three things:
 
-You will not call MailerLite-style APIs. You will not click through a UI. You will issue MongoDB queries — using whichever Mongo access your environment provides.
+- Calling `mailer.fire()` and friends from host code (`10-public-api.md`)
+- Clicking through the admin UI (`09-admin-ui.md`)
+- Reading and writing MongoDB documents directly — this file
+
+The third path is the lowest-level. Mailer's data model is small and documented (`02-data-model.md`), so direct writes are a legitimate way to manage flows and templates from migration scripts, deploy hooks, or one-off operator commands.
 
 ---
 
 ## Your toolkit
 
-You have read and write access to MongoDB collections prefixed `mailer_`. The host app's `users` collection is also typically available but you should **read-only** treat it (the host owns user identity; mailer reads it through an adapter and you should follow the same convention).
+Read and write access to MongoDB collections prefixed `mailer_`. The host app's `users` collection is typically also available — treat it as read-only (host owns user identity; mailer reads through an adapter; follow the same convention from scripts).
 
-You can write to the audit log to mark your own actions. You can suggest deployments to a human via the admin UI's "proposal" mechanism for risky operations.
+Write to the audit log to mark direct-DB actions so a human reviewer can see what happened.
 
 ---
 
@@ -115,7 +119,7 @@ await db.collection('mailer_flows').updateOne(
   {
     $set: {
       'draft.steps': newSteps,
-      'draft.lastModifiedBy': 'agent:claude',
+      'draft.lastModifiedBy': 'script:operator',
       'draft.lastModifiedAt': new Date(),
       'draft.notes': 'Added a day-4 follow-up step',
       updatedAt: new Date(),
@@ -125,7 +129,7 @@ await db.collection('mailer_flows').updateOne(
 
 // IMPORTANT: also audit
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'flow.draft.update',
   resource: { collection: 'mailer_flows', id: flow._id, slug: 'activation-rescue' },
   before: { steps: flow.draft?.steps ?? flow.steps },
@@ -153,7 +157,7 @@ await db.collection('mailer_flow_versions').insertOne({
   steps: flow.draft.steps,
   trigger: flow.trigger,
   publishedAt: now,
-  publishedBy: 'agent:claude',
+  publishedBy: 'script:operator',
 })
 
 // 2. Promote draft to live
@@ -164,7 +168,7 @@ await db.collection('mailer_flows').updateOne(
       steps: flow.draft.steps,
       version: nextVersion,
       publishedAt: now,
-      publishedBy: 'agent:claude',
+      publishedBy: 'script:operator',
       draft: null,
       updatedAt: now,
     },
@@ -173,7 +177,7 @@ await db.collection('mailer_flows').updateOne(
 
 // 3. Audit
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'flow.publish',
   resource: { collection: 'mailer_flows', id: flow._id, slug: flow.slug },
   diffSummary: `Published v${nextVersion}`,
@@ -212,7 +216,7 @@ await db.collection('mailer_templates').updateOne(
         </mj-body>
       </mjml>`,
       'draft.notes': 'Tightened the opening line, replaced two-paragraph intro with one.',
-      'draft.lastModifiedBy': 'agent:claude',
+      'draft.lastModifiedBy': 'script:operator',
       'draft.lastModifiedAt': new Date(),
       updatedAt: new Date(),
     },
@@ -220,7 +224,7 @@ await db.collection('mailer_templates').updateOne(
 )
 
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'template.draft.update',
   resource: { collection: 'mailer_templates', id: tmpl._id, slug: tmpl.slug },
   diffSummary: 'Tightened subject + intro paragraph',
@@ -241,7 +245,7 @@ if (!tmpl.draft?.mjml) throw new Error('no draft to publish')
 //    — this handles compilation + plain-text derivation + audit
 // B) If you have direct DB access only, leave draft in place and ask a human to publish via admin UI.
 
-// Option A is preferred. Document this in your agent harness:
+// Option A is preferred. Wrap it in your deploy script:
 await mailer.templates.publish('activation-rescue-day-1')
 ```
 
@@ -284,7 +288,7 @@ await db.collection('mailer_flows').insertOne({
       { type: 'send', templateSlug: 'commercial-case-study' },
     ],
     notes: 'Initial draft. Audience-gated via customerType field.',
-    lastModifiedBy: 'agent:claude',
+    lastModifiedBy: 'script:operator',
     lastModifiedAt: new Date(),
   },
   goal: 'activation',
@@ -298,7 +302,7 @@ await db.collection('mailer_flows').insertOne({
 })
 
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'flow.create',
   resource: { collection: 'mailer_flows', slug },
   diffSummary: 'Created new flow (disabled, draft only)',
@@ -340,7 +344,7 @@ await mailer.scheduleBroadcast({
   segmentDefinition: { filters: [{ kind: 'subscriptionStatus', equals: 'subscribed' }] },
   scheduledAt: new Date('2026-06-01T15:00:00Z'),
   name: 'June Newsletter — Commercial Creator Edition',
-  createdBy: 'agent:claude',
+  createdBy: 'script:operator',
 })
 ```
 
@@ -363,12 +367,12 @@ await db.collection('mailer_broadcasts').insertOne({
   recipientCount: null,
   stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0 },
   createdAt: new Date(),
-  createdBy: 'agent:claude',
+  createdBy: 'script:operator',
   updatedAt: new Date(),
 })
 
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'broadcast.draft.create',
   resource: { collection: 'mailer_broadcasts', slug: 'june-newsletter-commercial' },
   occurredAt: new Date(),
@@ -510,7 +514,7 @@ await db.collection('mailer_templates').insertOne({
     preheader: 'Quick check-in. Reply with anything.',
     mjml: `<mjml>...</mjml>`,
     notes: 'Founder check-in, plain voice. No CTA — replies are the goal.',
-    lastModifiedBy: 'agent:claude',
+    lastModifiedBy: 'script:operator',
     lastModifiedAt: new Date(),
   },
   variablesSchema: {},
@@ -540,7 +544,7 @@ await db.collection('mailer_flows').updateOne(
     $set: {
       'draft.steps': newSteps,
       'draft.notes': 'Added day-21 check-in step',
-      'draft.lastModifiedBy': 'agent:claude',
+      'draft.lastModifiedBy': 'script:operator',
       'draft.lastModifiedAt': new Date(),
       updatedAt: new Date(),
     },
@@ -549,7 +553,7 @@ await db.collection('mailer_flows').updateOne(
 
 // 5. Audit
 await db.collection('mailer_audit_log').insertOne({
-  actor: 'agent:claude',
+  actor: 'script:operator',
   action: 'flow.draft.update',
   resource: { collection: 'mailer_flows', slug: flow.slug },
   diffSummary: 'Added day-21 check-in step (template pro-welcome-day-21)',
@@ -600,9 +604,9 @@ A few patterns to internalize:
 
 1. **Write to drafts, never to live.** All your flow + template edits go in `draft.*`. Publication is a separate, explicit action.
 
-2. **Audit everything you do.** A `mailer_audit_log` row per mutation. It's not enforced, but it's the difference between "we can review what the agent did" and "we have to git-bisect production."
+2. **Audit everything you do.** A `mailer_audit_log` row per mutation. It's not enforced, but it's the difference between "we can review what the script did" and "we have to git-bisect production."
 
-3. **Read before you write.** Always re-read the document and check whether someone else (human or another agent) has already changed something. Use the `updatedAt` field as a soft optimistic-concurrency hint.
+3. **Read before you write.** Always re-read the document and check whether someone else has already changed something. Use the `updatedAt` field as a soft optimistic-concurrency hint.
 
 4. **Prefer the API helpers over direct writes when available.** `mailer.tag()`, `mailer.suppress()`, `mailer.templates.publish()`, `mailer.scheduleBroadcast()` are the library's safe paths. They handle audit, validation, side-effects.
 
@@ -629,10 +633,10 @@ The most common reference patterns:
 
 `INVARIANTS.md` is short (15 rules). Read it before you do anything mutating. The rules exist because each one represents a category of bug that ate someone's afternoon at some point. They're not arbitrary.
 
-Most important for agents:
+Most important when writing direct-DB scripts:
 
-- Rule 1: `dedupeKey` is required on `fire()`. The library refuses calls without one.
-- Rule 7: Don't branch flows on opens/clicks. The signals are noisy.
+- Rule 1: `dedupeKey` is required on `fire()`. Use `mailer.registerEvent(name, { dedupePolicy })` to auto-derive, or pass an explicit key.
+- Rule 7: `hasOpened`/`hasClicked` predicates exist but are labeled noisy. Prefer `hasOpenedExcludingBots` or real product events for branching.
 - Rule 9: GDPR forget leaves a hashed suppression forever. Don't try to "clean up" old suppressions.
 - Rule 10: Audit log is append-only. No deletes. Ever.
 - Rule 11: Broadcasts > threshold need typed-count confirmation. Don't bypass.
@@ -642,6 +646,6 @@ Most important for agents:
 ## When in doubt
 
 - Propose, don't act. Leave changes in drafts. Let a human publish.
-- Audit your reasoning in `mailer_audit_log` with a clear `diffSummary`. Future-you (or another agent) will thank you.
+- Audit your reasoning in `mailer_audit_log` with a clear `diffSummary`. Future-you (or the next script) will thank you.
 - Ask if you're unsure. The admin UI has a `proposals` view for human review.
 - If something's broken in production, prefer reading-only diagnostics until you understand the cause. The wrong "fix" can compound.
