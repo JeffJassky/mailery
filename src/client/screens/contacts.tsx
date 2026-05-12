@@ -1,5 +1,4 @@
 /* Contacts list */
-import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
@@ -8,25 +7,20 @@ import { LoadState, EmptyRow } from '../lib/load-state'
 export function Contacts({ setRoute }: any) {
   const { data: live, loading, error, refetch } = useLive(() => api.contacts())
   const contacts = live?.contacts ?? []
+  const counts = (live as any)?.counts ?? null
 
   return (
     <>
       <PageHead
         title="Contacts"
         desc={<>Read-through to the host's <span className="mono">users</span> collection via ContactAdapter.</>}
-        actions={
-          <>
-            <button className="btn"><Icons.Download size={14} />Export</button>
-            <button className="btn btn-primary"><Icons.Plus size={14} />Add lead</button>
-          </>
-        }
       />
 
       <div className="kpis">
-        <div className="kpi"><div className="kpi-label">Subscribed</div><div className="kpi-value">{live ? contacts.filter((c: any) => c.status === 'subscribed').length : '—'}</div></div>
-        <div className="kpi"><div className="kpi-label">Pending DOI</div><div className="kpi-value">{live ? contacts.filter((c: any) => c.status === 'pending_doi').length : '—'}</div></div>
-        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">{live ? contacts.filter((c: any) => c.status === 'unsubscribed').length : '—'}</div></div>
-        <div className="kpi"><div className="kpi-label">Showing</div><div className="kpi-value">{live ? contacts.length : '—'}</div></div>
+        <div className="kpi"><div className="kpi-label">Subscribed</div><div className="kpi-value">{counts ? counts.subscribed.toLocaleString() : '—'}</div><div className="kpi-meta subtle">All-time</div></div>
+        <div className="kpi"><div className="kpi-label">Pending DOI</div><div className="kpi-value">{counts ? counts.pending_doi.toLocaleString() : '—'}</div></div>
+        <div className="kpi"><div className="kpi-label">Unsubscribed</div><div className="kpi-value">{counts ? counts.unsubscribed.toLocaleString() : '—'}</div></div>
+        <div className="kpi"><div className="kpi-label">Showing</div><div className="kpi-value">{live ? contacts.length.toLocaleString() : '—'}</div><div className="kpi-meta subtle">{(live as any)?.nextCursor ? 'first page · more available' : (live ? 'all loaded' : '')}</div></div>
       </div>
 
       <div className="card card-pad-0">
@@ -58,7 +52,11 @@ export function Contacts({ setRoute }: any) {
                           </div>
                         </div>
                       </td>
-                      <td><StatusPill status={c.status === 'pending_doi' ? 'queued' : c.status ?? 'subscribed'} /></td>
+                      <td>
+                        {c.status
+                          ? <StatusPill status={c.status === 'pending_doi' ? 'queued' : c.status} />
+                          : <span className="subtle text-xs">—</span>}
+                      </td>
                       <td>
                         {Array.isArray(c.tags) && c.tags.length > 0
                           ? c.tags.map((t: string) => <span key={t} className="tag" style={{ marginRight: 4 }}>{t}</span>)

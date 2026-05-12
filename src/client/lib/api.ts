@@ -54,7 +54,7 @@ export const api = {
   updateBroadcast: (slug: string, body: Record<string, unknown>) =>
     json<{ ok: boolean }>(`/broadcasts/${slug}`, { method: 'PATCH', body: JSON.stringify(body) }),
   countSegment: (slug: string, segmentDefinition: any) =>
-    json<{ stageA: number; stageB: number; afterSuppression: number; computedMs: number }>(`/broadcasts/${slug}/segment/count`, { method: 'POST', body: JSON.stringify({ segmentDefinition }) }),
+    json<{ upperBound: number; approximate: boolean; computedMs: number }>(`/broadcasts/${slug}/segment/count`, { method: 'POST', body: JSON.stringify({ segmentDefinition }) }),
   scheduleBroadcast: (slug: string, body: { scheduledAt: string; confirmedCount: number; respectRecipientTimezone?: boolean }) =>
     json<{ ok: boolean }>(`/broadcasts/${slug}/schedule`, { method: 'POST', body: JSON.stringify(body) }),
   cancelBroadcast: (slug: string) => json<{ ok: boolean }>(`/broadcasts/${slug}/cancel`, { method: 'POST' }),
@@ -92,21 +92,22 @@ export interface SetupStatus {
 
 export interface MePayload {
   actor: string
-  permissions: Record<string, boolean>
   counts: { flows: number; templates: number; broadcasts: number; contacts: number; suppressions: number }
-  health: { status: string }
+  /** `status` is null when no tick has run yet (unknown, not healthy). */
+  health: { status: string | null }
   providers: { names: string[]; default: string }
+  broadcastConfirmationThreshold: number
 }
 
 export interface DashboardPayload {
   kpis: {
     sends: { value: number; delta: number | null }
     deliveredRate: { value: number | null; delta: number | null; bounced: number }
-    openRate: { value: number | null; delta: number | null; exclBots: boolean }
+    openRate: { value: number | null; delta: number | null }
     clickRate: { value: number | null; delta: number | null }
   }
   series: { hourly: { sends: number[]; opens: number[] } }
-  health: { status: string; rates: Record<string, number> }
+  health: { status: string | null; rates: Record<string, number> | null; thresholds: Record<string, number> }
   queue: {
     inFlight: number | null
     delayed: number | null

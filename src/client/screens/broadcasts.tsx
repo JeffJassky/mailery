@@ -7,13 +7,17 @@ import { LoadState, EmptyRow } from '../lib/load-state'
 
 export function Broadcasts({ setRoute }: any) {
   const { data: broadcasts, loading, error, refetch } = useLive(() => api.broadcasts())
+  const { data: me } = useLive(() => api.me())
+  const threshold = me?.broadcastConfirmationThreshold
   const rows = broadcasts ?? []
 
   return (
     <>
       <PageHead
         title="Broadcasts"
-        desc="One-off campaigns. Confirmation gate kicks in above 1,000 recipients."
+        desc={threshold != null
+          ? `One-off campaigns. Confirmation gate kicks in above ${threshold.toLocaleString()} recipients.`
+          : 'One-off campaigns.'}
         actions={<button className="btn btn-primary" onClick={() => setRoute({ screen: 'broadcast-new' })}><Icons.Plus size={14} />New broadcast</button>}
       />
 
@@ -55,11 +59,12 @@ export function Broadcasts({ setRoute }: any) {
                 <EmptyRow colSpan={7} label="No broadcasts yet." />
               ) : (
                 rows.map((b: any) => {
-                  const recipients = b.recipients ?? b.recipientCount
-                  const opens = b.opens ?? (recipients ? (b.stats?.opened ?? 0) / recipients : null)
-                  const clicks = b.clicks ?? (recipients ? (b.stats?.clicked ?? 0) / recipients : null)
+                  const recipients = b.recipientCount ?? b.recipients
+                  const delivered = b.stats?.delivered ?? 0
+                  const opens = delivered ? (b.stats?.opened ?? 0) / delivered : null
+                  const clicks = delivered ? (b.stats?.clicked ?? 0) / delivered : null
                   return (
-                    <tr key={b.slug}>
+                    <tr key={b.slug} onClick={() => setRoute({ screen: 'broadcast-new', slug: b.slug })}>
                       <td>
                         <div className="f500">{b.name}</div>
                         <div className="text-xs subtle mono">broadcasts/{b.slug}</div>

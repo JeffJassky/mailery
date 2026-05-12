@@ -632,7 +632,7 @@ function PredicateEditor({ predicate, onChange }: { predicate: any; onChange: (p
 // ---------------------------------------------------------------------------
 
 function TemplatePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const { data: templates } = useLive(() => api.templates(), [] as any[])
+  const { data: templates } = useLive(() => api.templates())
 
   if (!templates || templates.length === 0) {
     return <input className="input" placeholder="welcome-1" value={value} onChange={(e) => onChange(e.target.value)} />

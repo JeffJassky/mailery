@@ -1,5 +1,4 @@
 /* Sends log */
-import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
@@ -14,7 +13,6 @@ export function Sends({ setRoute }: any) {
       <PageHead
         title="Sends"
         desc="Every send. Live status from provider webhooks."
-        actions={<button className="btn"><Icons.Download size={14} />Export CSV</button>}
       />
 
       <div className="filter-bar">

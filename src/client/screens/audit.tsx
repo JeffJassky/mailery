@@ -13,8 +13,7 @@ export function Audit(_: any) {
     <>
       <PageHead
         title="Audit log"
-        desc="Every mutating action. Append-only. Diffs available on click."
-        actions={<button className="btn"><Icons.Download size={14} />Export</button>}
+        desc="Every mutating action. Append-only."
       />
 
       <div className="card card-pad-0">

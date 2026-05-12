@@ -1,4 +1,5 @@
 /* Health */
+import React from 'react'
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
 import { api } from '../lib/api'
@@ -7,12 +8,40 @@ import { LoadState, EmptyRow } from '../lib/load-state'
 
 export function Health(_: any) {
   const { data: health, loading, error, refetch } = useLive(() => api.health())
-  const { data: trips } = useLive(() => api.healthTrips())
+  const { data: trips, refetch: refetchTrips } = useLive(() => api.healthTrips())
   const { data: me } = useLive(() => api.me())
+  const [resuming, setResuming] = React.useState(false)
+  const [resumeError, setResumeError] = React.useState<string | null>(null)
+
+  async function resume() {
+    setResuming(true)
+    setResumeError(null)
+    try {
+      await api.resumeHealth()
+      refetch()
+      refetchTrips()
+    } catch (err: any) {
+      setResumeError(String(err?.message ?? err))
+    } finally {
+      setResuming(false)
+    }
+  }
 
   const rates = (health as any)?.rates ?? {}
+  const thresholds = (health as any)?.thresholds ?? {}
   const fmt = (n: number | undefined) => (n == null ? '—' : `${(n * 100).toFixed(2)}%`)
   const status = (health as any)?.status
+
+  // Colorize a rate by its trip threshold:
+  //  ≥ trip → red, ≥ 50% of trip → amber, else green, undefined → muted.
+  function rateColor(rate: number | undefined, tripPct: number | undefined): string {
+    if (rate == null || tripPct == null) return 'var(--fg-muted)'
+    const ratePct = rate * 100
+    if (ratePct >= tripPct) return 'var(--red-fg)'
+    if (ratePct >= tripPct / 2) return 'var(--amber-fg)'
+    return 'var(--green-fg)'
+  }
+  const fmtTrip = (pct: number | undefined, label: string) => (pct == null ? '' : `${label} @ ${pct.toFixed(2)}%`)
 
   return (
     <>
@@ -21,18 +50,39 @@ export function Health(_: any) {
         desc="Circuit breaker · rolling window · provider status."
         actions={
           <>
-            <span className={'pill ' + statusClass(status)}><span className="dot" />{status ?? '…'}</span>
-            <button className="btn"><Icons.Pause size={14} />Pause all sends</button>
+            <span className={'pill ' + statusClass(status)}><span className="dot" />{status ?? (health ? 'no telemetry' : '…')}</span>
+            {status && status !== 'healthy' && (
+              <button className="btn btn-primary" disabled={resuming} onClick={resume}>
+                <Icons.Play size={14} />{resuming ? 'Resuming…' : 'Resume sends'}
+              </button>
+            )}
+            {resumeError && <span className="text-xs" style={{ color: 'var(--red-fg)' }}>{resumeError}</span>}
           </>
         }
       />
 
       <LoadState loading={loading && !health} error={error} empty={false} retry={refetch}>
         <div className="kpis">
-          <div className="kpi"><div className="kpi-label">Hard bounce / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.hardBounceRate)}</div><div className="kpi-meta subtle">Trip @ 2.00%</div></div>
-          <div className="kpi"><div className="kpi-label">Complaint / 1h</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.complaintRate)}</div><div className="kpi-meta subtle">Trip @ 0.30%</div></div>
-          <div className="kpi"><div className="kpi-label">Combined bounce</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.combinedBounceRate ?? rates.bounceRate)}</div><div className="kpi-meta subtle">Trip @ 5.00%</div></div>
-          <div className="kpi"><div className="kpi-label">Failed-to-send</div><div className="kpi-value" style={{ color: 'var(--green-fg)' }}>{fmt(rates.failureRate)}</div><div className="kpi-meta subtle">Degrade @ 10.00%</div></div>
+          <div className="kpi">
+            <div className="kpi-label">Hard bounce / 1h</div>
+            <div className="kpi-value" style={{ color: rateColor(rates.hardBounceRate, thresholds.hardBounceRatePctTrip) }}>{fmt(rates.hardBounceRate)}</div>
+            <div className="kpi-meta subtle">{fmtTrip(thresholds.hardBounceRatePctTrip, 'Trip')}</div>
+          </div>
+          <div className="kpi">
+            <div className="kpi-label">Complaint / 1h</div>
+            <div className="kpi-value" style={{ color: rateColor(rates.complaintRate, thresholds.complaintRatePctTrip) }}>{fmt(rates.complaintRate)}</div>
+            <div className="kpi-meta subtle">{fmtTrip(thresholds.complaintRatePctTrip, 'Trip')}</div>
+          </div>
+          <div className="kpi">
+            <div className="kpi-label">Combined bounce</div>
+            <div className="kpi-value" style={{ color: rateColor(rates.combinedBounceRate ?? rates.bounceRate, thresholds.combinedBounceRatePctTrip) }}>{fmt(rates.combinedBounceRate ?? rates.bounceRate)}</div>
+            <div className="kpi-meta subtle">{fmtTrip(thresholds.combinedBounceRatePctTrip, 'Trip')}</div>
+          </div>
+          <div className="kpi">
+            <div className="kpi-label">Failed-to-send</div>
+            <div className="kpi-value" style={{ color: rateColor(rates.failureRate, thresholds.failedToSendRatePctDegrade) }}>{fmt(rates.failureRate)}</div>
+            <div className="kpi-meta subtle">{fmtTrip(thresholds.failedToSendRatePctDegrade, 'Degrade')}</div>
+          </div>
         </div>
 
         <div className="split split-asym" style={{ marginBottom: 16 }}>
@@ -94,8 +144,10 @@ export function Health(_: any) {
   )
 }
 
-function statusClass(s: string | undefined): string {
+function statusClass(s: string | null | undefined): string {
   if (s === 'tripped') return 'red'
   if (s === 'degraded') return 'amber'
-  return 'green'
+  if (s === 'healthy') return 'green'
+  return 'neutral'
 }
+

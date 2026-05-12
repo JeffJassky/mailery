@@ -1,5 +1,4 @@
 /* Send detail */
-import { Icons } from '../components/icons'
 import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
@@ -25,18 +24,12 @@ function Body({ data }: { data: any }) {
       <PageHead
         title={<span className="mono">{String(s._id)}</span>}
         desc={<>Sent to <span className="mono">{s.emailAtSend ?? '—'}</span></>}
-        actions={
-          <>
-            <button className="btn"><Icons.Eye size={14} />View as HTML</button>
-            <button className="btn"><Icons.Send size={14} />Resend</button>
-          </>
-        }
       />
 
       <div className="split split-asym">
         <div className="vstack" style={{ gap: 16 }}>
           <div className="card">
-            <div className="card-head"><span className="card-title">Status timeline</span><div className="card-actions"><StatusPill status={s.status ?? 'queued'} /></div></div>
+            <div className="card-head"><span className="card-title">Status timeline</span><div className="card-actions">{s.status ? <StatusPill status={s.status} /> : <span className="text-xs subtle">—</span>}</div></div>
             <div className="card-body">
               {timeline.length === 0 ? (
                 <div className="text-xs subtle" style={{ padding: 8 }}>No timeline events yet.</div>
@@ -89,7 +82,9 @@ function Body({ data }: { data: any }) {
               {webhookEvents.length > 0 ? (
                 webhookEvents.map((w: any, i: number) => (
                   <div key={String(w._id ?? i)} className="hstack">
-                    <StatusPill status={w.normalizedType ?? w.type ?? 'delivered'} />
+                    {(w.normalizedType ?? w.type)
+                      ? <StatusPill status={w.normalizedType ?? w.type} />
+                      : <span className="text-xs subtle">—</span>}
                     <span className="grow" />
                     <span className="text-xs subtle mono">{w.occurredAt ? new Date(w.occurredAt).toLocaleTimeString() : ''}</span>
                     <span className="text-xs subtle mono">{w.providerEventId ?? ''}</span>

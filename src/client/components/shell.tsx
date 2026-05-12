@@ -6,10 +6,11 @@ import type { MePayload } from '../lib/api'
 type Route = { screen: string; slug?: string; id?: string }
 
 const HEALTH_LABEL: Record<string, { text: string; cls: string }> = {
-  healthy: { text: 'Healthy', cls: 'dot' },
+  healthy: { text: 'Healthy', cls: 'dot green' },
   degraded: { text: 'Degraded', cls: 'dot amber' },
   tripped: { text: 'Tripped', cls: 'dot red' },
 }
+const HEALTH_UNKNOWN = { text: 'No telemetry yet', cls: 'dot' }
 
 function formatCount(n: number | undefined): string | undefined {
   if (n == null) return undefined
@@ -38,8 +39,8 @@ export function Sidebar({
   )
 
   const counts = me?.counts
-  const status = me?.health.status ?? ''
-  const health = HEALTH_LABEL[status] ?? { text: status || '…', cls: 'dot' }
+  const status = me?.health.status ?? null
+  const health = !me ? { text: '…', cls: 'dot' } : status ? (HEALTH_LABEL[status] ?? { text: status, cls: 'dot' }) : HEALTH_UNKNOWN
 
   return (
     <aside className="sidebar">
@@ -116,11 +117,6 @@ export function Topbar({
         ))}
       </div>
       <div className="topbar-spacer" />
-      <div className="topbar-search">
-        <Icons.Search size={14} />
-        <span>Search contacts, sends, flows…</span>
-        <kbd>⌘K</kbd>
-      </div>
       {right}
       <button
         className="icon-btn"
@@ -128,9 +124,6 @@ export function Topbar({
         title="Toggle theme"
       >
         {theme === 'dark' ? <Icons.Sun size={15} /> : <Icons.Moon size={15} />}
-      </button>
-      <button className="icon-btn" title="Notifications">
-        <Icons.Bell size={15} />
       </button>
     </div>
   )

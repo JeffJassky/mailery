@@ -9,12 +9,9 @@ export function ContactDetail({ id }: any) {
   const { data, loading, error, refetch } = useLive(() => api.contact(id))
 
   return (
-    <>
-      <PageHead title={id} desc={<span className="mono">{id}</span>} />
-      <LoadState loading={loading && !data} error={error} empty={!data} emptyLabel="Contact not found." retry={refetch}>
-        {data && <ContactBody data={data} />}
-      </LoadState>
-    </>
+    <LoadState loading={loading && !data} error={error} empty={!data} emptyLabel="Contact not found." retry={refetch}>
+      {data && <ContactBody data={data} />}
+    </LoadState>
   )
 }
 
@@ -34,13 +31,6 @@ function ContactBody({ data }: { data: any }) {
       <PageHead
         title={name}
         desc={<><span className="mono">{email}</span> · <span className="mono">{externalId}</span></>}
-        actions={
-          <>
-            <button className="btn"><Icons.Send size={14} />Resend last</button>
-            <button className="btn"><Icons.Tag size={14} />Add tag</button>
-            <button className="btn btn-danger"><Icons.Shield size={14} />Unsubscribe</button>
-          </>
-        }
       />
 
       <div className="split split-asym">
@@ -120,7 +110,15 @@ function ContactBody({ data }: { data: any }) {
           <div className="card">
             <div className="card-head"><span className="card-title">Subscription</span></div>
             <div className="card-body" style={{ display: 'grid', gap: 8 }}>
-              <div className="hstack"><span className="text-sm subtle">Status</span><span className="grow" /><StatusPill status={(sub.status ?? c?.status ?? 'subscribed') === 'pending_doi' ? 'queued' : (sub.status ?? c?.status ?? 'subscribed')} /></div>
+              <div className="hstack">
+                <span className="text-sm subtle">Status</span>
+                <span className="grow" />
+                {(() => {
+                  const raw = sub.status ?? c?.status ?? null
+                  if (!raw) return <span className="text-xs subtle">—</span>
+                  return <StatusPill status={raw === 'pending_doi' ? 'queued' : raw} />
+                })()}
+              </div>
               <div className="hstack"><span className="text-sm subtle">Source</span><span className="grow" /><span className="mono text-xs">{sub.source ?? '—'}</span></div>
               <div className="hstack"><span className="text-sm subtle">Subscribed</span><span className="grow" /><span className="text-xs">{sub.subscribedAt ? formatRel(sub.subscribedAt) : '—'}</span></div>
               <div className="hstack"><span className="text-sm subtle">Email at subscribe</span><span className="grow" /><span className="mono text-xs">{sub.emailAtSubscribe ?? email}</span></div>

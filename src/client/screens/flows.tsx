@@ -41,10 +41,7 @@ export function Flows({ setRoute }: any) {
         title="Flows"
         desc="Event-triggered automations."
         actions={
-          <>
-            <button className="btn"><Icons.Download size={14} />Export JSON</button>
-            <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New flow</button>
-          </>
+          <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New flow</button>
         }
       />
 
@@ -124,7 +121,7 @@ export function Flows({ setRoute }: any) {
                       <div className="text-xs subtle mono">{f.slug}</div>
                     </td>
                     <td><span className="tag">{triggerLabel(f)}</span></td>
-                    <td><span className="pill neutral">{f.goal ?? '—'}</span></td>
+                    <td>{f.goal ? <span className={'pill ' + goalPillClass(f.goal)}>{f.goal}</span> : <span className="subtle text-xs">—</span>}</td>
                     <td className="num tabular">{f.stats?.activeRuns ?? 0}</td>
                     <td className="num tabular">{f.stats?.sendsLast7Days ?? 0}</td>
                     <td className="mono text-xs">v{f.version ?? 1}</td>
@@ -138,6 +135,17 @@ export function Flows({ setRoute }: any) {
       </div>
     </>
   )
+}
+
+function goalPillClass(goal: string): string {
+  switch (goal) {
+    case 'activation': return 'green'
+    case 'conversion': return 'violet'
+    case 'retention': return 'blue'
+    case 'reactivation': return 'amber'
+    case 'transactional': return 'neutral'
+    default: return 'neutral'
+  }
 }
 
 function triggerLabel(f: any): string {

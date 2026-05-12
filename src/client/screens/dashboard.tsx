@@ -6,6 +6,13 @@ import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
 
+function formatProviderList(names: string[] | undefined): string {
+  if (!names || names.length === 0) return 'no providers'
+  if (names.length === 1) return `provider: ${names[0]}`
+  if (names.length <= 3) return `providers: ${names.join(', ')}`
+  return `providers: ${names.slice(0, 2).join(', ')} +${names.length - 2}`
+}
+
 export function Sparkline({ data, color = 'var(--accent)', height = 36 }: any) {
   if (!data || data.length < 2) return null
   const w = 200, h = height
@@ -60,6 +67,7 @@ function AreaChart({ a, b, height = 200 }: any) {
 
 export function Dashboard({ setRoute }: any) {
   const { data, loading, error, refetch } = useLive(() => api.dashboard())
+  const { data: me } = useLive(() => api.me())
   const fmtPct = (v: number | null | undefined) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
   const fmtDelta = (delta: number | null | undefined, unit: 'pct' | 'pp' = 'pct') => {
     if (delta == null) return null
@@ -73,12 +81,11 @@ export function Dashboard({ setRoute }: any) {
     <>
       <PageHead
         title="Dashboard"
-        desc="Last 24 hours · production · all providers"
+        desc={`Last 24 hours · ${formatProviderList(me?.providers.names)}`}
         actions={
-          <>
-            <button className="btn"><Icons.Calendar size={14} />Last 24h</button>
-            <button className="btn-primary btn"><Icons.Plus size={14} />New broadcast</button>
-          </>
+          <button className="btn btn-primary" onClick={() => setRoute({ screen: 'broadcast-new' })}>
+            <Icons.Plus size={14} />New broadcast
+          </button>
         }
       />
 
@@ -104,7 +111,7 @@ export function Dashboard({ setRoute }: any) {
               <div className="kpi">
                 <div className="kpi-label">Open rate</div>
                 <div className="kpi-value">{fmtPct(data.kpis.openRate.value)}</div>
-                <div className="kpi-meta">{fmtDelta(data.kpis.openRate.delta, 'pp')}<span>{data.kpis.openRate.exclBots ? 'excl. bots' : 'raw'}</span></div>
+                <div className="kpi-meta">{fmtDelta(data.kpis.openRate.delta, 'pp')}<span>vs. prev 24h</span></div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Click rate</div>
@@ -131,23 +138,41 @@ export function Dashboard({ setRoute }: any) {
               <div className="card">
                 <div className="card-head">
                   <span className="card-title">Health</span>
-                  <div className="card-actions"><span className={'pill ' + (data.health.status === 'healthy' ? 'green' : data.health.status === 'tripped' ? 'red' : 'amber')}><span className="dot"></span>{data.health.status}</span></div>
+                  <div className="card-actions">
+                    <span className={'pill ' + (data.health.status === 'healthy' ? 'green' : data.health.status === 'tripped' ? 'red' : data.health.status === 'degraded' ? 'amber' : 'neutral')}>
+                      <span className="dot"></span>{data.health.status ?? 'no telemetry'}
+                    </span>
+                  </div>
                 </div>
                 <div className="card-body">
                   <div style={{ display: 'grid', gap: 12 }}>
-                    {[
-                      { label: 'Hard bounce / 1h', v: fmtPct(data.health.rates.hardBounceRate ?? 0), warn: '< 2%', cls: 'green' },
-                      { label: 'Complaint / 1h', v: fmtPct(data.health.rates.complaintRate ?? 0), warn: '< 0.3%', cls: 'green' },
-                      { label: 'Combined bounce', v: fmtPct((data.health.rates as any).combinedBounceRate ?? data.health.rates.bounceRate ?? 0), warn: '< 5%', cls: 'green' },
-                      { label: 'Failed-to-send', v: fmtPct(data.health.rates.failureRate ?? 0), warn: '< 10%', cls: 'green' },
-                    ].map((r) => (
-                      <div key={r.label} style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                        <span className="text-xs subtle">{r.label}</span>
-                        <span className="grow" />
-                        <span className="f600 tabular">{r.v}</span>
-                        <span className={'pill ' + r.cls} style={{ fontSize: 10.5 }}>{r.warn}</span>
-                      </div>
-                    ))}
+                    {(() => {
+                      const th = data.health.thresholds ?? {} as Record<string, number>
+                      const rates = data.health.rates
+                      const cls = (rate: number | null, trip: number | undefined) => {
+                        if (rate == null || trip == null) return 'neutral'
+                        const pct = rate * 100
+                        if (pct >= trip) return 'red'
+                        if (pct >= trip / 2) return 'amber'
+                        return 'green'
+                      }
+                      const trip = (t: number | undefined, kind: 'trip' | 'degrade') =>
+                        t == null ? '—' : `${kind === 'degrade' ? 'degrade' : 'trip'} ${t}%`
+                      const rows = [
+                        { label: 'Hard bounce / 1h', rate: rates?.hardBounceRate ?? null, trip: th.hardBounceRatePctTrip, kind: 'trip' as const },
+                        { label: 'Complaint / 1h', rate: rates?.complaintRate ?? null, trip: th.complaintRatePctTrip, kind: 'trip' as const },
+                        { label: 'Combined bounce', rate: (rates as any)?.combinedBounceRate ?? rates?.bounceRate ?? null, trip: th.combinedBounceRatePctTrip, kind: 'trip' as const },
+                        { label: 'Failed-to-send', rate: rates?.failureRate ?? null, trip: th.failedToSendRatePctDegrade, kind: 'degrade' as const },
+                      ]
+                      return rows.map((r) => (
+                        <div key={r.label} style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                          <span className="text-xs subtle">{r.label}</span>
+                          <span className="grow" />
+                          <span className="f600 tabular">{r.rate == null ? '—' : fmtPct(r.rate)}</span>
+                          <span className={'pill ' + cls(r.rate, r.trip)} style={{ fontSize: 10.5 }}>{trip(r.trip, r.kind)}</span>
+                        </div>
+                      ))
+                    })()}
                   </div>
                   <div className="divider" />
                   <div className="text-xs subtle" style={{ marginBottom: 6 }}>Queue</div>

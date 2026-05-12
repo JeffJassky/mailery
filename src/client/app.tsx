@@ -39,7 +39,7 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
     crumbs: (r) => ['Mailery', 'Templates', r.slug ?? ''],
   },
   broadcasts:        { Comp: (_r, setRoute) => <Broadcasts setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Broadcasts'] },
-  'broadcast-new':   { Comp: (_r, setRoute) => <BroadcastNew setRoute={setRoute} />,                    crumbs: () => ['Mailery', 'Broadcasts', 'New'] },
+  'broadcast-new':   { Comp: (r, setRoute) => <BroadcastNew setRoute={setRoute} slug={r.slug} />,       crumbs: (r) => ['Mailery', 'Broadcasts', r.slug ?? 'New'] },
   contacts:          { Comp: (_r, setRoute) => <Contacts setRoute={setRoute} />,                        crumbs: () => ['Mailery', 'Contacts'] },
   'contact-detail':  { Comp: (r, setRoute) => <ContactDetail id={r.id} setRoute={setRoute} />,          crumbs: (r) => ['Mailery', 'Contacts', r.id ?? ''] },
   sends:             { Comp: (_r, setRoute) => <Sends setRoute={setRoute} />,                           crumbs: () => ['Mailery', 'Sends'] },

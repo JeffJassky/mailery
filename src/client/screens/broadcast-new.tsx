@@ -22,11 +22,10 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
   // Live load when editing.
   const { data: live, refetch } = useLive(
     () => (isEditing ? api.broadcast(existingSlug) : Promise.resolve(null)),
-    null as any,
   )
 
   // Templates for the picker.
-  const { data: templates } = useLive(() => api.templates(), [] as any[])
+  const { data: templates } = useLive(() => api.templates())
 
   // Local form state.
   const [slug, setSlug] = React.useState('')
@@ -40,7 +39,7 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
   const [respectTz, setRespectTz] = React.useState(false)
   const [typedCount, setTypedCount] = React.useState('')
 
-  const [stageCount, setStageCount] = React.useState<{ stageA: number; stageB: number; afterSuppression: number; computedMs: number } | null>(null)
+  const [stageCount, setStageCount] = React.useState<{ upperBound: number; approximate: boolean; computedMs: number } | null>(null)
   const [savingSlug, setSavingSlug] = React.useState<string | null>(existingSlug ?? null)
   const [status, setStatus] = React.useState<string | null>(null)
   const [broadcastStatus, setBroadcastStatus] = React.useState<string>('draft')
@@ -119,7 +118,7 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
     const finalSlug = savingSlug ?? (await saveDraft())
     if (!finalSlug) return
 
-    const final = stageCount?.afterSuppression
+    const final = stageCount?.upperBound
     if (final == null) {
       setStatus('Live count not ready yet — wait a moment.')
       return
@@ -163,7 +162,7 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
     }
   }
 
-  const finalCount = stageCount?.afterSuppression ?? 0
+  const finalCount = stageCount?.upperBound ?? 0
   const countMatches = parseInt(typedCount, 10) === finalCount && finalCount > 0
   const canSchedule = !!savingSlug && countMatches && broadcastStatus === 'draft'
 
@@ -213,7 +212,7 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
                 <label className="field-label">Template</label>
                 <select className="select" value={templateSlug} onChange={(e) => setTemplateSlug(e.target.value)}>
                   <option value="">(pick a template)</option>
-                  {templates.map((t: any) => (
+                  {(templates ?? []).map((t: any) => (
                     <option key={t.slug} value={t.slug}>{t.slug} — {t.name}</option>
                   ))}
                 </select>
@@ -247,22 +246,23 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
 
               <div className="divider" />
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
                 <div>
-                  <div className="text-xs subtle">Stage A · host filter</div>
-                  <div className="kpi-value" style={{ fontSize: 20 }}>{stageCount?.stageA?.toLocaleString() ?? '—'}</div>
+                  <div className="text-xs subtle">{stageCount?.approximate ? 'Upper bound · host filter' : 'Recipients · host filter'}</div>
+                  <div className="kpi-value" style={{ fontSize: 22 }}>{stageCount?.upperBound?.toLocaleString() ?? '—'}</div>
                 </div>
-                <div>
-                  <div className="text-xs subtle">Stage B · mailer post-filter</div>
-                  <div className="kpi-value" style={{ fontSize: 20 }}>{stageCount?.stageB?.toLocaleString() ?? '—'}</div>
-                </div>
-                <div>
-                  <div className="text-xs subtle">After suppression check</div>
-                  <div className="kpi-value" style={{ fontSize: 20, color: 'var(--accent-press)' }}>{stageCount?.afterSuppression?.toLocaleString() ?? '—'}</div>
-                </div>
+                {stageCount?.approximate && (
+                  <span className="pill amber" style={{ fontSize: 10.5 }}>
+                    <span className="dot" />approximate
+                  </span>
+                )}
               </div>
               <div className="text-xs subtle" style={{ marginTop: 6 }}>
-                {savingSlug ? `Recomputed on filter change · last ${stageCount?.computedMs ?? '—'}ms` : 'Save a draft to enable live counts.'}
+                {savingSlug
+                  ? stageCount?.approximate
+                    ? `Mailer-side filters (subscription, events, opens, tags excluded) and suppression are applied at dispatch — final count will be ≤ ${stageCount?.upperBound?.toLocaleString() ?? '—'}. Last computed in ${stageCount?.computedMs ?? '—'}ms.`
+                    : `Recomputed on filter change · last ${stageCount?.computedMs ?? '—'}ms`
+                  : 'Save a draft to enable live counts.'}
               </div>
             </div>
           </div>
@@ -334,22 +334,69 @@ export function BroadcastNew({ setRoute, slug: existingSlug }: any) {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head"><span className="card-title">Pre-flight checks</span></div>
-            <div className="card-body" style={{ display: 'grid', gap: 8 }}>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">DKIM + SPF aligned</span></div>
-              <div className="hstack">
-                {savingSlug
-                  ? <Icons.Check size={14} style={{ color: 'var(--green-fg)' }} />
-                  : <Icons.Warn size={14} style={{ color: 'var(--amber-fg)' }} />}
-                <span className="text-sm">{savingSlug ? 'Draft persisted' : 'Save a draft to lock in the segment'}</span>
-              </div>
-              <div className="hstack"><Icons.Check size={14} style={{ color: 'var(--green-fg)' }} /><span className="text-sm">Circuit breaker healthy</span></div>
-            </div>
-          </div>
+          <PreflightChecks savingSlug={savingSlug} />
         </div>
       </div>
     </>
+  )
+}
+
+function PreflightChecks({ savingSlug }: { savingSlug: string | null }) {
+  const { data: setup } = useLive(() => api.setupStatus())
+  const { data: health } = useLive(() => api.health())
+
+  const checks: Array<{ severity: 'ok' | 'warn' | 'error' | 'pending'; label: string; detail?: string }> = []
+
+  // 1. sender-domain alignment (the only thing we can verify locally — actual DKIM/SPF
+  // DNS health is out-of-band).
+  if (!setup) {
+    checks.push({ severity: 'pending', label: 'Sender-domain registry', detail: 'loading…' })
+  } else {
+    const senderProblem = setup.checks.find((c) =>
+      c.name === 'from_defaults_marketing' ||
+      c.name === 'transactional_from_defaults' ||
+      c.name === 'transactional_fallback' ||
+      c.name === 'published_template_domains',
+    )
+    if (senderProblem) {
+      checks.push({ severity: senderProblem.severity, label: 'Sender-domain registry', detail: senderProblem.message })
+    } else {
+      checks.push({ severity: 'ok', label: 'Sender-domain registry aligned' })
+    }
+  }
+
+  // 2. draft persisted (live).
+  checks.push({
+    severity: savingSlug ? 'ok' : 'warn',
+    label: savingSlug ? 'Draft persisted' : 'Save a draft to lock in the segment',
+  })
+
+  // 3. circuit breaker (live).
+  if (!health) {
+    checks.push({ severity: 'pending', label: 'Circuit breaker', detail: 'loading…' })
+  } else {
+    const s = (health as any).status as string | undefined
+    if (s === 'tripped') checks.push({ severity: 'error', label: 'Circuit breaker tripped', detail: (health as any).trippedReason })
+    else if (s === 'degraded') checks.push({ severity: 'warn', label: 'Circuit breaker degraded' })
+    else checks.push({ severity: 'ok', label: 'Circuit breaker healthy' })
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head"><span className="card-title">Pre-flight checks</span></div>
+      <div className="card-body" style={{ display: 'grid', gap: 8 }}>
+        {checks.map((c, i) => (
+          <div key={i} className="hstack">
+            {c.severity === 'ok' && <Icons.Check size={14} style={{ color: 'var(--green-fg)' }} />}
+            {c.severity === 'warn' && <Icons.Warn size={14} style={{ color: 'var(--amber-fg)' }} />}
+            {c.severity === 'error' && <Icons.Warn size={14} style={{ color: 'var(--red-fg)' }} />}
+            {c.severity === 'pending' && <span className="status-dot" />}
+            <span className="text-sm">{c.label}</span>
+            {c.detail && <span className="text-xs subtle" style={{ marginLeft: 4 }}>· {c.detail}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 

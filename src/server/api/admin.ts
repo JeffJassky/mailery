@@ -95,13 +95,13 @@ function apiRouter(mailer: Mailer): Router {
       ])
       res.json({
         actor: (req as any).actor,
-        permissions: { canPublish: true, canSendBroadcasts: true, canManageSuppressions: true },
         counts: { flows, templates, broadcasts, contacts, suppressions },
-        health: { status: health?.status ?? 'healthy' },
+        health: { status: health?.status ?? null },
         providers: {
           names: Object.keys(mailer.config.providers),
           default: mailer.config.defaultProvider,
         },
+        broadcastConfirmationThreshold: mailer.config.broadcastConfirmationThreshold,
       })
     }),
   )
@@ -165,7 +165,9 @@ function apiRouter(mailer: Mailer): Router {
       }
 
       const health = await c.health.findOne({ _id: 'singleton' })
-      const recentFlows = await c.flows.find({ enabled: true }).limit(5).toArray()
+      const recentFlowsRaw = await c.flows.find({ enabled: true }).limit(5).toArray()
+      const flowStatsMap = await computeFlowStats(mailer)
+      const recentFlows = recentFlowsRaw.map((f) => ({ ...f, stats: flowStatsMap.get(f.slug) ?? emptyFlowStats() }))
       const recentSends = await c.sends.find().sort({ queuedAt: -1 }).limit(6).toArray()
       const recentAudit = await c.auditLog.find().sort({ occurredAt: -1 }).limit(5).toArray()
 
@@ -194,7 +196,6 @@ function apiRouter(mailer: Mailer): Router {
           openRate: {
             value: sentTotal === 0 ? null : openedCount / sentTotal,
             delta: rateDelta(openedCount, sentTotal, openedPrev, sentPrev),
-            exclBots: false,
           },
           clickRate: {
             value: sentTotal === 0 ? null : clickedCount / sentTotal,
@@ -202,9 +203,16 @@ function apiRouter(mailer: Mailer): Router {
           },
         },
         series: { hourly: { sends: sendSeries, opens: openSeries } },
-        health: health
-          ? { status: health.status, rates: health.rates }
-          : { status: 'healthy', rates: { hardBounceRate: 0, complaintRate: 0, combinedBounceRate: 0, failureRate: 0 } },
+        health: {
+          status: health?.status ?? null,
+          rates: health?.rates ?? null,
+          thresholds: {
+            hardBounceRatePctTrip: mailer.config.circuitBreaker.hardBounceRatePctTrip,
+            complaintRatePctTrip: mailer.config.circuitBreaker.complaintRatePctTrip,
+            combinedBounceRatePctTrip: mailer.config.circuitBreaker.combinedBounceRatePctTrip,
+            failedToSendRatePctDegrade: mailer.config.circuitBreaker.failedToSendRatePctDegrade,
+          },
+        },
         queue: {
           inFlight: queueCounts?.inFlight ?? null,
           delayed: queueCounts?.delayed ?? null,
@@ -223,7 +231,8 @@ function apiRouter(mailer: Mailer): Router {
     '/flows',
     asyncHandler(async (_req, res) => {
       const flows = await c.flows.find().sort({ updatedAt: -1 }).toArray()
-      res.json(flows)
+      const stats = await computeFlowStats(mailer)
+      res.json(flows.map((f) => ({ ...f, stats: stats.get(f.slug) ?? emptyFlowStats() })))
     }),
   )
 
@@ -232,7 +241,8 @@ function apiRouter(mailer: Mailer): Router {
     asyncHandler(async (req, res) => {
       const flow = await c.flows.findOne({ slug: req.params.slug })
       if (!flow) return res.status(404).json({ error: 'not_found' })
-      return res.json(flow)
+      const stats = (await computeFlowStats(mailer, flow.slug)).get(flow.slug) ?? emptyFlowStats()
+      return res.json({ ...flow, stats })
     }),
   )
 
@@ -271,7 +281,8 @@ function apiRouter(mailer: Mailer): Router {
     '/templates',
     asyncHandler(async (_req, res) => {
       const templates = await c.templates.find().sort({ updatedAt: -1 }).toArray()
-      res.json(templates)
+      const stats = await computeTemplateStats(mailer)
+      res.json(templates.map((t) => ({ ...t, stats: stats.get(t.slug) ?? emptyTemplateStats() })))
     }),
   )
 
@@ -280,7 +291,8 @@ function apiRouter(mailer: Mailer): Router {
     asyncHandler(async (req, res) => {
       const template = await c.templates.findOne({ slug: req.params.slug })
       if (!template) return res.status(404).json({ error: 'not_found' })
-      return res.json(template)
+      const stats = (await computeTemplateStats(mailer, template.slug)).get(template.slug) ?? emptyTemplateStats()
+      return res.json({ ...template, stats })
     }),
   )
 
@@ -289,7 +301,8 @@ function apiRouter(mailer: Mailer): Router {
     '/broadcasts',
     asyncHandler(async (_req, res) => {
       const broadcasts = await c.broadcasts.find().sort({ createdAt: -1 }).toArray()
-      res.json(broadcasts)
+      const stats = await computeBroadcastStats(mailer)
+      res.json(broadcasts.map((b) => ({ ...b, stats: stats.get(String(b._id)) ?? emptyBroadcastStats() })))
     }),
   )
 
@@ -298,7 +311,8 @@ function apiRouter(mailer: Mailer): Router {
     asyncHandler(async (req, res) => {
       const broadcast = await c.broadcasts.findOne({ slug: req.params.slug })
       if (!broadcast) return res.status(404).json({ error: 'not_found' })
-      return res.json(broadcast)
+      const stats = (await computeBroadcastStats(mailer, broadcast._id)).get(String(broadcast._id)) ?? emptyBroadcastStats()
+      return res.json({ ...broadcast, stats })
     }),
   )
 
@@ -308,8 +322,22 @@ function apiRouter(mailer: Mailer): Router {
     asyncHandler(async (req, res) => {
       const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
       const limit = Math.min(Number(req.query.limit ?? 50), 200)
-      const { contacts, nextCursor } = await mailer.adapter.query({}, { limit, cursor })
-      res.json({ contacts, nextCursor })
+      const [{ contacts, nextCursor }, counts] = await Promise.all([
+        mailer.adapter.query({}, { limit, cursor }),
+        (async () => {
+          const rows = await c.subscriptions
+            .aggregate<{ _id: string; n: number }>([{ $group: { _id: '$status', n: { $sum: 1 } } }])
+            .toArray()
+          const out: Record<string, number> = { subscribed: 0, pending_doi: 0, unsubscribed: 0, bounced: 0, complained: 0 }
+          let total = 0
+          for (const r of rows) {
+            if (r._id) out[r._id] = r.n
+            total += r.n
+          }
+          return { ...out, total }
+        })(),
+      ])
+      res.json({ contacts, nextCursor, counts })
     }),
   )
 
@@ -403,16 +431,20 @@ function apiRouter(mailer: Mailer): Router {
     '/health',
     asyncHandler(async (_req, res) => {
       const h = await c.health.findOne({ _id: 'singleton' })
-      res.json(
-        h ?? {
-          _id: 'singleton',
-          status: 'healthy',
-          windowStartedAt: new Date(Date.now() - 60 * 60 * 1000),
-          windowDurationMs: 60 * 60 * 1000,
-          counters: { sent: 0, delivered: 0, bounced: 0, hardBounced: 0, softBounced: 0, complained: 0, failedToSend: 0 },
-          rates: { bounceRate: 0, hardBounceRate: 0, complaintRate: 0, failureRate: 0 },
-        },
-      )
+      const cb = mailer.config.circuitBreaker
+      const thresholds = {
+        hardBounceRatePctTrip: cb.hardBounceRatePctTrip,
+        complaintRatePctTrip: cb.complaintRatePctTrip,
+        combinedBounceRatePctTrip: cb.combinedBounceRatePctTrip,
+        failedToSendRatePctDegrade: cb.failedToSendRatePctDegrade,
+      }
+      if (!h) {
+        // No tick has run yet. Do not fabricate "healthy" / zeroed rates —
+        // the UI renders "—" / muted dots when status is null.
+        res.json({ status: null, rates: null, counters: null, thresholds })
+        return
+      }
+      res.json({ ...h, thresholds })
     }),
   )
 
@@ -794,6 +826,9 @@ function apiRouter(mailer: Mailer): Router {
         html = compiled.html
         plainText = compiled.plainText
       } else {
+        if (!tpl.body?.html) {
+          return res.status(409).json({ error: 'not_published', message: 'Template has not been published yet.' })
+        }
         html = tpl.body.html
         plainText = tpl.body.plainText
       }
@@ -932,17 +967,27 @@ function apiRouter(mailer: Mailer): Router {
       const segmentDefinition = req.body?.segmentDefinition
       if (!segmentDefinition?.filters) return res.status(400).json({ error: 'segment_required' })
       const t0 = Date.now()
-      // Stage A: host-side via adapter. For V1 we just translate the first
-      // host-side filter we recognize; richer segmentation lands later.
+      // V1: only host-side filter translation. Mailer-side filters
+      // (subscription status, fired events, etc.) and the suppression check
+      // are applied at dispatch time over the streamed cursor, so the live
+      // counter would have to scan-and-filter the full audience to be
+      // precise. We return the upper-bound count and tell the UI it's an
+      // estimate. When richer estimation lands, swap this for a sampled
+      // pass that includes mailer-side filters + suppression.
       const hostFilter: any = {}
       for (const f of segmentDefinition.filters) {
         if (f.kind === 'hasTag') hostFilter.hasTag = f.tag
         if (f.kind === 'fieldEquals') hostFilter.fieldEquals = { field: f.field, value: f.value }
       }
-      const stageA = await mailer.adapter.count(hostFilter)
-      // Stage B + suppression are estimated for the live counter; the real
-      // numbers come at dispatch time when the cursor is streamed.
-      return res.json({ stageA, stageB: stageA, afterSuppression: stageA, computedMs: Date.now() - t0 })
+      const hasMailerFilters = segmentDefinition.filters.some((f: any) =>
+        ['subscriptionStatus', 'firedEvent', 'notFiredEvent', 'notHasTag', 'opened', 'notOpened', 'subscribedAfter', 'subscribedBefore'].includes(f.kind),
+      )
+      const upperBound = await mailer.adapter.count(hostFilter)
+      return res.json({
+        upperBound,
+        approximate: hasMailerFilters,
+        computedMs: Date.now() - t0,
+      })
     }),
   )
 
@@ -1043,4 +1088,184 @@ async function collectQueueCounts(
   }
   const [inFlight, delayed] = await Promise.all([sum('getInFlightCount'), sum('getDelayedCount')])
   return { inFlight, delayed }
+}
+
+// ---------------------------------------------------------------------------
+// Live stats aggregation
+//
+// The flow / template / broadcast list endpoints used to return zeros for
+// every metric because no rollup ever wrote to `stats.*` on those docs. We
+// now compute them on-the-fly from the canonical `sends` and `flowRuns`
+// collections. Optional slug/id filters keep single-resource reads cheap.
+// ---------------------------------------------------------------------------
+
+interface FlowStats {
+  activeRuns: number
+  completedRuns: number
+  sendsLast7Days: number
+  sendsTotal: number
+}
+function emptyFlowStats(): FlowStats {
+  return { activeRuns: 0, completedRuns: 0, sendsLast7Days: 0, sendsTotal: 0 }
+}
+
+async function computeFlowStats(mailer: Mailer, slugFilter?: string): Promise<Map<string, FlowStats>> {
+  const out = new Map<string, FlowStats>()
+  const match = slugFilter ? { flowSlug: slugFilter } : {}
+
+  const runRows = await mailer.collections.flowRuns
+    .aggregate<{ _id: { flowSlug: string; status: string }; count: number }>([
+      { $match: match },
+      { $group: { _id: { flowSlug: '$flowSlug', status: '$status' }, count: { $sum: 1 } } },
+    ])
+    .toArray()
+  for (const row of runRows) {
+    const slug = row._id.flowSlug
+    if (!slug) continue
+    const cur = out.get(slug) ?? emptyFlowStats()
+    if (row._id.status === 'active') cur.activeRuns += row.count
+    else if (row._id.status === 'completed') cur.completedRuns += row.count
+    out.set(slug, cur)
+  }
+
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  const sendRows = await mailer.collections.sends
+    .aggregate<{ _id: string; total: number; last7: number }>([
+      { $match: { flowRunId: { $ne: null } } },
+      {
+        $lookup: {
+          from: mailer.collections.flowRuns.collectionName,
+          localField: 'flowRunId',
+          foreignField: '_id',
+          as: 'run',
+          pipeline: slugFilter
+            ? [{ $match: { flowSlug: slugFilter } }, { $project: { flowSlug: 1 } }]
+            : [{ $project: { flowSlug: 1 } }],
+        },
+      },
+      { $unwind: '$run' },
+      {
+        $group: {
+          _id: '$run.flowSlug',
+          total: { $sum: 1 },
+          last7: { $sum: { $cond: [{ $gte: ['$queuedAt', sevenDaysAgo] }, 1, 0] } },
+        },
+      },
+    ])
+    .toArray()
+  for (const row of sendRows) {
+    if (!row._id) continue
+    const cur = out.get(row._id) ?? emptyFlowStats()
+    cur.sendsTotal = row.total
+    cur.sendsLast7Days = row.last7
+    out.set(row._id, cur)
+  }
+
+  return out
+}
+
+interface TemplateStats {
+  sent: number
+  opened: number
+  clicked: number
+  bounced: number
+  sentLast7Days: number
+  lastSentAt: Date | null
+}
+function emptyTemplateStats(): TemplateStats {
+  return { sent: 0, opened: 0, clicked: 0, bounced: 0, sentLast7Days: 0, lastSentAt: null }
+}
+
+async function computeTemplateStats(mailer: Mailer, slugFilter?: string): Promise<Map<string, TemplateStats>> {
+  const out = new Map<string, TemplateStats>()
+  const match: Record<string, unknown> = {}
+  if (slugFilter) match.templateSlug = slugFilter
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+
+  const rows = await mailer.collections.sends
+    .aggregate<{
+      _id: string
+      sent: number
+      opened: number
+      clicked: number
+      bounced: number
+      sentLast7Days: number
+      lastSentAt: Date | null
+    }>([
+      { $match: match },
+      {
+        $group: {
+          _id: '$templateSlug',
+          sent: { $sum: 1 },
+          opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
+          clicked: { $sum: { $cond: [{ $ifNull: ['$firstClickAt', false] }, 1, 0] } },
+          bounced: { $sum: { $cond: [{ $eq: ['$status', 'bounced'] }, 1, 0] } },
+          sentLast7Days: { $sum: { $cond: [{ $gte: ['$queuedAt', sevenDaysAgo] }, 1, 0] } },
+          lastSentAt: { $max: '$queuedAt' },
+        },
+      },
+    ])
+    .toArray()
+  for (const row of rows) {
+    if (!row._id) continue
+    out.set(row._id, {
+      sent: row.sent,
+      opened: row.opened,
+      clicked: row.clicked,
+      bounced: row.bounced,
+      sentLast7Days: row.sentLast7Days,
+      lastSentAt: row.lastSentAt ?? null,
+    })
+  }
+  return out
+}
+
+interface BroadcastStats {
+  delivered: number
+  opened: number
+  clicked: number
+  bounced: number
+}
+function emptyBroadcastStats(): BroadcastStats {
+  return { delivered: 0, opened: 0, clicked: 0, bounced: 0 }
+}
+
+async function computeBroadcastStats(
+  mailer: Mailer,
+  idFilter?: ObjectId,
+): Promise<Map<string, BroadcastStats>> {
+  const out = new Map<string, BroadcastStats>()
+  const match: Record<string, unknown> = { broadcastId: { $ne: null } }
+  if (idFilter) match.broadcastId = idFilter
+
+  const rows = await mailer.collections.sends
+    .aggregate<{
+      _id: ObjectId
+      delivered: number
+      opened: number
+      clicked: number
+      bounced: number
+    }>([
+      { $match: match },
+      {
+        $group: {
+          _id: '$broadcastId',
+          delivered: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] } },
+          opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
+          clicked: { $sum: { $cond: [{ $ifNull: ['$firstClickAt', false] }, 1, 0] } },
+          bounced: { $sum: { $cond: [{ $eq: ['$status', 'bounced'] }, 1, 0] } },
+        },
+      },
+    ])
+    .toArray()
+  for (const row of rows) {
+    if (!row._id) continue
+    out.set(String(row._id), {
+      delivered: row.delivered,
+      opened: row.opened,
+      clicked: row.clicked,
+      bounced: row.bounced,
+    })
+  }
+  return out
 }

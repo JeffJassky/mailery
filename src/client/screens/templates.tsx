@@ -41,10 +41,7 @@ export function Templates({ setRoute }: any) {
         title="Templates"
         desc="Email content · MJML source or Maily WYSIWYG."
         actions={
-          <>
-            <button className="btn"><Icons.Code size={14} />Import MJML</button>
-            <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New template</button>
-          </>
+          <button className="btn btn-primary" onClick={() => setCreating(true)}><Icons.Plus size={14} />New template</button>
         }
       />
 
@@ -114,6 +111,7 @@ export function Templates({ setRoute }: any) {
               ) : (
                 filtered.map((t: any) => {
                   const sent = t.stats?.sent ?? 0
+                  const sentLast7 = t.stats?.sentLast7Days ?? 0
                   const openRate = sent ? (t.stats?.opened ?? 0) / sent : null
                   const clickRate = sent ? (t.stats?.clicked ?? 0) / sent : null
                   return (
@@ -131,7 +129,7 @@ export function Templates({ setRoute }: any) {
                       </td>
                       <td><span className={'pill ' + (t.kind === 'transactional' ? 'blue' : 'neutral')}>{t.kind}</span></td>
                       <td className="text-xs subtle">{t.stats?.lastSentAt ? new Date(t.stats.lastSentAt).toLocaleString() : '—'}</td>
-                      <td className="num tabular">{sent.toLocaleString()}</td>
+                      <td className="num tabular">{sentLast7.toLocaleString()}</td>
                       <td className="num tabular">{openRate != null ? (openRate * 100).toFixed(1) + '%' : '—'}</td>
                       <td className="num tabular">{clickRate != null ? (clickRate * 100).toFixed(1) + '%' : '—'}</td>
                       <td><Icons.Dots size={14} /></td>
