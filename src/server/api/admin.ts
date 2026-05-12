@@ -19,6 +19,7 @@ import {
   compileTemplate,
   renderTemplate,
 } from '../templates/render.js'
+import { validateSenderDomain } from '../templates/sender-domain.js'
 import { signUnsubscribeToken } from '../tokens.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -485,6 +486,19 @@ function apiRouter(mailer: Mailer): Router {
       if (kind !== 'marketing' && kind !== 'transactional') {
         return res.status(400).json({ error: 'validation_failed', message: 'kind must be marketing or transactional' })
       }
+      const resolvedFromEmail =
+        fromEmail ??
+        (kind === 'transactional' ? mailer.config.transactionalFromDefaults?.email : undefined) ??
+        mailer.config.fromDefaults?.email ??
+        'noreply@example.com'
+      const senderCheck = validateSenderDomain(resolvedFromEmail, kind, mailer.config.senderDomains)
+      if (!senderCheck.ok) {
+        return res.status(400).json({
+          error: 'sender_domain_invalid',
+          code: senderCheck.code,
+          message: senderCheck.reason,
+        })
+      }
       const now = new Date()
       try {
         await c.templates.insertOne({
@@ -492,8 +506,12 @@ function apiRouter(mailer: Mailer): Router {
           name,
           description: '',
           kind,
-          fromName: fromName ?? mailer.config.fromDefaults?.name ?? 'Mailery',
-          fromEmail: fromEmail ?? mailer.config.fromDefaults?.email ?? 'noreply@example.com',
+          fromName:
+            fromName ??
+            (kind === 'transactional' ? mailer.config.transactionalFromDefaults?.name : undefined) ??
+            mailer.config.fromDefaults?.name ??
+            'Mailery',
+          fromEmail: resolvedFromEmail,
           replyTo: null,
           providerOverride: null,
           subject: subject ?? `Untitled — ${name}`,
@@ -554,6 +572,21 @@ function apiRouter(mailer: Mailer): Router {
       if (typeof fromEmail === 'string') set.fromEmail = fromEmail
       if (typeof replyTo === 'string' || replyTo === null) set.replyTo = replyTo
       if (kind === 'marketing' || kind === 'transactional') set.kind = kind
+
+      // Validate resulting (kind, fromEmail) against the senderDomains registry
+      // whenever either field is being touched.
+      if (typeof fromEmail === 'string' || kind === 'marketing' || kind === 'transactional') {
+        const resultingKind = (set.kind as typeof tpl.kind) ?? tpl.kind
+        const resultingFromEmail = (set.fromEmail as string) ?? tpl.fromEmail
+        const senderCheck = validateSenderDomain(resultingFromEmail, resultingKind, mailer.config.senderDomains)
+        if (!senderCheck.ok) {
+          return res.status(400).json({
+            error: 'sender_domain_invalid',
+            code: senderCheck.code,
+            message: senderCheck.reason,
+          })
+        }
+      }
       if (typeof trackOpens === 'boolean') set.trackOpens = trackOpens
       if (typeof trackClicks === 'boolean') set.trackClicks = trackClicks
 
@@ -574,6 +607,15 @@ function apiRouter(mailer: Mailer): Router {
       if (!tpl) return res.status(404).json({ error: 'not_found' })
       const draft = tpl.draft
       if (!draft) return res.status(400).json({ error: 'no_draft' })
+
+      const senderCheck = validateSenderDomain(tpl.fromEmail, tpl.kind, mailer.config.senderDomains)
+      if (!senderCheck.ok) {
+        return res.status(400).json({
+          error: 'sender_domain_invalid',
+          code: senderCheck.code,
+          message: senderCheck.reason,
+        })
+      }
 
       let compiled: { html: string; plainText: string; errors: any[] }
       if (draft.editorJson) {

@@ -9,6 +9,9 @@ import type {
   MailProvider,
 } from '../shared/types.js'
 import type { QueueDriverConfig } from './queues/types.js'
+import type { SenderDomainRegistry } from './templates/sender-domain.js'
+
+export type { SenderDomainConfig, SenderDomainRegistry } from './templates/sender-domain.js'
 
 export interface RedisOptions {
   host?: string
@@ -56,6 +59,15 @@ export interface MailerConfig {
   senderAddress?: string
   fromDefaults?: { name: string; email: string }
   transactionalFromDefaults?: { name: string; email: string }
+  /**
+   * Optional registry of sender domains by kind. When set, mailery enforces at
+   * template publish time that a template's `fromEmail` domain is declared and
+   * matches the template's `kind`. Used to keep marketing reputation isolated
+   * from transactional reputation by sending from separate verified domains.
+   *
+   * Domains are case-insensitive. If unset, no enforcement happens.
+   */
+  senderDomains?: SenderDomainRegistry
 
   // ---- Compliance -----------------------------------------------------------
   requireDoubleOptIn?: boolean

@@ -43,6 +43,33 @@ await Mailer.init({
 - `transactionalFromDefaults` — distinct From for transactional emails. Recommended for reputation isolation.
 - `defaultTransactionalProvider` — route transactional templates through a provider optimized for inbox placement (Postmark), while marketing goes through one optimized for volume (SendGrid).
 
+## Sender domains (reputation isolation)
+
+If you send both marketing and transactional email, your transactional pipeline's deliverability lives or dies on your sender domain's reputation. Marketing complaints / soft-bounces on `news.example.com` should never affect password resets on `mail.example.com`. The `senderDomains` registry enforces that separation at template publish time:
+
+```ts
+await Mailer.init({
+  // ...
+  fromDefaults: { name: 'YourApp Newsletter', email: 'hello@news.example.com' },
+  transactionalFromDefaults: { name: 'YourApp', email: 'noreply@mail.example.com' },
+  senderDomains: {
+    'news.example.com':  { kind: 'marketing' },
+    'mail.example.com':  { kind: 'transactional' },
+    'tools.example.com': { kind: 'both' },           // OK for either kind
+  },
+})
+```
+
+What this guarantees:
+
+- A template whose `kind: 'marketing'` cannot publish with a `fromEmail` on `mail.example.com` — the publish returns `400 sender_domain_invalid` with the reason.
+- A template whose `kind: 'transactional'` cannot publish with a `fromEmail` on `news.example.com`.
+- A template with a `fromEmail` on an unregistered domain (typo, copy-paste from another app) is rejected at publish.
+
+The check also runs at template create + draft update, so the admin UI surfaces the error immediately. If you leave `senderDomains` unset (the default), no enforcement happens — back-compatible.
+
+Verify each declared domain separately with your email provider (SendGrid / Postmark / SES) so each gets its own DKIM signature and reputation. mailery doesn't manage the DNS side; it just enforces that you actually use the domains you set up.
+
 ## Worker behavior
 
 ```ts

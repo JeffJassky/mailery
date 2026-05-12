@@ -6,7 +6,9 @@ export const VERSION = '0.1.0'
 
 // Core
 export { Mailer } from './mailer.js'
-export type { MailerConfig, RedisOptions, CircuitBreakerThresholds } from './config.js'
+export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, SenderDomainConfig, SenderDomainRegistry } from './config.js'
+export { validateSenderDomain } from './templates/sender-domain.js'
+export type { SenderDomainValidation } from './templates/sender-domain.js'
 
 // Adapters
 export { MongoContactAdapter } from './adapters/mongo.js'

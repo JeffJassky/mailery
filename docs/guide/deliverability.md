@@ -125,3 +125,32 @@ After domain auth, the next deliverability levers in order of impact:
 | **CAN-SPAM postal address** Handlebars helper | ✓ |
 
 You handle: DNS records, sender reputation, content, segmentation.
+
+## Reputation isolation: separate domains for marketing vs transactional
+
+The single most damaging deliverability mistake is sending both kinds of email from the same domain. Marketing emails attract complaints and soft bounces. Transactional emails (password resets, OTP codes, receipts) need to land in the inbox every single time. Share a domain, and a bad newsletter takes your password resets down with it.
+
+The fix is to use separate verified sender domains:
+
+- `news.yourapp.com` — marketing / newsletters / lifecycle drips
+- `mail.yourapp.com` — transactional (auth, billing, security)
+
+Each domain gets its own DKIM key, its own SPF record, and its own reputation at mailbox providers. A complaint on `news.yourapp.com` doesn't touch `mail.yourapp.com`'s standing at Gmail.
+
+Wire both into mailery and let it enforce the split:
+
+```ts
+await Mailer.init({
+  // ...
+  fromDefaults: { name: 'YourApp Newsletter', email: 'hello@news.yourapp.com' },
+  transactionalFromDefaults: { name: 'YourApp', email: 'noreply@mail.yourapp.com' },
+  senderDomains: {
+    'news.yourapp.com': { kind: 'marketing' },
+    'mail.yourapp.com': { kind: 'transactional' },
+  },
+})
+```
+
+With this registry set, a `kind: 'marketing'` template can't be published with a `fromEmail` on `mail.yourapp.com`, and vice versa. See [Configuration → Sender domains](./configuration#sender-domains-reputation-isolation).
+
+Optional but recommended: route the two kinds through different providers as well (`defaultTransactionalProvider: 'postmark'` with `defaultProvider: 'sendgrid'` is a common pairing). Postmark's IP pools are optimized for transactional inbox placement; SendGrid handles marketing volume well.
