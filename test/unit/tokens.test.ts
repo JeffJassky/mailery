@@ -25,10 +25,14 @@ describe('unsubscribe tokens', () => {
     const expiresAt = new Date(Date.now() + 1000)
     const token = signUnsubscribeToken({ email: 'user@example.com', scope: 'marketing', expiresAt }, SECRET)
     const [body, sig] = token.split('.')
-    // Flip the last character to a guaranteed-different base64url char.
-    const last = sig!.slice(-1)
-    const replacement = last === 'A' ? 'B' : 'A'
-    const tampered = `${body}.${sig!.slice(0, -1)}${replacement}`
+    // Tamper at position 0 — a full-byte position in the base64url-encoded
+    // signature. (Tampering the *last* char of a 32-byte HMAC-SHA256 sig
+    // can change only padding bits, since 32 bytes encode to 43 chars +
+    // 4 leftover bits; many last-char swaps decode to the same bytes and
+    // would let a tampered token verify.)
+    const first = sig!.slice(0, 1)
+    const replacement = first === 'A' ? 'B' : 'A'
+    const tampered = `${body}.${replacement}${sig!.slice(1)}`
     expect(verifyUnsubscribeToken(tampered, SECRET)).toBeNull()
   })
 
