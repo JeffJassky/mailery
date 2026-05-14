@@ -245,3 +245,112 @@ Returns the internal context object passed to runner functions. Useful for tests
 | `mailer.queues` | `Queues` | Driver-agnostic queue facade (`add`, `getWaitingCount`, `close`). |
 | `mailer.config` | `ResolvedConfig` | Resolved configuration with defaults applied. |
 | `mailer.events` | `EventRegistry` | Internal registry tracking event policies. |
+
+## Deliverability config (optional)
+
+The `MailerConfig` interface accepts these optional sub-objects in addition to the core fields. Each is fully opt-in — leave it out and the feature stays dormant.
+
+```ts
+interface MailerConfig {
+  // ... core fields ...
+
+  circuitBreaker?: Partial<{
+    hardBounceRatePctTrip: number          // default 2
+    complaintRatePctTrip: number           // default 0.3
+    combinedBounceRatePctTrip: number      // default 5
+    failedToSendRatePctDegrade: number     // default 10
+    windowMinutes: number                  // default 60
+    minSendsBeforeEval: number             // default 100
+  }>
+
+  dnsbl?: {
+    domainLists?: Array<{ host: string; label: string }>
+    ipLists?: Array<{ host: string; label: string }>
+    dedicatedIps?: string[]
+    intervalHours?: number                 // default 24, 0 disables
+  }
+
+  postmaster?: {
+    clientId: string
+    clientSecret: string
+    refreshToken: string                   // scope: postmaster.readonly
+    domains?: string[]                     // defaults to union of senderDomains keys + fromDefaults.email domain + transactionalFromDefaults.email domain
+    intervalHours?: number                 // default 24
+  }
+
+  snds?: {
+    accessKey: string
+    ips?: string[]                         // optional filter
+    intervalHours?: number                 // default 24
+  }
+
+  dmarc?: {
+    knownSources?: Array<{ ip: string; label: string; ignored?: boolean }>
+    retentionDays?: number                 // default 90 — old failures pruned by an hourly housekeeping job
+  }
+
+  mailTester?: {
+    apiKey: string
+    minScore?: number                      // default 8.0
+    cacheHours?: number                    // default 24
+    baseUrl?: string                       // override for staging
+  }
+}
+```
+
+See [the configuration guide](/guide/configuration) for behavior + the [deliverability guide](/guide/deliverability) for the surrounding features.
+
+## Collections
+
+`mailer.collections` exposes typed handles to every mailer-owned Mongo collection. New collections introduced with the deliverability features:
+
+| Collection | Document type | Purpose |
+|---|---|---|
+| `health` | `HealthDoc` | One doc per (sender domain × kind) bucket plus an `_id: 'agg'` aggregate. Replaces the prior singleton. |
+| `dnsblChecks` | `DnsblCheckDoc` | Latest scan result per (target, list). |
+| `postmasterSnapshots` | `PostmasterSnapshotDoc` | One doc per (domain, day) from Google Postmaster Tools. |
+| `sndsSnapshots` | `SndsSnapshotDoc` | One doc per (IP, activityStart) from Microsoft SNDS. |
+| `dmarcReports` | `DmarcReportDoc` | One doc per ingested DMARC aggregate report. |
+| `dmarcFailures` | `DmarcFailureDoc` | One doc per (report × non-aligned source IP). |
+| `dmarcSourceTags` | `DmarcSourceTagDoc` | Operator-set IP labels written from the admin UI. |
+| `mailTesterScores` | `MailTesterScoreDoc` | Cached Mail-Tester scores keyed on a content fingerprint. |
+
+Each document type is exported from `mailery` for hosts that need to query mailer-owned collections directly.
+
+## Deliverability helpers
+
+These functions live in `mailery/server/runner/*` and are exported for hosts that want to bypass the admin endpoints (e.g., scheduled jobs in your own process):
+
+```ts
+import {
+  recordHealthCounter,
+  evaluateHealth,
+  effectiveOverallStatus,
+  getBucketStatus,
+} from 'mailery'                              // health.ts
+
+import { runDnsblChecks } from 'mailery'      // dnsbl.ts
+import { runPostmasterPull } from 'mailery'   // postmaster.ts
+import { runSndsPull } from 'mailery'         // snds.ts
+
+import {
+  ingestDmarcAttachment,                     // bytes → parse → persist
+  parseDmarcReport,                          // pure XML → parsed report
+  extractDmarcXml,                           // pure decompress
+  pruneDmarcFailures,
+  resolveSourceTags,
+  suggestPolicyProgression,
+} from 'mailery'                              // dmarc.ts
+
+import { computeListHygiene } from 'mailery'  // hygiene.ts
+
+import {
+  createMailTesterClient,
+  evaluateMailTesterGate,
+  mailTesterContentKey,
+} from 'mailery'                              // mail-tester.ts
+
+import { lintTemplate } from 'mailery'        // templates/linter.ts
+```
+
+The `tick.ts` runner already calls `evaluateHealth`, `runDnsblChecks`, `runPostmasterPull`, `runSndsPull`, and `pruneDmarcFailures` on its interval. Reach for these helpers directly only when you need on-demand execution outside the tick.

@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /**
- * mailery CLI entry. Currently exposes a single command:
+ * mailery CLI entry. Available commands:
  *
  *   npx mailery setup-sendgrid --domain X --webhook-url Y [--cloudflare]
+ *   npx mailery setup-dmarc --domain X --rua-mailbox Y [--cloudflare]
  *
- * See src/cli/setup-sendgrid.ts for the full option list.
+ * See src/cli/setup-{sendgrid,dmarc}.ts for the full option lists.
  */
 
 import { setupSendgrid } from './setup-sendgrid.js'
+import { setupDmarc, type DmarcPolicy } from './setup-dmarc.js'
 import { makeReadlinePrompter, runInteractive } from './interactive.js'
 
 async function main() {
@@ -82,11 +84,82 @@ async function main() {
       }
       break
     }
+    case 'setup-dmarc': {
+      const opts = parseArgs(argv.slice(1))
+      const domain = typeof opts.domain === 'string' ? opts.domain : null
+      const ruaMailbox = typeof opts['rua-mailbox'] === 'string' ? (opts['rua-mailbox'] as string) : null
+      if (!domain) {
+        console.error('error: --domain is required')
+        printDmarcUsage()
+        process.exit(2)
+      }
+      if (!ruaMailbox) {
+        console.error('error: --rua-mailbox is required (mailbox to receive DMARC aggregate reports)')
+        printDmarcUsage()
+        process.exit(2)
+      }
+      const policy = (typeof opts.policy === 'string' ? opts.policy : 'none') as DmarcPolicy
+      if (!['none', 'quarantine', 'reject'].includes(policy)) {
+        console.error(`error: --policy must be one of none|quarantine|reject (got "${policy}")`)
+        process.exit(2)
+      }
+      let pct: number | undefined
+      if (opts.pct !== undefined && opts.pct !== true) {
+        const n = Number(opts.pct)
+        if (!Number.isFinite(n)) {
+          console.error(`error: --pct must be numeric (got "${String(opts.pct)}")`)
+          process.exit(2)
+        }
+        pct = n
+      }
+      try {
+        await setupDmarc({
+          domain,
+          ruaMailbox,
+          rufMailbox: typeof opts['ruf-mailbox'] === 'string' ? (opts['ruf-mailbox'] as string) : undefined,
+          policy,
+          pct,
+          aspf: opts.aspf === 's' ? 's' : 'r',
+          adkim: opts.adkim === 's' ? 's' : 'r',
+          cloudflare: Boolean(opts.cloudflare),
+          cloudflareZone: opts['cloudflare-zone'] ? String(opts['cloudflare-zone']) : undefined,
+        })
+      } catch (err: any) {
+        console.error(`\n✗ ${err?.message ?? err}`)
+        process.exit(1)
+      }
+      break
+    }
     default:
       console.error(`unknown command: ${cmd}`)
       printUsage()
       process.exit(2)
   }
+}
+
+function printDmarcUsage() {
+  console.log(`
+mailery setup-dmarc — publish a DMARC TXT record for a domain.
+
+Usage:
+  mailery setup-dmarc --domain <d> --rua-mailbox <email> [options]
+
+Options:
+  --domain <d>             Domain to publish DMARC for (e.g. example.com)
+  --rua-mailbox <email>    Mailbox to receive RUA aggregate reports
+  --ruf-mailbox <email>    Mailbox to receive RUF forensic reports (rarely used)
+  --policy <p>             none | quarantine | reject (default: none)
+  --pct <n>                Percent of failing mail subject to the policy (1-100, default 100)
+  --aspf r|s               SPF alignment mode (default r — relaxed)
+  --adkim r|s              DKIM alignment mode (default r — relaxed)
+  --cloudflare             Publish TXT record via Cloudflare API
+  --cloudflare-zone <z>    Override inferred zone
+
+Env:
+  CLOUDFLARE_API_TOKEN     Required when --cloudflare is set.
+
+Recommended progression: p=none → wait, monitor RUA → p=quarantine pct=10 → ramp pct → p=reject.
+`)
 }
 
 function parseArgs(argv: string[]): Record<string, string | string[] | boolean> {

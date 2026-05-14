@@ -123,10 +123,17 @@ After domain auth, the next deliverability levers in order of impact:
 | **Suppression check at every send** (hard bounce → permanent block) | ✓ |
 | **Soft→hard bounce promotion** (configurable threshold) | ✓ |
 | **Complaint cascade** (FBL webhook → suppression + subscription marked) | ✓ |
-| **Circuit breaker** auto-trip on high bounce / complaint rates | ✓ |
+| **Per-(sender domain × kind) circuit breaker** auto-trip on high bounce / complaint rates | ✓ |
 | **GDPR-forget hashed suppression** so re-imports don't email deleted users | ✓ |
 | **Plain-text auto-derivation** sent alongside HTML (spam filters check both) | ✓ |
 | **CAN-SPAM postal address** Handlebars helper | ✓ |
+| **DNSBL monitoring** of sender domains + dedicated IPs (Spamhaus, SURBL, URIBL, Barracuda, SORBS, SpamCop) | ✓ |
+| **Google Postmaster Tools pull** (when configured) — daily reputation tier + spam rate per domain | ✓ |
+| **Microsoft SNDS pull** (when configured) — per-IP filter verdict + complaint rate | ✓ |
+| **DMARC RUA aggregate-report ingestion** with per-source-IP failure breakdown + policy-progression suggestion | ✓ |
+| **Content linter** at publish + live in the template editor (missing plain-text, URL shorteners, missing unsubscribe tag, etc.) | ✓ |
+| **Mail-Tester deliverability gate** (when configured) — score-based publish block | ✓ |
+| **List-hygiene report** — engagement-window breakdown + sunset-cohort impact projection | ✓ |
 
 You handle: DNS records, sender reputation, content, segmentation.
 
@@ -246,3 +253,242 @@ npx mailery setup-sendgrid \
   --domain news.example.com \
   --webhook-url https://example.com/m/webhooks/sendgrid
 ```
+
+## Per-domain circuit breaker
+
+The circuit breaker tracks hard-bounce, complaint, and combined-bounce rates over a rolling window. When any threshold is exceeded, marketing sends are held until manually resumed (transactional always flows through).
+
+Rates are tracked **per (sender domain × template kind)** so one bad subdomain doesn't hold mail for the others. If `news.example.com` (marketing) trips, transactional sends from `mail.example.com` continue normally — and marketing sends from a different marketing subdomain also continue.
+
+Defaults — see [Configuration → Circuit breaker](./configuration#circuit-breaker):
+
+| Threshold | Default | What it means |
+|---|---|---|
+| `hardBounceRatePctTrip` | 2% | Hard bounces over the window |
+| `complaintRatePctTrip` | 0.3% | Spam complaints — Gmail/Yahoo's actual cutoff |
+| `combinedBounceRatePctTrip` | 5% | Hard + soft bounces combined |
+| `failedToSendRatePctDegrade` | 10% | Provider errors — sets `degraded` state, doesn't block sends |
+
+In the admin UI, the **Health** screen shows one row per bucket with rates colored against trip thresholds. Tripped buckets get a "Resume" button. The "Resume all" button at the top resumes every tripped bucket at once.
+
+You can also resume programmatically:
+
+```bash
+# Resume one bucket
+curl -X POST https://example.com/admin/mailer/api/health/resume \
+  -H 'content-type: application/json' \
+  -d '{"senderDomain": "news.example.com", "kind": "marketing"}'
+
+# Resume all tripped buckets
+curl -X POST https://example.com/admin/mailer/api/health/resume \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+## DNS block-list monitoring
+
+Once a day mailery resolves each of your sender domains (and any dedicated IPs) against major DNS block lists. If a domain or IP shows up on a list, that signal lands in the admin Health screen and in `setup-status` as an error.
+
+Enabled by default for any operator with sender domains configured — no extra setup. Customize the lists or interval via `MailerConfig.dnsbl`:
+
+```ts
+await Mailer.init({
+  // ...
+  dnsbl: {
+    // Default lists if you don't override:
+    domainLists: [
+      { host: 'dbl.spamhaus.org', label: 'Spamhaus DBL' },
+      { host: 'multi.surbl.org', label: 'SURBL' },
+      { host: 'multi.uribl.com', label: 'URIBL' },
+    ],
+    // Only meaningful if you have a dedicated sending IP:
+    dedicatedIps: ['203.0.113.5'],
+    ipLists: [
+      { host: 'zen.spamhaus.org', label: 'Spamhaus ZEN' },
+      { host: 'b.barracudacentral.org', label: 'Barracuda' },
+      { host: 'dnsbl.sorbs.net', label: 'SORBS' },
+      { host: 'bl.spamcop.net', label: 'SpamCop' },
+    ],
+    intervalHours: 24,
+  },
+})
+```
+
+In the admin UI, the **Health → DNS block lists** card shows one row per (target × list) with the latest verdict and a "Recheck now" button. Each list publishes its own removal procedure — visit the list's website (linked from the list label) to start delisting.
+
+## Google Postmaster Tools
+
+Postmaster is Google's authoritative view of how Gmail handles your mail — reputation tier (`HIGH` / `MEDIUM` / `LOW` / `BAD`), spam rate, SPF/DKIM/DMARC pass rates per day. Only meaningful at >100 sends/day to Gmail; smaller senders see empty responses.
+
+Setup requires an OAuth client in your own Google Cloud project + a refresh token from the consent flow with `https://www.googleapis.com/auth/postmaster.readonly` scope. Once configured, mailery pulls daily snapshots and auto-trips the (domain × marketing) breaker when a domain falls to `BAD`.
+
+```ts
+await Mailer.init({
+  // ...
+  postmaster: {
+    clientId: process.env.GOOGLE_POSTMASTER_CLIENT_ID!,
+    clientSecret: process.env.GOOGLE_POSTMASTER_CLIENT_SECRET!,
+    refreshToken: process.env.GOOGLE_POSTMASTER_REFRESH_TOKEN!,
+    // Defaults to senderDomains + fromDefaults domain
+    domains: ['news.example.com', 'mail.example.com'],
+    intervalHours: 24,
+  },
+})
+```
+
+The admin **Health → Google Postmaster Tools** card shows the latest snapshot per domain — reputation pill, user-reported spam %, SPF/DKIM/DMARC pass rates. Manual refresh button + auto pull daily via the tick.
+
+## Microsoft SNDS
+
+SNDS (Smart Network Data Services) is Microsoft's equivalent for Outlook / Hotmail / Live IP reputation. **IP-level** — only useful if you send from a dedicated IP. Visibility-only: RED filter results surface as a setup-status error but don't auto-trip the breaker.
+
+```ts
+await Mailer.init({
+  // ...
+  snds: {
+    accessKey: process.env.SNDS_ACCESS_KEY!,
+    ips: ['203.0.113.5'],  // optional — filter to your IPs
+    intervalHours: 24,
+  },
+})
+```
+
+Get an access key by signing up at [sendersupport.olc.protection.outlook.com/snds](https://sendersupport.olc.protection.outlook.com/snds/) and enrolling each of your IPs. The same site is where you enrol in [JMRP](https://sendersupport.olc.protection.outlook.com/snds/JMRP.aspx) — the feedback loop that emails you when an Outlook user marks your mail as junk. JMRP enrolment is manual and outside mailery's scope, but the setup-status check reminds you.
+
+The admin **Health → Microsoft SNDS** card shows per-IP filter result (GREEN / YELLOW / RED), complaint rate, trap message count, recipient count, and activity window.
+
+## DMARC RUA report ingestion
+
+DMARC RUA aggregate reports are the only place you can see **who is sending mail claiming to be from your domain** — legitimate sources, forgotten SaaS tools, and active spoofers. Most operators publish `rua=mailto:...` and never read the reports because the raw XML is unreadable. Mailery parses the reports, extracts non-aligned source IPs, and surfaces them in the admin UI.
+
+### Set up the DMARC TXT record
+
+If you ran `setup-sendgrid`, you have working SPF + DKIM but no DMARC by default. Publish a DMARC record with the CLI:
+
+```bash
+npx mailery setup-dmarc \
+  --domain news.example.com \
+  --rua-mailbox dmarc-reports@example.com \
+  --policy none \
+  --cloudflare
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--domain` | required | The domain to publish DMARC for. |
+| `--rua-mailbox` | required | Mailbox that receives RUA aggregate reports. |
+| `--ruf-mailbox` | unset | Mailbox for forensic reports (rarely used). |
+| `--policy` | `none` | `none` / `quarantine` / `reject`. Start with `none`. |
+| `--pct` | `100` | Percent of failing mail subject to the policy. |
+| `--aspf` | `r` | SPF alignment mode (`r` relaxed / `s` strict). |
+| `--adkim` | `r` | DKIM alignment mode (`r` / `s`). |
+| `--cloudflare` | off | Publish via the Cloudflare API. |
+
+Without `--cloudflare` the command prints the TXT record for manual publish. Use `--policy quarantine --pct 10` after a few weeks of `p=none` data to start enforcement — see the [policy progression suggestion](#policy-progression-suggestion) below.
+
+### Upload received reports
+
+Receivers (Google, Yahoo, Microsoft, etc.) email one report per day per domain, attached as `.zip` or `.gz`. Open the admin **Health → DMARC RUA reports** card and use the "Upload report(s)" button. Multi-file upload supported.
+
+Mailery decompresses, parses (RFC 7489), and persists:
+
+- One `DmarcReportDoc` per received report — total messages, pass / fail counts, policy + pct in effect, reporting window.
+- One `DmarcFailureDoc` per non-aligned source IP per report. These are the actionable rows.
+
+Re-uploading the same report is idempotent (keyed on `reportId × orgName`).
+
+### Tag known sources
+
+After a week or two of reports, the **Top failing source IPs** table lists every IP sending as your domain that didn't pass DMARC alignment, sorted by message count. Click "Tag" on each row and label it:
+
+- `SendGrid` for your transactional + marketing provider
+- `Hubspot` / `Calendly` / `Stripe` for any SaaS sending as you
+- Untagged rows are either misconfigured legitimate sources (fix their auth) or spoofers (ignore them)
+
+Tags persist in the `mailer_dmarc_source_tags` collection and merge with `MailerConfig.dmarc.knownSources` at read time. **Precedence:** a DB-set tag overrides a config tag for the same IP, so an operator can re-label or ignore a source through the admin UI without redeploying. Removing a DB tag via the UI restores the config baseline for that IP.
+
+```ts
+await Mailer.init({
+  // ...
+  dmarc: {
+    knownSources: [
+      { ip: '149.72.45.10', label: 'SendGrid (transactional)' },
+      { ip: '203.0.113.99', label: 'Old marketing platform', ignored: true },
+    ],
+    retentionDays: 90, // failures older than this are pruned (housekeeping runs hourly)
+  },
+})
+```
+
+### Policy progression suggestion
+
+When enough clean data accumulates, the admin UI surfaces a per-domain suggestion to advance your DMARC policy. Every transition checks **all** of these gates — failing any one blocks the suggestion:
+
+| From | To | All gates required |
+|------|-----|---------------------|
+| `p=none` | `p=quarantine pct=10` | ≥30 reports in last 30d, ≥1000 total messages, ≥99% alignment rate, **zero failing messages from untagged sources** |
+| `p=quarantine pct=10` | `pct=25` | Same gates as above, plus alignment ≥99.5% |
+| `p=quarantine pct=25` | `pct=50` | As above |
+| `p=quarantine pct=50` | `pct=100` | As above |
+| `p=quarantine pct=100` | `p=reject` | Same gates, plus alignment ≥99.9% |
+| `p=reject` | — | Already at strictest |
+
+The "no untagged failing sources" gate is the most common blocker — fix the source (deploy DKIM, or tag it as known/ignored) before the suggestion will fire.
+
+## List hygiene
+
+Inactive contacts disproportionately bounce, complain, or sit in spam folders harming engagement metrics. The admin **List hygiene** screen (under Audience) buckets your subscribed contacts by how recently they last opened or clicked any mail:
+
+- Engaged (last 30 days)
+- Engaged (31-60 / 61-90 / 91-180 days)
+- Inactive (>180 days)
+- Never engaged
+
+For the long-inactive cohort, the report shows:
+
+- **Lifetime metrics:** total sends to this cohort, their historical bounce / complaint rates.
+- **Projected impact:** "Of the last 90 days' N sends, the cohort generated X bounces (Y% of total). Sunsetting them would drop overall bounce rate from A% to B%."
+
+The screen is read-only — sunset decisions are explicit. To suppress an inactive cohort, add them to the suppressions collection through the existing UI or your own script. Use the bucket counts to pick a window (typically >180 days) and decide whether the projected impact justifies the action.
+
+## Content linter
+
+Every template is run through a content linter at publish time. Errors block publish; warnings + infos surface in the editor's Issues panel and the publish response.
+
+| Rule | Severity | Trigger |
+|------|----------|---------|
+| `missing_plain_text` | error | No plain-text alternative |
+| `image_only_body` | error | Rendered text < 20 chars and ≥1 image |
+| `url_shortener` | error | Any link uses bit.ly / t.co / tinyurl.com / goo.gl / ow.ly |
+| `missing_unsubscribe_tag` | error | Marketing template lacks `{{unsubscribeUrl}}` |
+| `sender_domain_invalid` | error | `fromEmail` doesn't match the senderDomains registry |
+| `bare_url` | warning | URL appears in body text without an anchor wrapper |
+| `spam_phrases` | warning | Contains "FREE", "ACT NOW", "100% guaranteed", `!!!+` |
+| `all_caps_subject` | warning | Subject >50% uppercase |
+| `subject_too_long` | warning | Subject >60 chars (mobile truncation) |
+| `too_many_links` | warning | >10 links in body |
+| `empty_preheader` | info | No preheader set |
+
+The template editor sidebar shows live results as you type. Saved drafts are debounced (500ms after last keystroke) and the Publish button is disabled while errors are present.
+
+## Mail-Tester integration (optional)
+
+For an objective deliverability score, configure [Mail-Tester](https://mail-tester.com)'s paid API. Once enabled, the template editor grows a "Run deliverability check" button:
+
+1. Click → mailery provisions a test address from Mail-Tester, sends the rendered draft to it via your default provider, polls for the score.
+2. Score (0-10) + per-rule feedback render in the editor sidebar.
+3. Score is cached for `cacheHours` (default 24) keyed on `(bodyHash, subject, fromEmail)` so re-clicking publish doesn't burn credits.
+4. Publish is blocked when `score < minScore` (default 8.0); override with `bypassMailTester: true` on the publish call.
+
+```ts
+await Mailer.init({
+  // ...
+  mailTester: {
+    apiKey: process.env.MAIL_TESTER_API_KEY!,
+    minScore: 8.0,
+    cacheHours: 24,
+  },
+})
+```
+
+Each check sends one real email through your provider — audit-logged. Skip the integration if you don't have a Mail-Tester paid plan; the publish path is silent when not configured.

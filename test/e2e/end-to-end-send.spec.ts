@@ -16,10 +16,11 @@ test('fire event → flow advances → send goes through NullProvider', async ({
   await request.post('/admin/mailer/api/templates', {
     data: { slug: 'welcome-1', name: 'Welcome', kind: 'marketing', subject: 'Hi {{contact.fields.firstName}}' },
   })
-  // Patch the draft so it has actual MJML, then publish.
+  // Patch the draft so it has actual MJML (with unsubscribe link, required
+  // by the publish-time content linter for marketing kind), then publish.
   await request.patch('/admin/mailer/api/templates/welcome-1/draft', {
     data: {
-      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi {{contact.fields.firstName}}</mj-text></mj-column></mj-section></mj-body></mjml>',
+      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi {{contact.fields.firstName}} — welcome to our newsletter.</mj-text><mj-text><a href="{{unsubscribeUrl}}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>',
     },
   })
   await request.post('/admin/mailer/api/templates/welcome-1/publish')
@@ -52,10 +53,12 @@ test('fire event → flow advances → send goes through NullProvider', async ({
 
 test('idempotent: firing the same event twice does not duplicate the run', async ({ request }) => {
   await request.post('/admin/mailer/api/templates', {
-    data: { slug: 'hi', name: 'Hi', kind: 'marketing', subject: 'Hi' },
+    data: { slug: 'hi', name: 'Hi', kind: 'marketing', subject: 'Hi there friend' },
   })
   await request.patch('/admin/mailer/api/templates/hi/draft', {
-    data: { mjml: '<mjml><mj-body><mj-text>Hi</mj-text></mj-body></mjml>' },
+    data: {
+      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi — thanks for signing up.</mj-text><mj-text><a href="{{unsubscribeUrl}}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>',
+    },
   })
   await request.post('/admin/mailer/api/templates/hi/publish')
 

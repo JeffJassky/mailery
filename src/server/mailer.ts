@@ -89,6 +89,7 @@ export class Mailer {
       queues: this.queues,
       config: this.config,
       handlebarsHelpers: this.config.handlebarsHelpers,
+      audit: (entry) => this.audit(entry),
     }
   }
 

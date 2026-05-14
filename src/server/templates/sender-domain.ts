@@ -68,7 +68,7 @@ export function validateSenderDomain(
   return { ok: true }
 }
 
-function extractDomain(email: string): string | null {
+export function extractDomain(email: string): string | null {
   if (typeof email !== 'string') return null
   const at = email.lastIndexOf('@')
   if (at <= 0 || at === email.length - 1) return null

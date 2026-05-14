@@ -71,6 +71,7 @@ export function Sidebar({
         <nav className="sidebar-nav">
           <Item icon={Icons.Contacts} label="Contacts" screen="contacts" badge={formatCount(counts?.contacts)} />
           <Item icon={Icons.Shield} label="Suppressions" screen="suppressions" badge={formatCount(counts?.suppressions)} />
+          <Item icon={Icons.Audit} label="List hygiene" screen="hygiene" />
         </nav>
       </div>
 

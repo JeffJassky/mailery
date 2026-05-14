@@ -28,6 +28,10 @@ export class EventRegistry {
     return this.policies.get(name)
   }
 
+  list(): EventRegistration[] {
+    return Array.from(this.policies, ([name, dedupePolicy]) => ({ name, dedupePolicy }))
+  }
+
   /**
    * Derive a dedupeKey for an event call. Returns null when no policy is
    * registered AND no key was passed — caller should throw.

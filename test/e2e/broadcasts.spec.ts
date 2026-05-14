@@ -29,7 +29,7 @@ test('create a broadcast draft and refine its segment', async ({ page, request }
 
   // Wait for live count to populate (the default subscriptionStatus=subscribed
   // filter should match the 3 contacts we just subscribed).
-  await expect(page.getByText(/Stage A · host filter/)).toBeVisible()
+  await expect(page.getByText(/host filter/).first()).toBeVisible()
   await expect(page.locator('.kpi-value').filter({ hasText: /^[0-9]+$/ }).first()).toBeVisible({ timeout: 10_000 })
 
   // Add a filter row.

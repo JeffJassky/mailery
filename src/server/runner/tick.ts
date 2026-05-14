@@ -9,6 +9,11 @@ import { sweepStrandedFlowRuns } from './sweep.js'
 import { processScheduledBroadcasts as dispatchScheduled } from './broadcasts.js'
 import { evaluateHealth } from './health.js'
 import { promoteSoftBounces } from './bounce-promotion.js'
+import { runDnsblChecks } from './dnsbl.js'
+import { runPostmasterPull } from './postmaster.js'
+import { runSndsPull } from './snds.js'
+import { pruneDmarcFailures } from './dmarc.js'
+import { HEALTH_AGG_ID } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 
 /**
@@ -21,27 +26,36 @@ import type { RunnerContext } from './index.js'
 const STRANDED_SEND_THRESHOLD_MS = 5 * 60 * 1000
 
 export async function runTick(ctx: RunnerContext): Promise<void> {
-  // Heartbeat: ensure the singleton health doc exists with an up-to-date
+  // Heartbeat: ensure the aggregate health doc exists with an up-to-date
   // `updatedAt` so the setup-status check can detect "workers are running."
-  await ctx.collections.health.updateOne(
-    { _id: 'singleton' },
-    {
-      $set: { updatedAt: new Date() },
-      $setOnInsert: {
-        _id: 'singleton',
-        windowStartedAt: new Date(),
-        windowDurationMs: ctx.config.circuitBreaker.windowMinutes * 60 * 1000,
-        status: 'healthy',
-        trippedAt: null,
-        trippedReason: null,
-        manuallyResumedAt: null,
-        counters: { sent: 0, delivered: 0, bounced: 0, hardBounced: 0, softBounced: 0, complained: 0, failedToSend: 0 },
-        rates: { bounceRate: 0, hardBounceRate: 0, complaintRate: 0, failureRate: 0 },
+  // Wrapped in try/catch — a Mongo blip should never abort the whole tick.
+  try {
+    await ctx.collections.health.updateOne(
+      { _id: HEALTH_AGG_ID },
+      {
+        $set: { updatedAt: new Date() },
+        $setOnInsert: {
+          _id: HEALTH_AGG_ID,
+          senderDomain: null,
+          kind: null,
+          windowStartedAt: new Date(),
+          windowDurationMs: ctx.config.circuitBreaker.windowMinutes * 60 * 1000,
+          status: 'healthy',
+          trippedAt: null,
+          trippedReason: null,
+          manuallyResumedAt: null,
+          counters: { sent: 0, delivered: 0, bounced: 0, hardBounced: 0, softBounced: 0, complained: 0, failedToSend: 0 },
+          rates: { bounceRate: 0, hardBounceRate: 0, complaintRate: 0, failureRate: 0 },
+        },
       },
-    },
-    { upsert: true },
-  ).catch(() => {})
+      { upsert: true },
+    )
+  } catch (err) {
+    console.error('mailery: heartbeat write failed', err)
+  }
 
+  // Core runners: order matters (sweep before send dispatch, drain outbox
+  // before triggers re-scan, etc). Keep these serial.
   await processNewlyFiredEventTriggers(ctx).catch((err) => {
     console.error('mailery: triggers scan failed', err)
   })
@@ -63,6 +77,24 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   await promoteSoftBounces(ctx).catch((err) => {
     console.error('mailery: soft-bounce promotion failed', err)
   })
+
+  // Independent reputation pollers + housekeeping — run in parallel so tick
+  // latency is max() not sum(). Each is already throttled internally and
+  // catches its own errors.
+  await Promise.all([
+    runDnsblChecks(ctx).catch((err) => {
+      console.error('mailery: dnsbl checks failed', err)
+    }),
+    runPostmasterPull(ctx).catch((err) => {
+      console.error('mailery: postmaster pull failed', err)
+    }),
+    runSndsPull(ctx).catch((err) => {
+      console.error('mailery: snds pull failed', err)
+    }),
+    pruneDmarcFailures(ctx).catch((err) => {
+      console.error('mailery: dmarc prune failed', err)
+    }),
+  ])
 }
 
 /**

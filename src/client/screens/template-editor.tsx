@@ -5,14 +5,21 @@ import type { Editor as TiptapEditor, JSONContent } from '@tiptap/core'
 
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
-import { api } from '../lib/api'
+import {
+  api,
+  type LintIssue,
+  type LintResponse,
+  type MailTesterFeedback,
+  type MailTesterScore,
+  type MailTesterStatusResponse,
+} from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState } from '../lib/load-state'
 
 const EMPTY_DOC: JSONContent = { type: 'doc', content: [{ type: 'paragraph' }] }
 
 export function TemplateEditor({ slug }: any) {
-  const { data: tpl, loading, error, refetch } = useLive(() => api.template(slug))
+  const { data: tpl, loading, error, refetch } = useLive(() => api.template(slug), [slug])
 
   return (
     <LoadState loading={loading && !tpl} error={error} empty={!tpl} emptyLabel="Template not found." retry={refetch}>
@@ -42,6 +49,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const [testDialog, setTestDialog] = React.useState(false)
   const [testTo, setTestTo] = React.useState('')
   const [testStatus, setTestStatus] = React.useState<string | null>(null)
+  const [testBusy, setTestBusy] = React.useState(false)
 
   async function openPreview() {
     setPreviewErr(null)
@@ -57,13 +65,16 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   }
 
   async function submitTestSend() {
-    if (!testTo.trim()) return
+    if (!testTo.trim() || testBusy) return
+    setTestBusy(true)
     setTestStatus('Sending…')
     try {
       await api.sendTestTemplate(slug, { to: testTo.trim() })
       setTestStatus(`Sent test to ${testTo.trim()}`)
     } catch (e: any) {
       setTestStatus(`Failed: ${e?.message ?? e}`)
+    } finally {
+      setTestBusy(false)
     }
   }
 
@@ -72,6 +83,15 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const tplSlug = tpl.slug ?? slug
   const mjmlSource = tpl.body?.mjml ?? tpl.draft?.mjml ?? ''
   const plainText = tpl.body?.plainText ?? ''
+
+  const lint = useLiveLint(slug, {
+    subject,
+    preheader,
+    editorJson: editorJson as Record<string, unknown> | null,
+    fromEmail: fromEmail || tpl.fromEmail,
+    kind: tplKind,
+  })
+  const hasErrors = (lint.data?.errors.length ?? 0) > 0
 
   React.useEffect(() => {
     if (hydratedRef.current) return
@@ -117,7 +137,19 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
           <>
             <button className="btn" onClick={openPreview}><Icons.Eye size={14} />Preview</button>
             <button className="btn" onClick={() => { setTestDialog(true); setTestStatus(null) }}><Icons.Send size={14} />Test send</button>
-            <button className="btn btn-primary" disabled={busy} onClick={publish}><Icons.Rocket size={14} />Publish</button>
+            <button
+              className="btn btn-primary"
+              disabled={busy || hasErrors}
+              onClick={publish}
+              title={hasErrors ? 'Resolve content-lint errors before publishing.' : undefined}
+            >
+              <Icons.Rocket size={14} />Publish
+            </button>
+            {lint.data && (
+              <span className="text-xs subtle" style={{ marginLeft: 8 }}>
+                <LintBadge data={lint.data} />
+              </span>
+            )}
             {status && <span className="text-xs subtle" style={{ marginLeft: 8 }}>{status}</span>}
           </>
         }
@@ -182,6 +214,8 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <LintCard lint={lint} />
+          <MailTesterCard slug={slug} refetchTemplate={refetch} />
           <div className="card">
             <div className="card-head"><span className="card-title">Sender</span></div>
             <div className="card-body">
@@ -224,6 +258,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
           <div className="text-xs subtle" style={{ marginBottom: 8 }}>{previewing.preheader}</div>
           <iframe
             title="preview"
+            sandbox=""
             srcDoc={previewing.html}
             style={{ width: '100%', minHeight: 480, border: '1px solid var(--border)', borderRadius: 6, background: '#fff' }}
           />
@@ -246,7 +281,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
             </div>
             {testStatus && <div className="text-xs">{testStatus}</div>}
             <div className="hstack" style={{ gap: 8 }}>
-              <button className="btn btn-primary" onClick={submitTestSend} disabled={!testTo.trim()}>Send</button>
+              <button className="btn btn-primary" onClick={submitTestSend} disabled={!testTo.trim() || testBusy}>{testBusy ? 'Sending…' : 'Send'}</button>
               <button className="btn" onClick={() => setTestDialog(false)}>Close</button>
             </div>
           </div>
@@ -256,11 +291,321 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   )
 }
 
+interface LiveLintState {
+  data: LintResponse | null
+  loading: boolean
+  error: string | null
+}
+
+interface LiveLintInput {
+  subject: string
+  preheader: string
+  editorJson: Record<string, unknown> | null
+  fromEmail: string
+  kind: 'marketing' | 'transactional'
+}
+
+/**
+ * Debounced live lint against /templates/:slug/lint. Cancels in-flight
+ * requests when the input changes — typing fast doesn't pile up requests.
+ */
+function useLiveLint(slug: string, input: LiveLintInput): LiveLintState {
+  const [state, setState] = React.useState<LiveLintState>({ data: null, loading: false, error: null })
+
+  // editorJson is a fresh object reference on every keystroke even when the
+  // logical contents are unchanged — useMemo would always invalidate, so
+  // serialize directly and use the string as the effect key.
+  const key = JSON.stringify(input)
+  // Keep a ref to the latest input so the effect closure picks it up
+  // without participating in deps.
+  const inputRef = React.useRef(input)
+  inputRef.current = input
+
+  React.useEffect(() => {
+    const controller = new AbortController()
+    setState((s) => ({ ...s, loading: true }))
+
+    const t = setTimeout(async () => {
+      try {
+        const data = await api.lintTemplate(slug, inputRef.current, controller.signal)
+        setState({ data, loading: false, error: null })
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return
+        setState((s) => ({ data: s.data, loading: false, error: String(err?.message ?? err) }))
+      }
+    }, 500)
+
+    return () => {
+      controller.abort()
+      clearTimeout(t)
+    }
+  }, [key, slug])
+
+  return state
+}
+
+function LintBadge({ data }: { data: LintResponse }) {
+  const { errors, warnings, infos } = data
+  const total = errors.length + warnings.length + infos.length
+  if (total === 0) {
+    return <span style={{ color: 'var(--green-fg)' }}><span className="dot" />Lint: clean</span>
+  }
+  return (
+    <span className="hstack" style={{ gap: 6 }}>
+      {errors.length > 0 && <span style={{ color: 'var(--red-fg)' }}>{errors.length} error{errors.length === 1 ? '' : 's'}</span>}
+      {warnings.length > 0 && <span style={{ color: 'var(--amber-fg)' }}>{warnings.length} warning{warnings.length === 1 ? '' : 's'}</span>}
+      {infos.length > 0 && <span style={{ color: 'var(--fg-muted)' }}>{infos.length} info</span>}
+    </span>
+  )
+}
+
+function LintCard({ lint }: { lint: LiveLintState }) {
+  const data = lint.data
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Issues</span>
+        <span className="card-sub">
+          {lint.loading && !data ? 'Checking…' : data ? <LintBadge data={data} /> : '—'}
+        </span>
+      </div>
+      <div className="card-body" style={{ padding: 0 }}>
+        {lint.error && (
+          <div className="text-xs" style={{ padding: 12, color: 'var(--red-fg)' }}>
+            {lint.error}
+          </div>
+        )}
+        {data && data.compileFailed && (
+          <div className="text-xs" style={{ padding: 12, color: 'var(--red-fg)' }}>
+            Template compile failed — see error below.
+          </div>
+        )}
+        {data && (
+          <div style={{ maxHeight: 360, overflow: 'auto' }}>
+            {data.errors.map((i) => <LintRow key={`e-${i.rule}`} issue={i} />)}
+            {data.warnings.map((i) => <LintRow key={`w-${i.rule}`} issue={i} />)}
+            {data.infos.map((i) => <LintRow key={`n-${i.rule}`} issue={i} />)}
+            {data.errors.length === 0 && data.warnings.length === 0 && data.infos.length === 0 && (
+              <div className="text-xs subtle" style={{ padding: 12 }}>No issues.</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function LintRow({ issue }: { issue: LintIssue }) {
+  const color = issue.severity === 'error' ? 'var(--red-fg)' : issue.severity === 'warning' ? 'var(--amber-fg)' : 'var(--fg-muted)'
+  return (
+    <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)', display: 'grid', gap: 4 }}>
+      <div className="text-xs" style={{ color, fontWeight: 500 }}>
+        {issue.severity.toUpperCase()} · {issue.rule}
+      </div>
+      <div className="text-xs">{issue.message}</div>
+      {issue.hint && <div className="text-xs subtle">{issue.hint}</div>}
+    </div>
+  )
+}
+
+function MailTesterCard({ slug, refetchTemplate }: { slug: string; refetchTemplate: () => void }) {
+  const { data: status, refetch } = useLive<MailTesterStatusResponse>(() => api.mailTesterStatus(slug), [slug])
+  const [running, setRunning] = React.useState(false)
+  const [polling, setPolling] = React.useState<{ checkId: string; contentKey: string } | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const [pendingScore, setPendingScore] = React.useState<MailTesterScore | null>(null)
+
+  // Stash callbacks in refs so the polling effect only re-runs when
+  // `polling` (the actual check we're waiting on) changes — `refetch` and
+  // `refetchTemplate` have unstable identity and would otherwise restart
+  // the interval and reset `attempts` to 0 every parent re-render, so the
+  // timeout never fired.
+  const refetchRef = React.useRef(refetch)
+  const refetchTemplateRef = React.useRef(refetchTemplate)
+  refetchRef.current = refetch
+  refetchTemplateRef.current = refetchTemplate
+
+  React.useEffect(() => {
+    if (!polling) return
+    let cancelled = false
+    let attempts = 0
+    const maxAttempts = 30 // 30 * 3s = 90 seconds
+    const t = setInterval(async () => {
+      attempts++
+      try {
+        const r = await api.fetchMailTesterResult(slug, polling.checkId)
+        if (cancelled) return
+        if (r.status === 'ready' && r.score) {
+          setPendingScore(r.score)
+          setPolling(null)
+          setRunning(false)
+          refetchRef.current()
+          refetchTemplateRef.current()
+        } else if (attempts >= maxAttempts) {
+          setError('Timed out waiting for Mail-Tester to score the message. It may still be processing — refresh to check.')
+          setPolling(null)
+          setRunning(false)
+        }
+      } catch (err: any) {
+        if (cancelled) return
+        setError(String(err?.message ?? err))
+        setPolling(null)
+        setRunning(false)
+      }
+    }, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [polling, slug])
+
+  async function run() {
+    setRunning(true)
+    setError(null)
+    setPendingScore(null)
+    try {
+      const start = await api.startMailTesterCheck(slug)
+      if (start.status === 'ready' && start.score) {
+        setPendingScore(start.score)
+        setRunning(false)
+        refetch()
+        return
+      }
+      if (start.checkId && start.contentKey) {
+        setPolling({ checkId: start.checkId, contentKey: start.contentKey })
+      } else {
+        setError('Unexpected response from server.')
+        setRunning(false)
+      }
+    } catch (err: any) {
+      setError(String(err?.message ?? err))
+      setRunning(false)
+    }
+  }
+
+  const currentScore = pendingScore ?? status?.score ?? null
+  const minScore = status?.minScore ?? 8.0
+  const belowMin = currentScore != null && currentScore.score < minScore
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Deliverability check</span>
+        <span className="card-sub">
+          {!status
+            ? 'Loading…'
+            : !status.configured
+            ? 'Mail-Tester not configured'
+            : currentScore
+            ? `Cached for ${status.cacheHours}h after each check`
+            : 'Run a Mail-Tester check before publishing'}
+        </span>
+        {status?.configured && (
+          <div className="card-actions">
+            <button className="btn btn-xs" disabled={running} onClick={run}>
+              {running ? (polling ? 'Waiting for score…' : 'Sending…') : currentScore ? 'Re-run check' : 'Run check'}
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="card-body" style={{ display: 'grid', gap: 10 }}>
+        {!status?.configured && (
+          <div className="text-xs subtle">
+            Set <code>mailer.config.mailTester.apiKey</code> to enable. Mail-Tester runs SpamAssassin + DNS auth checks + content red-flag scoring against a real receipt of this template.
+          </div>
+        )}
+        {error && (
+          <div className="text-xs" style={{ color: 'var(--red-fg)' }}>{error}</div>
+        )}
+        {currentScore && (
+          <>
+            <div className="hstack" style={{ gap: 16, alignItems: 'baseline' }}>
+              <div>
+                <div className="text-xs subtle">Score</div>
+                <div
+                  style={{
+                    fontSize: 28,
+                    fontWeight: 600,
+                    color: belowMin ? 'var(--red-fg)' : currentScore.score >= 9 ? 'var(--green-fg)' : 'var(--amber-fg)',
+                  }}
+                >
+                  {currentScore.score.toFixed(1)} <span className="text-xs subtle">/ 10</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs subtle">Threshold</div>
+                <div className="text-sm mono">{minScore.toFixed(1)}</div>
+              </div>
+              <div>
+                <div className="text-xs subtle">Checked</div>
+                <div className="text-xs">{new Date(currentScore.fetchedAt).toLocaleString()}</div>
+              </div>
+            </div>
+            {belowMin && (
+              <div className="text-xs" style={{ color: 'var(--red-fg)' }}>
+                Score below threshold — publish will be blocked. Address the feedback below or override with <code>bypassMailTester: true</code> on the publish call.
+              </div>
+            )}
+            {currentScore.feedback.length > 0 && (
+              <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
+                {currentScore.feedback.slice(0, 12).map((f: MailTesterFeedback, i: number) => (
+                  <div key={i} className="text-xs" style={{ display: 'grid', gap: 2 }}>
+                    <div style={{ color: f.severity === 'error' ? 'var(--red-fg)' : f.severity === 'warning' ? 'var(--amber-fg)' : 'var(--fg-muted)', fontWeight: 500 }}>
+                      {f.severity.toUpperCase()} · {f.category}
+                    </div>
+                    <div>{f.message}</div>
+                  </div>
+                ))}
+                {currentScore.feedback.length > 12 && (
+                  <div className="text-xs subtle">+ {currentScore.feedback.length - 12} more items in raw report</div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  const titleId = React.useId()
+  const cardRef = React.useRef<HTMLDivElement | null>(null)
+
+  React.useEffect(() => {
+    const card = cardRef.current
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab' || !card) return
+      // Focus trap: cycle Tab between first/last tabbable in the modal.
+      const tabbables = card.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (tabbables.length === 0) return
+      const first = tabbables[0]!
+      const last = tabbables[tabbables.length - 1]!
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey && (active === first || !card.contains(active))) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    cardRef.current?.focus()
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   return (
     <div
       role="dialog"
       aria-modal="true"
+      aria-labelledby={titleId}
       onClick={onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
@@ -268,14 +613,16 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
       }}
     >
       <div
+        ref={cardRef}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         className="card"
         style={{ width: 'min(680px, 90vw)', maxHeight: '85vh', overflow: 'auto', padding: 0 }}
       >
         <div className="card-head">
-          <span className="card-title">{title}</span>
+          <span className="card-title" id={titleId}>{title}</span>
           <span className="grow" />
-          <button className="icon-btn" onClick={onClose}><Icons.X size={14} /></button>
+          <button className="icon-btn" aria-label="Close" onClick={onClose}><Icons.X size={14} /></button>
         </div>
         <div className="card-body">{children}</div>
       </div>

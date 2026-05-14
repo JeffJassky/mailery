@@ -18,7 +18,7 @@ import {
 import { signUnsubscribeToken } from '../tokens.js'
 import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
-import { recordHealthCounter } from './health.js'
+import { getBucketStatus, recordHealthCounter } from './health.js'
 import type { RunnerContext } from './index.js'
 
 export async function handleSend(
@@ -128,11 +128,12 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     return
   }
 
-  // 2. Circuit-breaker check (only blocks marketing).
+  // 2. Circuit-breaker check (only blocks marketing). The breaker is scoped
+  // per (senderDomain, kind) bucket — one bad subdomain doesn't hold mail for
+  // the others.
   if (send.kind === 'marketing') {
-    const health = await ctx.collections.health.findOne({ _id: 'singleton' })
-    if (health?.status === 'tripped') {
-      // Re-enqueue with a delay; held until resume.
+    const bucket = await getBucketStatus(ctx, send.fromEmail, send.kind)
+    if (bucket?.status === 'tripped') {
       await ctx.queues.send.add('send', { sendId: String(send._id) }, { delay: 60_000 })
       return
     }
@@ -211,13 +212,16 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
         },
       },
     )
-    await recordHealthCounter(ctx, 'sent')
+    // Use send.fromEmail (same field getBucketStatus reads) so the breaker
+    // gate and the counter record into the same bucket even if a
+    // hypothetical render-time fromDefaults swap ever lands.
+    await recordHealthCounter(ctx, 'sent', { fromEmail: send.fromEmail, kind: send.kind })
   } catch (err: any) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
       { $set: { status: 'failed', errorMessage: String(err?.message ?? err) } },
     )
-    await recordHealthCounter(ctx, 'failedToSend')
+    await recordHealthCounter(ctx, 'failedToSend', { fromEmail: send.fromEmail, kind: send.kind })
     if (ctx.config.onSendFailure) {
       try {
         await ctx.config.onSendFailure({ send, error: err })

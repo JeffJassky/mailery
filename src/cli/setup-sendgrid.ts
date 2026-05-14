@@ -15,6 +15,8 @@
  *   CLOUDFLARE_API_TOKEN — only if --cloudflare; needs Zone:Read + DNS:Edit on the zone
  */
 
+import { cloudflareClient, inferZone } from './cloudflare.js'
+
 export interface SetupSendgridOpts {
   /** One or more domains to authenticate, e.g. ["news.example.com", "mail.example.com"]. */
   domains: string[]
@@ -310,81 +312,8 @@ function sendgridClient(apiKey: string, fetchFn: typeof fetch): SendGridClient {
 }
 
 // ---------------------------------------------------------------------------
-// Cloudflare API client
-// ---------------------------------------------------------------------------
-
-interface CloudflareClient {
-  findZoneId(name: string): Promise<string | null>
-  upsertRecord(zoneId: string, rec: { type: string; host: string; data: string }): Promise<'created' | 'updated' | 'noop'>
-}
-
-function cloudflareClient(apiToken: string, fetchFn: typeof fetch): CloudflareClient {
-  const base = 'https://api.cloudflare.com/client/v4'
-  const headers = { authorization: `Bearer ${apiToken}`, 'content-type': 'application/json' }
-
-  async function call(path: string, init: RequestInit = {}): Promise<any> {
-    const res = await fetchFn(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers as any) } })
-    const body: any = await res.json().catch(() => null)
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(
-        `Cloudflare rejected the request (HTTP ${res.status}). Your CLOUDFLARE_API_TOKEN is invalid, expired, ` +
-          'or missing the required permissions. The token needs Zone:Read + DNS:Edit on the specific zone you\'re ' +
-          'publishing into. Manage tokens at https://dash.cloudflare.com/profile/api-tokens.',
-      )
-    }
-    if (!res.ok || (body && body.success === false)) {
-      const message = body?.errors?.[0]?.message ?? res.statusText
-      throw new Error(`Cloudflare ${init.method ?? 'GET'} ${path} → ${res.status}: ${message}`)
-    }
-    return body
-  }
-
-  return {
-    async findZoneId(name: string) {
-      const r = await call(`/zones?name=${encodeURIComponent(name)}`)
-      return r?.result?.[0]?.id ?? null
-    },
-    async upsertRecord(zoneId, rec) {
-      // CF requires the host to be a FQDN, which SendGrid already gives us.
-      const existing = await call(
-        `/zones/${zoneId}/dns_records?type=${encodeURIComponent(rec.type)}&name=${encodeURIComponent(rec.host)}`,
-      )
-      const match = existing?.result?.[0]
-      const desiredBody = {
-        type: rec.type,
-        name: rec.host,
-        content: rec.data,
-        ttl: 1, // auto
-        proxied: false, // critical: SendGrid DKIM CNAMEs must NOT be proxied
-      }
-      if (!match) {
-        await call(`/zones/${zoneId}/dns_records`, { method: 'POST', body: JSON.stringify(desiredBody) })
-        return 'created'
-      }
-      if (match.content === rec.data && match.proxied === false) {
-        return 'noop'
-      }
-      await call(`/zones/${zoneId}/dns_records/${match.id}`, {
-        method: 'PUT',
-        body: JSON.stringify(desiredBody),
-      })
-      return 'updated'
-    },
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Best-effort eTLD+1 inference. Falls back to last two labels — fine for most
- * `.com` / `.io` style domains. For multi-label public suffixes (`.co.uk`)
- * pass `--cloudflare-zone` explicitly. */
-function inferZone(domain: string): string {
-  const labels = domain.split('.').filter(Boolean)
-  if (labels.length <= 2) return domain
-  return labels.slice(-2).join('.')
-}
 
 function safeJson(s: string): any {
   try { return JSON.parse(s) } catch { return null }

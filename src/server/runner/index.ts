@@ -22,6 +22,18 @@ export interface RunnerContext {
   queues: Queues
   config: ResolvedConfig
   handlebarsHelpers?: Record<string, Handlebars.HelperDelegate>
+  /**
+   * Optional audit-log writer. Available when the runner context is derived
+   * from a Mailer instance (Mailer.getRunnerContext()); absent in some
+   * lightweight test harnesses. Runner code that uses this must tolerate
+   * `undefined`.
+   */
+  audit?: (entry: {
+    actor: string
+    action: string
+    resource: { collection: string; id?: string; slug?: string }
+    diffSummary?: string
+  }) => Promise<void>
 }
 
 export { runTick } from './tick.js'

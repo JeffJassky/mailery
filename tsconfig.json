@@ -16,6 +16,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/server", "src/shared", "src/testing", "src/cli", "test", "tsup.config.ts", "vitest.config.ts", "playwright.config.ts"],
+  "include": ["src/server", "src/shared", "src/testing", "src/cli", "src/types", "test", "tsup.config.ts", "vitest.config.ts", "playwright.config.ts"],
   "exclude": ["node_modules", "dist", "docs", "src/client", "examples"]
 }

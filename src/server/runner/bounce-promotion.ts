@@ -9,6 +9,7 @@
  * that email, we skip.
  */
 
+import type { TemplateKind } from '../../shared/enums.js'
 import { sha256Hex } from '../tokens.js'
 import { recordHealthCounter } from './health.js'
 import type { RunnerContext } from './index.js'
@@ -23,9 +24,17 @@ export async function promoteSoftBounces(ctx: RunnerContext): Promise<void> {
   // Aggregate: count soft bounces per emailAtSend since cutoff, hitting the
   // threshold. Bounded limit to keep the tick fast.
   const offenders = await ctx.collections.sends
-    .aggregate<{ _id: string; count: number }>([
+    .aggregate<{ _id: string; count: number; lastFromEmail: string | null; lastKind: TemplateKind | null }>([
       { $match: { status: 'bounced', bounceType: 'soft', queuedAt: { $gt: cutoff } } },
-      { $group: { _id: '$emailAtSend', count: { $sum: 1 } } },
+      { $sort: { queuedAt: 1 } },
+      {
+        $group: {
+          _id: '$emailAtSend',
+          count: { $sum: 1 },
+          lastFromEmail: { $last: '$fromEmail' },
+          lastKind: { $last: '$kind' },
+        },
+      },
       { $match: { count: { $gte: threshold } } },
       { $limit: 200 },
     ])
@@ -64,6 +73,10 @@ export async function promoteSoftBounces(ctx: RunnerContext): Promise<void> {
       { $set: { status: 'bounced', updatedAt: new Date() } },
     )
 
-    await recordHealthCounter(ctx, 'hardBounced')
+    await recordHealthCounter(
+      ctx,
+      'hardBounced',
+      o.lastKind ? { fromEmail: o.lastFromEmail, kind: o.lastKind } : null,
+    )
   }
 }

@@ -146,7 +146,92 @@ All-clear states are silent. The banner only renders when there's at least one w
 }
 ```
 
-When tripped, marketing sends are held; transactional sends bypass. Manual reset only — mailery never auto-resumes.
+The circuit breaker is scoped **per (sender domain × template kind)**. One bad subdomain doesn't hold mail for the others. When a bucket trips, only marketing sends from that (domain, kind) pair are held; transactional sends bypass entirely; other buckets keep flowing. Manual reset only — mailery never auto-resumes. See [Deliverability → Per-domain circuit breaker](./deliverability#per-domain-circuit-breaker).
+
+## DNS block-list monitoring
+
+```ts
+{
+  dnsbl: {
+    domainLists: [                       // defaults shown
+      { host: 'dbl.spamhaus.org', label: 'Spamhaus DBL' },
+      { host: 'multi.surbl.org', label: 'SURBL' },
+      { host: 'multi.uribl.com', label: 'URIBL' },
+    ],
+    ipLists: [                           // defaults shown — only used with dedicatedIps
+      { host: 'zen.spamhaus.org', label: 'Spamhaus ZEN' },
+      { host: 'b.barracudacentral.org', label: 'Barracuda' },
+      { host: 'dnsbl.sorbs.net', label: 'SORBS' },
+      { host: 'bl.spamcop.net', label: 'SpamCop' },
+    ],
+    dedicatedIps: [],                    // optional — IPs to query against ipLists
+    intervalHours: 24,                   // 0 disables scheduled runs
+  },
+}
+```
+
+Daily DNS resolution of each sender domain (and any dedicated IPs) against the configured block lists. Results in `setup-status` + admin Health screen. No external API needed.
+
+## Google Postmaster Tools
+
+```ts
+{
+  postmaster: {
+    clientId: process.env.GOOGLE_POSTMASTER_CLIENT_ID!,
+    clientSecret: process.env.GOOGLE_POSTMASTER_CLIENT_SECRET!,
+    refreshToken: process.env.GOOGLE_POSTMASTER_REFRESH_TOKEN!,
+    domains: ['news.example.com'],       // optional — defaults to senderDomains + fromDefaults
+    intervalHours: 24,
+  },
+}
+```
+
+Requires an OAuth refresh token with `https://www.googleapis.com/auth/postmaster.readonly` scope. Only meaningful at >100 sends/day to Gmail. Auto-trips the (domain × marketing) breaker when a domain falls to `BAD` reputation. See [Deliverability → Google Postmaster Tools](./deliverability#google-postmaster-tools).
+
+## Microsoft SNDS
+
+```ts
+{
+  snds: {
+    accessKey: process.env.SNDS_ACCESS_KEY!,
+    ips: ['203.0.113.5'],                // optional filter
+    intervalHours: 24,
+  },
+}
+```
+
+Only meaningful if you send from a dedicated IP. Visibility-only — RED filter results surface in setup-status but don't auto-trip. JMRP enrolment is a separate manual step. See [Deliverability → Microsoft SNDS](./deliverability#microsoft-snds).
+
+## DMARC ingestion
+
+```ts
+{
+  dmarc: {
+    knownSources: [                      // operator-provided baseline tags
+      { ip: '149.72.45.10', label: 'SendGrid' },
+      { ip: '203.0.113.99', label: 'Old marketing', ignored: true },
+    ],
+    retentionDays: 90,                   // failure rows older than this are pruned by an hourly housekeeping job
+  },
+}
+```
+
+Tags merge with the mutable `mailer_dmarc_source_tags` collection that the admin UI writes to. See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
+
+## Mail-Tester (optional)
+
+```ts
+{
+  mailTester: {
+    apiKey: process.env.MAIL_TESTER_API_KEY!,
+    minScore: 8.0,                       // default — publish blocks when below
+    cacheHours: 24,                      // re-running same content within window is a no-op
+    baseUrl: 'https://mail-tester.com/api',  // override for staging
+  },
+}
+```
+
+Enables the deliverability-check card in the template editor. Each check sends one real email via the default provider and consumes one Mail-Tester credit. Cache key is `(bodyHash, subject, fromEmail)`. See [Deliverability → Mail-Tester integration](./deliverability#mail-tester-integration-optional).
 
 ## Hooks
 

@@ -38,10 +38,10 @@ beforeAll(async () => {
     createdAt: new Date(),
     updatedAt: new Date(),
   } as TemplateDoc)
-})
+}, 60_000)
 
 afterAll(async () => {
-  await H.stop()
+  if (H) await H.stop()
 })
 
 describe('stranded-send sweep', () => {

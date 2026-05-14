@@ -8,6 +8,8 @@
  */
 
 import express, { Router, type Request, type Response, type NextFunction } from 'express'
+import multer from 'multer'
+import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ObjectId } from 'mongodb'
@@ -20,8 +22,24 @@ import {
   renderTemplate,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { lintTemplate } from '../templates/linter.js'
 import { runSetupChecks } from './setup-status.js'
-import { signUnsubscribeToken } from '../tokens.js'
+import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
+import { effectiveOverallStatus } from '../runner/health.js'
+import { runDnsblChecks } from '../runner/dnsbl.js'
+import { runPostmasterPull } from '../runner/postmaster.js'
+import { runSndsPull } from '../runner/snds.js'
+import { ingestDmarcAttachment, resolveSourceTags, suggestPolicyProgression } from '../runner/dmarc.js'
+import { computeListHygiene } from '../runner/hygiene.js'
+import {
+  createMailTesterClient,
+  evaluateMailTesterGate,
+  findCachedScore,
+  mailTesterContentKey,
+  persistScore,
+  type MailTesterClient,
+} from '../runner/mail-tester.js'
+import { HEALTH_AGG_ID, healthBucketId } from '../models/index.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -36,6 +54,11 @@ export interface AdminRouterOptions {
   spaDir?: string
   /** Resolve actor metadata from a Request. Defaults to `human:${req.user?.email || 'anonymous'}`. */
   getActor?: (req: Request) => string
+  /**
+   * Inject a Mail-Tester client (tests use a stub). When omitted, a real
+   * client is created from `mailer.config.mailTester`.
+   */
+  mailTesterClient?: MailTesterClient
 }
 
 export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
@@ -63,7 +86,7 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
     next()
   })
 
-  router.use('/api', apiRouter(mailer))
+  router.use('/api', apiRouter(mailer, opts))
 
   // SPA shell — any other route returns index.html so client-side routing
   // doesn't 404 on refresh.
@@ -78,25 +101,32 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
 // JSON API
 // ---------------------------------------------------------------------------
 
-function apiRouter(mailer: Mailer): Router {
+function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
   const r = Router()
   const c = mailer.collections
+
+  function getMailTesterClient(): MailTesterClient | null {
+    if (opts.mailTesterClient) return opts.mailTesterClient
+    const cfg = mailer.config.mailTester
+    if (!cfg?.apiKey) return null
+    return createMailTesterClient(cfg)
+  }
 
   r.get(
     '/me',
     asyncHandler(async (req, res) => {
-      const [flows, templates, broadcasts, contacts, suppressions, health] = await Promise.all([
+      const [flows, templates, broadcasts, contacts, suppressions, healthDocs] = await Promise.all([
         c.flows.estimatedDocumentCount(),
         c.templates.estimatedDocumentCount(),
         c.broadcasts.estimatedDocumentCount(),
         c.subscriptions.countDocuments({ status: 'subscribed' }),
         c.suppressions.estimatedDocumentCount(),
-        c.health.findOne({ _id: 'singleton' }),
+        c.health.find({}).limit(500).toArray(),
       ])
       res.json({
         actor: (req as any).actor,
         counts: { flows, templates, broadcasts, contacts, suppressions },
-        health: { status: health?.status ?? null },
+        health: { status: effectiveOverallStatus(healthDocs) },
         providers: {
           names: Object.keys(mailer.config.providers),
           default: mailer.config.defaultProvider,
@@ -164,7 +194,8 @@ function apiRouter(mailer: Mailer): Router {
         return curN / curD - prevN / prevD
       }
 
-      const health = await c.health.findOne({ _id: 'singleton' })
+      const healthDocs = await c.health.find({}).limit(500).toArray()
+      const healthAgg = healthDocs.find((d) => d._id === HEALTH_AGG_ID) ?? null
       const recentFlowsRaw = await c.flows.find({ enabled: true }).limit(5).toArray()
       const flowStatsMap = await computeFlowStats(mailer)
       const recentFlows = recentFlowsRaw.map((f) => ({ ...f, stats: flowStatsMap.get(f.slug) ?? emptyFlowStats() }))
@@ -204,8 +235,8 @@ function apiRouter(mailer: Mailer): Router {
         },
         series: { hourly: { sends: sendSeries, opens: openSeries } },
         health: {
-          status: health?.status ?? null,
-          rates: health?.rates ?? null,
+          status: effectiveOverallStatus(healthDocs),
+          rates: healthAgg?.rates ?? null,
           thresholds: {
             hardBounceRatePctTrip: mailer.config.circuitBreaker.hardBounceRatePctTrip,
             complaintRatePctTrip: mailer.config.circuitBreaker.complaintRatePctTrip,
@@ -222,6 +253,21 @@ function apiRouter(mailer: Mailer): Router {
         recentFlows,
         recentSends,
         recentAudit,
+      })
+    }),
+  )
+
+  // ----- Events registry ----------------------------------------------------
+  r.get(
+    '/events',
+    asyncHandler(async (_req, res) => {
+      const registered = mailer.events.list()
+      const seenNames = await c.events.distinct('name')
+      const known = new Set(registered.map((r) => r.name))
+      const unregistered = (seenNames as string[]).filter((n) => n && !known.has(n))
+      res.json({
+        registered: registered.sort((a, b) => a.name.localeCompare(b.name)),
+        seen: unregistered.sort(),
       })
     }),
   )
@@ -350,7 +396,7 @@ function apiRouter(mailer: Mailer): Router {
         c.subscriptions.findOne({ externalId }),
         c.events.find({ externalId }).sort({ occurredAt: -1 }).limit(50).toArray(),
         c.sends.find({ externalId }).sort({ queuedAt: -1 }).limit(50).toArray(),
-        c.flowRuns.find({ externalId, status: 'active' }).toArray(),
+        c.flowRuns.find({ externalId, status: 'active' }).sort({ nextActionAt: 1 }).limit(50).toArray(),
       ])
       if (!contact) return res.status(404).json({ error: 'not_found' })
       return res.json({ contact, subscription, recentEvents, recentSends, activeRuns })
@@ -378,7 +424,11 @@ function apiRouter(mailer: Mailer): Router {
       const send = await c.sends.findOne({ _id: new ObjectId(id) })
       if (!send) return res.status(404).json({ error: 'not_found' })
       const events = send.providerMessageId
-        ? await c.webhookEvents.find({ providerMessageId: send.providerMessageId }).toArray()
+        ? await c.webhookEvents
+            .find({ providerMessageId: send.providerMessageId })
+            .sort({ receivedAt: -1 })
+            .limit(100)
+            .toArray()
         : []
       return res.json({ send, webhookEvents: events })
     }),
@@ -430,7 +480,6 @@ function apiRouter(mailer: Mailer): Router {
   r.get(
     '/health',
     asyncHandler(async (_req, res) => {
-      const h = await c.health.findOne({ _id: 'singleton' })
       const cb = mailer.config.circuitBreaker
       const thresholds = {
         hardBounceRatePctTrip: cb.hardBounceRatePctTrip,
@@ -438,13 +487,25 @@ function apiRouter(mailer: Mailer): Router {
         combinedBounceRatePctTrip: cb.combinedBounceRatePctTrip,
         failedToSendRatePctDegrade: cb.failedToSendRatePctDegrade,
       }
-      if (!h) {
-        // No tick has run yet. Do not fabricate "healthy" / zeroed rates —
-        // the UI renders "—" / muted dots when status is null.
-        res.json({ status: null, rates: null, counters: null, thresholds })
+      const docs = await c.health.find({}).limit(500).toArray()
+      const aggregate = docs.find((d) => d._id === HEALTH_AGG_ID) ?? null
+      const buckets = docs.filter((d) => d._id !== HEALTH_AGG_ID)
+      const overall = effectiveOverallStatus(docs)
+      if (docs.length === 0) {
+        // No tick has run yet. UI renders "—" / muted dots when status is null.
+        res.json({ status: null, rates: null, counters: null, aggregate: null, buckets: [], thresholds })
         return
       }
-      res.json({ ...h, thresholds })
+      // Keep top-level `status` / `rates` for back-compat with consumers that
+      // expect a single status (broadcast-new pre-flight, shell pill).
+      res.json({
+        status: overall,
+        rates: aggregate?.rates ?? null,
+        counters: aggregate?.counters ?? null,
+        aggregate,
+        buckets,
+        thresholds,
+      })
     }),
   )
 
@@ -463,16 +524,391 @@ function apiRouter(mailer: Mailer): Router {
   r.post(
     '/health/resume',
     asyncHandler(async (req, res) => {
-      await c.health.updateOne(
-        { _id: 'singleton' },
+      const body = (req.body ?? {}) as { senderDomain?: string; kind?: 'marketing' | 'transactional' }
+      // Half-specified body (only senderDomain or only kind) is almost
+      // certainly an operator error — fail closed rather than silently
+      // resume every tripped bucket.
+      if ((body.senderDomain != null) !== (body.kind != null)) {
+        return res.status(400).json({
+          error: 'validation_failed',
+          message: 'senderDomain and kind must both be provided to target a single bucket, or both omitted to resume all tripped buckets.',
+        })
+      }
+      if (body.kind && !['marketing', 'transactional'].includes(body.kind)) {
+        return res.status(400).json({ error: 'validation_failed', message: 'kind must be "marketing" or "transactional"' })
+      }
+      const target = body.senderDomain && body.kind
+        ? { _id: healthBucketId(body.senderDomain.toLowerCase(), body.kind) }
+        // Explicitly exclude the aggregate doc — it never trips, but guard
+        // anyway so a future schema change can't accidentally flip its status.
+        : { status: 'tripped' as const, _id: { $ne: HEALTH_AGG_ID } }
+
+      const result = await c.health.updateMany(
+        target,
         { $set: { status: 'healthy', manuallyResumedAt: new Date(), updatedAt: new Date() } },
       )
       await mailer.audit({
         actor: (req as any).actor,
         action: 'health.resume',
-        resource: { collection: 'mailer_health' },
+        resource: {
+          collection: 'mailer_health',
+          id: body.senderDomain && body.kind ? `${body.senderDomain}|${body.kind}` : 'all-tripped',
+        },
+      })
+      res.json({ ok: true, resumed: result.modifiedCount })
+    }),
+  )
+
+  // ----- DNSBL --------------------------------------------------------------
+  r.get(
+    '/dnsbl',
+    asyncHandler(async (_req, res) => {
+      const checks = await c.dnsblChecks.find({}).sort({ result: 1, target: 1, list: 1 }).limit(500).toArray()
+      const latestRunAt = checks.reduce<Date | null>((acc, d) => {
+        const t = new Date(d.runAt)
+        return acc && acc.getTime() >= t.getTime() ? acc : t
+      }, null)
+      res.json({
+        checks,
+        latestRunAt: latestRunAt ? latestRunAt.toISOString() : null,
+        intervalHours: mailer.config.dnsbl?.intervalHours ?? 24,
+      })
+    }),
+  )
+
+  r.post(
+    '/dnsbl/recheck',
+    asyncHandler(async (req, res) => {
+      const result = await runDnsblChecks(mailer.getRunnerContext(), { force: true })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dnsbl.recheck',
+        resource: { collection: 'mailer_dnsbl_checks' },
+        diffSummary: result.ran
+          ? `${result.totalChecks} checks, ${result.listedCount} listed`
+          : `not run: ${result.reason}`,
+      })
+      res.json(result)
+    }),
+  )
+
+  // ----- Postmaster Tools ---------------------------------------------------
+  r.get(
+    '/postmaster',
+    asyncHandler(async (_req, res) => {
+      const cfg = mailer.config.postmaster
+      const configured = !!cfg?.clientId && !!cfg?.clientSecret && !!cfg?.refreshToken
+      const all = await c.postmasterSnapshots.find({}).sort({ domain: 1, date: -1 }).limit(2000).toArray()
+      // Group by domain, keep last 30 entries per domain.
+      const byDomain = new Map<string, typeof all>()
+      for (const s of all) {
+        const arr = byDomain.get(s.domain) ?? []
+        if (arr.length < 30) arr.push(s)
+        byDomain.set(s.domain, arr)
+      }
+      const domains = Array.from(byDomain.entries()).map(([domain, snapshots]) => ({
+        domain,
+        latest: snapshots[0] ?? null,
+        history: snapshots,
+      }))
+      res.json({
+        configured,
+        intervalHours: cfg?.intervalHours ?? 24,
+        domains,
+      })
+    }),
+  )
+
+  r.post(
+    '/postmaster/refresh',
+    asyncHandler(async (req, res) => {
+      const result = await runPostmasterPull(mailer.getRunnerContext(), { force: true })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'postmaster.refresh',
+        resource: { collection: 'mailer_postmaster_snapshots' },
+        diffSummary: result.ran
+          ? `fetched ${result.fetched ?? 0}, tripped ${(result.trippedDomains ?? []).length}`
+          : `not run: ${result.reason}`,
+      })
+      res.json(result)
+    }),
+  )
+
+  // ----- List Hygiene -------------------------------------------------------
+  // The hygiene aggregation iterates every send doc — at scale that's
+  // expensive. Cache the result for 60s and serialize concurrent requests
+  // so a few rapid-fire dashboard loads can't pile up multiple full scans.
+  let hygieneCache: { computedAt: number; report: Awaited<ReturnType<typeof computeListHygiene>> } | null = null
+  let hygieneInFlight: Promise<Awaited<ReturnType<typeof computeListHygiene>>> | null = null
+  const HYGIENE_CACHE_MS = 60_000
+
+  r.get(
+    '/hygiene',
+    asyncHandler(async (req, res) => {
+      const force = req.query.refresh === '1' || req.query.refresh === 'true'
+      const now = Date.now()
+      if (!force && hygieneCache && now - hygieneCache.computedAt < HYGIENE_CACHE_MS) {
+        return res.json(hygieneCache.report)
+      }
+      if (!hygieneInFlight) {
+        hygieneInFlight = (async () => {
+          try {
+            const report = await computeListHygiene(mailer.getRunnerContext())
+            hygieneCache = { computedAt: Date.now(), report }
+            return report
+          } finally {
+            hygieneInFlight = null
+          }
+        })()
+      }
+      const report = await hygieneInFlight
+      res.json(report)
+    }),
+  )
+
+  // ----- DMARC RUA ingestion ------------------------------------------------
+  const dmarcUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB; reports are typically <100KB
+  })
+
+  r.post(
+    '/dmarc/upload',
+    dmarcUpload.single('file'),
+    asyncHandler(async (req, res) => {
+      const file = (req as any).file as Express.Multer.File | undefined
+      if (!file) return res.status(400).json({ error: 'no_file', message: 'expected a "file" field' })
+
+      try {
+        const result = await ingestDmarcAttachment(mailer.getRunnerContext(), file.buffer, file.originalname)
+        await mailer.audit({
+          actor: (req as any).actor,
+          action: 'dmarc.ingest',
+          resource: { collection: 'mailer_dmarc_reports', id: result.reportId },
+          diffSummary: result.duplicate
+            ? `duplicate report ${result.reportId}`
+            : `ingested ${result.totalMessages} msgs (${result.passCount} pass / ${result.failCount} fail) for ${result.domain}`,
+        })
+        return res.json(result)
+      } catch (err: any) {
+        return res.status(400).json({ error: 'ingest_failed', message: String(err?.message ?? err) })
+      }
+    }),
+  )
+
+  r.get(
+    '/dmarc',
+    asyncHandler(async (_req, res) => {
+      const ctx = mailer.getRunnerContext()
+      const tagged = await resolveSourceTags(ctx)
+      const reports = await c.dmarcReports.find({}).sort({ rangeEnd: -1 }).limit(200).toArray()
+      const since30 = new Date(Date.now() - 30 * 86_400_000)
+      // Cap at 5k rows — busy domains can easily generate that many failure
+      // rows over 30 days. We only consume these for per-domain progression
+      // suggestions (untagged-source check); a partial page is fine.
+      const recentFailures = await c.dmarcFailures
+        .find({ receivedAt: { $gte: since30 } })
+        .sort({ receivedAt: -1 })
+        .limit(5000)
+        .toArray()
+
+      const byDomain = new Map<string, { passCount: number; failCount: number; totalMessages: number; reportCount: number; latestRangeEnd: Date | null; latestPolicy: 'none' | 'quarantine' | 'reject' | null; latestPct: number | null; reports: typeof reports }>()
+      for (const r of reports) {
+        const cur = byDomain.get(r.domain) ?? { passCount: 0, failCount: 0, totalMessages: 0, reportCount: 0, latestRangeEnd: null, latestPolicy: null, latestPct: null, reports: [] }
+        cur.passCount += r.passCount
+        cur.failCount += r.failCount
+        cur.totalMessages += r.totalMessages
+        cur.reportCount += 1
+        const re = new Date(r.rangeEnd)
+        if (!cur.latestRangeEnd || re > cur.latestRangeEnd) {
+          cur.latestRangeEnd = re
+          cur.latestPolicy = r.policyP
+          cur.latestPct = r.policyPct
+        }
+        cur.reports.push(r)
+        byDomain.set(r.domain, cur)
+      }
+
+      // Build per-day alignment series (last 14 days) per domain for sparklines.
+      const since14 = Date.now() - 14 * 86_400_000
+
+      const domains = Array.from(byDomain.entries()).map(([domain, s]) => {
+        // Sparkline series — pass rate per day from recent reports.
+        const dayTotals = new Map<string, { pass: number; total: number }>()
+        for (const r of s.reports) {
+          if (new Date(r.rangeEnd).getTime() < since14) continue
+          const day = new Date(r.rangeEnd).toISOString().slice(0, 10)
+          const d = dayTotals.get(day) ?? { pass: 0, total: 0 }
+          d.pass += r.passCount
+          d.total += r.passCount + r.failCount
+          dayTotals.set(day, d)
+        }
+        const series = Array.from(dayTotals.entries())
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([day, d]) => ({ day, alignmentRate: d.total === 0 ? null : d.pass / d.total }))
+
+        // Policy progression suggestion.
+        const knownIps = new Set(Array.from(tagged.values()).filter((t) => !t.ignored).map((t) => t.ip))
+        const ignoredIps = new Set(Array.from(tagged.values()).filter((t) => t.ignored).map((t) => t.ip))
+        const suggested = suggestPolicyProgression({
+          reports: s.reports.map((r) => ({ rangeEnd: new Date(r.rangeEnd), passCount: r.passCount, failCount: r.failCount })),
+          failures: recentFailures.filter((f) => f.domain === domain).map((f) => ({ sourceIp: f.sourceIp, count: f.count, receivedAt: new Date(f.receivedAt) })),
+          knownSourceIps: knownIps,
+          ignoredSourceIps: ignoredIps,
+          currentPolicy: s.latestPolicy,
+          currentPct: s.latestPct,
+        })
+
+        return {
+          domain,
+          passCount: s.passCount,
+          failCount: s.failCount,
+          totalMessages: s.totalMessages,
+          reportCount: s.reportCount,
+          latestRangeEnd: s.latestRangeEnd,
+          alignmentRate: s.totalMessages === 0 ? null : s.passCount / s.totalMessages,
+          currentPolicy: s.latestPolicy,
+          currentPct: s.latestPct,
+          progression: suggested
+            ? { ...suggested, current: { policy: s.latestPolicy, pct: s.latestPct } }
+            : null,
+          series,
+        }
+      })
+
+      const topFailures = await c.dmarcFailures
+        .aggregate<{ _id: { sourceIp: string; domain: string }; total: number; days: number; lastSeen: Date; sample: any }>([
+          { $match: { receivedAt: { $gte: since30 } } },
+          {
+            $group: {
+              _id: { sourceIp: '$sourceIp', domain: '$domain' },
+              total: { $sum: '$count' },
+              days: { $addToSet: '$day' },
+              lastSeen: { $max: '$receivedAt' },
+              sample: { $first: '$$ROOT' },
+            },
+          },
+          { $project: { sourceIp: '$_id.sourceIp', domain: '$_id.domain', total: 1, days: { $size: '$days' }, lastSeen: 1, sample: 1 } },
+          { $sort: { total: -1 } },
+          { $limit: 50 },
+        ])
+        .toArray()
+
+      const sources = topFailures.map((f) => {
+        const tag = tagged.get(f._id.sourceIp)
+        return {
+          sourceIp: f._id.sourceIp,
+          domain: f._id.domain,
+          totalMessages: f.total,
+          daysSeen: f.days,
+          lastSeen: f.lastSeen,
+          dkimResult: f.sample.dkimResult,
+          spfResult: f.sample.spfResult,
+          dispositionApplied: f.sample.dispositionApplied,
+          label: tag?.label ?? null,
+          ignored: !!tag?.ignored,
+          tagSource: tag?.source ?? null,
+        }
+      })
+
+      res.json({
+        domains,
+        sources,
+        recentReports: reports.slice(0, 30),
+        retentionDays: mailer.config.dmarc?.retentionDays ?? 90,
+      })
+    }),
+  )
+
+  // ----- DMARC source tags (mutable from UI) --------------------------------
+  r.put(
+    '/dmarc/sources/:ip',
+    asyncHandler(async (req, res) => {
+      const ip = String(req.params.ip ?? '')
+      if (!net.isIP(ip)) {
+        return res.status(400).json({ error: 'validation_failed', message: 'invalid IP' })
+      }
+      const body = (req.body ?? {}) as { label?: string; ignored?: boolean }
+      if (!body.label || typeof body.label !== 'string') {
+        return res.status(400).json({ error: 'validation_failed', message: 'label is required' })
+      }
+      const label = body.label.trim().slice(0, 200)
+      if (!label) {
+        return res.status(400).json({ error: 'validation_failed', message: 'label is required' })
+      }
+      const ignored = !!body.ignored
+      await c.dmarcSourceTags.updateOne(
+        { ip },
+        { $set: { ip, label, ignored, setBy: (req as any).actor ?? 'unknown', setAt: new Date() } },
+        { upsert: true },
+      )
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.source_tag.upsert',
+        resource: { collection: 'mailer_dmarc_source_tags', id: ip },
+        diffSummary: `${ip} → "${label}"${ignored ? ' (ignored)' : ''}`,
       })
       res.json({ ok: true })
+    }),
+  )
+
+  r.delete(
+    '/dmarc/sources/:ip',
+    asyncHandler(async (req, res) => {
+      const ip = String(req.params.ip ?? '')
+      if (!net.isIP(ip)) {
+        return res.status(400).json({ error: 'validation_failed', message: 'invalid IP' })
+      }
+      const result = await c.dmarcSourceTags.deleteOne({ ip })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.source_tag.delete',
+        resource: { collection: 'mailer_dmarc_source_tags', id: ip },
+      })
+      res.json({ ok: true, deleted: result.deletedCount })
+    }),
+  )
+
+  // ----- Microsoft SNDS -----------------------------------------------------
+  r.get(
+    '/snds',
+    asyncHandler(async (_req, res) => {
+      const cfg = mailer.config.snds
+      const configured = !!cfg?.accessKey
+      const all = await c.sndsSnapshots.find({}).sort({ ip: 1, activityStart: -1 }).limit(2000).toArray()
+      const byIp = new Map<string, typeof all>()
+      for (const s of all) {
+        const arr = byIp.get(s.ip) ?? []
+        if (arr.length < 30) arr.push(s)
+        byIp.set(s.ip, arr)
+      }
+      const ips = Array.from(byIp.entries()).map(([ip, snapshots]) => ({
+        ip,
+        latest: snapshots[0] ?? null,
+        history: snapshots,
+      }))
+      res.json({
+        configured,
+        intervalHours: cfg?.intervalHours ?? 24,
+        ips,
+      })
+    }),
+  )
+
+  r.post(
+    '/snds/refresh',
+    asyncHandler(async (req, res) => {
+      const result = await runSndsPull(mailer.getRunnerContext(), { force: true })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'snds.refresh',
+        resource: { collection: 'mailer_snds_snapshots' },
+        diffSummary: result.ran
+          ? `parsed ${result.rowsParsed ?? 0}, persisted ${result.rowsPersisted ?? 0}`
+          : `not run: ${result.reason}`,
+      })
+      res.json(result)
     }),
   )
 
@@ -740,6 +1176,231 @@ function apiRouter(mailer: Mailer): Router {
     }),
   )
 
+  // ----- Mail-Tester deliverability check ----------------------------------
+  r.get(
+    '/templates/:slug/mail-tester',
+    asyncHandler(async (req, res) => {
+      const cfg = mailer.config.mailTester
+      const configured = !!cfg?.apiKey
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+
+      // Cache key must reflect the same fingerprint the check + publish gate
+      // use — render the *current* draft if there is one, otherwise the
+      // most recent published body. Previously this mixed draft.subject
+      // with published body.html, which always missed pre-first-publish
+      // and drifted whenever a subject edit followed a publish.
+      let bodyHash = ''
+      let subject = tpl.subject ?? ''
+      if (tpl.draft) {
+        try {
+          const compiled = tpl.draft.editorJson
+            ? await compileMailyTemplate(tpl.draft.editorJson)
+            : tpl.draft.mjml
+            ? await compileTemplate(tpl.draft.mjml)
+            : null
+          if (compiled) {
+            bodyHash = sha256Hex(compiled.html)
+            subject = tpl.draft.subject || subject
+          }
+        } catch {
+          // If the draft no longer compiles, fall back to the published body.
+        }
+      }
+      if (!bodyHash && tpl.body?.html) {
+        bodyHash = sha256Hex(tpl.body.html)
+      }
+      const key = bodyHash ? mailTesterContentKey({ bodyHash, subject, fromEmail: tpl.fromEmail }) : null
+      const cached = key ? await findCachedScore(mailer.getRunnerContext(), key) : null
+
+      res.json({
+        configured,
+        minScore: cfg?.minScore ?? 8.0,
+        cacheHours: cfg?.cacheHours ?? 24,
+        score: cached,
+      })
+    }),
+  )
+
+  r.post(
+    '/templates/:slug/mail-tester-check',
+    asyncHandler(async (req, res) => {
+      const client = getMailTesterClient()
+      if (!client) {
+        return res.status(400).json({
+          error: 'not_configured',
+          message: 'Mail-Tester is not configured. Set mailer.config.mailTester.apiKey to enable.',
+        })
+      }
+
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+      const draft = tpl.draft
+      if (!draft) return res.status(400).json({ error: 'no_draft', message: 'Save a draft before running a deliverability check.' })
+
+      let compiled: { html: string; plainText: string }
+      try {
+        if (draft.editorJson) compiled = await compileMailyTemplate(draft.editorJson)
+        else if (draft.mjml) compiled = await compileTemplate(draft.mjml)
+        else return res.status(400).json({ error: 'empty_draft' })
+      } catch (err: any) {
+        return res.status(400).json({ error: 'compile_failed', message: String(err?.message ?? err) })
+      }
+
+      const bodyHash = sha256Hex(compiled.html)
+      const contentKey = mailTesterContentKey({ bodyHash, subject: draft.subject, fromEmail: tpl.fromEmail })
+      const ctx = mailer.getRunnerContext()
+
+      // Cache hit — return without burning a credit.
+      const cached = await findCachedScore(ctx, contentKey)
+      if (cached) {
+        return res.json({ cached: true, status: 'ready', score: cached })
+      }
+
+      // Provision a new test address and send the rendered draft to it.
+      const { checkId, emailAddress } = await client.provisionCheck()
+      const provider = mailer.providers[tpl.providerOverride ?? mailer.config.defaultProvider]
+      if (!provider) {
+        return res.status(500).json({ error: 'provider_unknown', message: `default provider ${mailer.config.defaultProvider} is not registered` })
+      }
+
+      try {
+        await provider.send({
+          to: emailAddress,
+          fromName: tpl.fromName,
+          fromEmail: tpl.fromEmail,
+          replyTo: tpl.replyTo ?? undefined,
+          subject: draft.subject,
+          html: compiled.html,
+          text: compiled.plainText,
+          headers: {},
+          messageMeta: { mailTesterCheckId: checkId },
+        })
+      } catch (err: any) {
+        return res.status(502).json({ error: 'send_failed', message: String(err?.message ?? err) })
+      }
+
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'mail_tester.check.start',
+        resource: { collection: 'mailer_mail_tester_scores', id: contentKey, slug: tpl.slug },
+        diffSummary: `Sent draft to ${emailAddress} for Mail-Tester check ${checkId}`,
+      })
+
+      res.json({
+        cached: false,
+        status: 'pending',
+        checkId,
+        contentKey,
+        message: 'Test email sent. Poll /mail-tester-result?checkId=...&contentKey=... for the score.',
+      })
+    }),
+  )
+
+  r.get(
+    '/templates/:slug/mail-tester-result',
+    asyncHandler(async (req, res) => {
+      const client = getMailTesterClient()
+      if (!client) return res.status(400).json({ error: 'not_configured' })
+
+      const checkId = String(req.query.checkId ?? '')
+      if (!checkId) return res.status(400).json({ error: 'validation_failed', message: 'checkId is required' })
+
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+      const draft = tpl.draft
+      if (!draft) return res.status(400).json({ error: 'no_draft', message: 'Draft no longer exists.' })
+
+      // Re-derive the content key server-side from the current draft so an
+      // attacker can't land a score under an arbitrary fingerprint and game
+      // the publish gate. We must recompile to recompute bodyHash.
+      let compiled: { html: string; plainText: string }
+      try {
+        if (draft.editorJson) compiled = await compileMailyTemplate(draft.editorJson)
+        else if (draft.mjml) compiled = await compileTemplate(draft.mjml)
+        else return res.status(400).json({ error: 'empty_draft' })
+      } catch (err: any) {
+        return res.status(400).json({ error: 'compile_failed', message: String(err?.message ?? err) })
+      }
+      const contentKey = mailTesterContentKey({
+        bodyHash: sha256Hex(compiled.html),
+        subject: draft.subject,
+        fromEmail: tpl.fromEmail,
+      })
+
+      const result = await client.fetchResult(checkId)
+      if (!result.ready) {
+        return res.json({ status: 'pending', score: null })
+      }
+
+      const ctx = mailer.getRunnerContext()
+      const persisted = await persistScore(ctx, { templateSlug: tpl.slug, contentKey, checkId, result })
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'mail_tester.check.complete',
+        resource: { collection: 'mailer_mail_tester_scores', id: contentKey, slug: tpl.slug },
+        diffSummary: `Score ${result.score.toFixed(1)}`,
+      })
+      res.json({ status: 'ready', score: persisted })
+    }),
+  )
+
+  r.post(
+    '/templates/:slug/lint',
+    asyncHandler(async (req, res) => {
+      const tpl = await c.templates.findOne({ slug: req.params.slug })
+      if (!tpl) return res.status(404).json({ error: 'not_found' })
+
+      // Lint against the supplied draft if present, otherwise the saved draft,
+      // otherwise the last-published body. Keep this tolerant so the editor
+      // can call it without juggling round-trips.
+      const body = (req.body ?? {}) as {
+        subject?: string
+        preheader?: string
+        mjml?: string
+        editorJson?: Record<string, unknown> | null
+        fromEmail?: string
+        kind?: 'marketing' | 'transactional'
+      }
+
+      const subject = body.subject ?? tpl.draft?.subject ?? tpl.subject ?? ''
+      const preheader = body.preheader ?? tpl.draft?.preheader ?? tpl.preheader ?? ''
+      const mjml = body.mjml ?? tpl.draft?.mjml ?? tpl.body?.mjml ?? ''
+      const editorJson = body.editorJson !== undefined ? body.editorJson : (tpl.draft?.editorJson ?? tpl.body?.editorJson ?? null)
+      const fromEmail = body.fromEmail ?? tpl.fromEmail
+      // Whitelist kind — otherwise body.kind:'foo' bypasses the marketing-
+      // only missing_unsubscribe_tag check by hitting neither branch.
+      const kind = body.kind === 'marketing' || body.kind === 'transactional' ? body.kind : tpl.kind
+
+      let html = ''
+      let plainText = ''
+      try {
+        if (editorJson) {
+          const compiled = await compileMailyTemplate(editorJson)
+          html = compiled.html
+          plainText = compiled.plainText
+        } else if (mjml) {
+          const compiled = await compileTemplate(mjml)
+          html = compiled.html
+          plainText = compiled.plainText
+        }
+      } catch (err: any) {
+        return res.status(200).json({
+          errors: [{ rule: 'compile_failed', severity: 'error', message: `Compile error: ${String(err?.message ?? err)}` }],
+          warnings: [],
+          infos: [],
+          compileFailed: true,
+        })
+      }
+
+      const lint = lintTemplate(
+        { subject, preheader, mjml, editorJson, html, plainText, kind, fromEmail },
+        { senderDomains: mailer.config.senderDomains },
+      )
+      res.json({ ...lint, compileFailed: false })
+    }),
+  )
+
   r.post(
     '/templates/:slug/publish',
     asyncHandler(async (req, res) => {
@@ -748,6 +1409,9 @@ function apiRouter(mailer: Mailer): Router {
       const draft = tpl.draft
       if (!draft) return res.status(400).json({ error: 'no_draft' })
 
+      // Short-circuit sender-domain check — preserves the pre-linter 400
+      // sender_domain_invalid contract so external callers (and the SPA's
+      // own publish modal) can key on it without conflating with lint errors.
       const senderCheck = validateSenderDomain(tpl.fromEmail, tpl.kind, mailer.config.senderDomains)
       if (!senderCheck.ok) {
         return res.status(400).json({
@@ -758,12 +1422,68 @@ function apiRouter(mailer: Mailer): Router {
       }
 
       let compiled: { html: string; plainText: string; errors: any[] }
-      if (draft.editorJson) {
-        compiled = await compileMailyTemplate(draft.editorJson)
-      } else if (draft.mjml) {
-        compiled = await compileTemplate(draft.mjml)
-      } else {
-        return res.status(400).json({ error: 'empty_draft', message: 'draft has no MJML or editorJson content' })
+      try {
+        if (draft.editorJson) {
+          compiled = await compileMailyTemplate(draft.editorJson)
+        } else if (draft.mjml) {
+          compiled = await compileTemplate(draft.mjml)
+        } else {
+          return res.status(400).json({ error: 'empty_draft', message: 'draft has no MJML or editorJson content' })
+        }
+      } catch (err: any) {
+        // Same shape as the lint endpoint's compileFailed branch so the UI
+        // can surface compile errors uniformly with lint errors.
+        return res.status(422).json({
+          error: 'compile_failed',
+          message: String(err?.message ?? err),
+          lint: {
+            errors: [{ rule: 'compile_failed', severity: 'error', message: `Compile error: ${String(err?.message ?? err)}` }],
+            warnings: [],
+            infos: [],
+          },
+        })
+      }
+
+      const lint = lintTemplate(
+        {
+          subject: draft.subject,
+          preheader: draft.preheader,
+          mjml: draft.mjml ?? '',
+          editorJson: draft.editorJson,
+          html: compiled.html,
+          plainText: compiled.plainText,
+          kind: tpl.kind,
+          fromEmail: tpl.fromEmail,
+        },
+        { senderDomains: mailer.config.senderDomains },
+      )
+
+      if (lint.errors.length > 0) {
+        return res.status(422).json({
+          error: 'lint_failed',
+          message: `Template publish blocked by ${lint.errors.length} content issue(s).`,
+          lint,
+        })
+      }
+
+      // Mail-Tester gate — only blocks when configured AND a cached score for
+      // this exact content exists AND that score is below minScore. Operator
+      // can override with `bypassMailTester: true` in the request body.
+      const bypass = Boolean(req.body?.bypassMailTester)
+      if (!bypass) {
+        const gate = await evaluateMailTesterGate(mailer.getRunnerContext(), {
+          bodyHash: sha256Hex(compiled.html),
+          subject: draft.subject,
+          fromEmail: tpl.fromEmail,
+        })
+        if (!gate.allowed) {
+          return res.status(422).json({
+            error: 'mail_tester_blocked',
+            message: gate.reason,
+            score: gate.score,
+            hint: 'Re-run the deliverability check after fixing the feedback, or POST `bypassMailTester: true` to publish anyway.',
+          })
+        }
       }
 
       const now = new Date()
@@ -806,7 +1526,12 @@ function apiRouter(mailer: Mailer): Router {
         resource: { collection: 'mailer_templates', id: tpl._id, slug: tpl.slug },
         diffSummary: `Published v${nextVersion}`,
       })
-      return res.json({ ok: true, version: nextVersion, warnings: compiled.errors })
+      return res.json({
+        ok: true,
+        version: nextVersion,
+        warnings: compiled.errors,
+        lint, // warnings + infos for UI
+      })
     }),
   )
 

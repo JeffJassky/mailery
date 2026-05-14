@@ -9,6 +9,8 @@
 
 import type { Mailer } from '../mailer.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { resolveSourceTags } from '../runner/dmarc.js'
+import { HEALTH_AGG_ID } from '../models/index.js'
 
 export type CheckSeverity = 'ok' | 'warn' | 'error'
 
@@ -38,6 +40,12 @@ export async function runSetupChecks(mailer: Mailer): Promise<SetupStatus> {
     checks.push(await checkWorkersHeartbeat(mailer))
   }
   checks.push(await checkCircuitBreaker(mailer))
+  checks.push(await checkDnsbl(mailer))
+  checks.push(await checkPostmaster(mailer))
+  checks.push(await checkSnds(mailer))
+  const jmrp = checkJmrp(mailer)
+  if (jmrp) checks.push(jmrp)
+  checks.push(await checkDmarc(mailer))
   checks.push(...checkFromDefaultsAgainstRegistry(mailer))
   checks.push(...(await checkPublishedTemplates(mailer)))
   checks.push(await checkPostalAddress(mailer))
@@ -99,7 +107,12 @@ async function checkQueue(mailer: Mailer): Promise<SetupCheck> {
 }
 
 async function checkWorkersHeartbeat(mailer: Mailer): Promise<SetupCheck> {
-  const h = await mailer.collections.health.findOne({ _id: 'singleton' })
+  // The aggregate doc's updatedAt is touched on every counter increment and
+  // on every evaluate tick, so it's the canonical worker-heartbeat marker.
+  const h = await mailer.collections.health.findOne(
+    {},
+    { sort: { updatedAt: -1 } },
+  )
   const tickIntervalMs = mailer.config.tickIntervalSeconds * 1000
   const staleAfterMs = Math.max(tickIntervalMs * 3, 30_000) // tolerate a couple missed ticks
 
@@ -132,25 +145,308 @@ async function checkWorkersHeartbeat(mailer: Mailer): Promise<SetupCheck> {
 }
 
 async function checkCircuitBreaker(mailer: Mailer): Promise<SetupCheck> {
-  const h = await mailer.collections.health.findOne({ _id: 'singleton' })
-  if (!h || h.status === 'healthy') {
-    return { name: 'circuit_breaker', label: 'Circuit breaker', severity: 'ok', message: 'healthy' }
+  const docs = await mailer.collections.health.find({}).toArray()
+  const buckets = docs.filter((d) => d._id !== HEALTH_AGG_ID)
+
+  if (buckets.length === 0) {
+    // No telemetry yet (heartbeat-only state, no sends recorded). Claiming
+    // "healthy" misleads — there's nothing to base it on.
+    return {
+      name: 'circuit_breaker',
+      label: 'Circuit breaker',
+      severity: 'ok',
+      message: 'no telemetry yet',
+      hint: 'The breaker tracks bounce / complaint rates per (sender domain × kind) and starts evaluating once enough sends have been recorded. Send some mail to populate.',
+    }
   }
-  if (h.status === 'degraded') {
+
+  const tripped = buckets.filter((d) => d.status === 'tripped')
+  if (tripped.length > 0) {
+    const summary = tripped
+      .map((d) => `${d.senderDomain ?? '_unknown'}/${d.kind}`)
+      .join(', ')
+    return {
+      name: 'circuit_breaker',
+      label: 'Circuit breaker',
+      severity: 'error',
+      message: `tripped: ${summary}`,
+      hint: 'Marketing sends are held for the listed bucket(s). Investigate the underlying bounce / complaint cause, then POST /api/health/resume (with optional senderDomain + kind to resume one bucket).',
+    }
+  }
+
+  const degraded = buckets.filter((d) => d.status === 'degraded')
+  if (degraded.length > 0) {
+    const summary = degraded
+      .map((d) => `${d.senderDomain ?? '_unknown'}/${d.kind}`)
+      .join(', ')
     return {
       name: 'circuit_breaker',
       label: 'Circuit breaker',
       severity: 'warn',
-      message: 'degraded (high failure rate)',
-      hint: 'Marketing sends still flow but failure rate is above the degraded threshold. Investigate provider errors before they escalate to tripped.',
+      message: `degraded: ${summary}`,
+      hint: 'Marketing sends still flow but failure rate is above the degraded threshold for the listed bucket(s). Investigate provider errors before they escalate to tripped.',
+    }
+  }
+
+  return { name: 'circuit_breaker', label: 'Circuit breaker', severity: 'ok', message: 'healthy' }
+}
+
+async function checkDnsbl(mailer: Mailer): Promise<SetupCheck> {
+  const docs = await mailer.collections.dnsblChecks.find({}).toArray()
+  if (docs.length === 0) {
+    return {
+      name: 'dnsbl',
+      label: 'DNS block-list checks',
+      severity: 'ok',
+      message: 'no checks run yet',
+      hint: 'Checks run automatically once per dnsbl.intervalHours (default 24h). To run now, POST /api/dnsbl/recheck.',
+    }
+  }
+  const listed = docs.filter((d) => d.result === 'listed')
+  if (listed.length > 0) {
+    const summary = listed
+      .map((d) => `${d.target} on ${d.listLabel}`)
+      .slice(0, 3)
+      .join('; ')
+    const more = listed.length > 3 ? ` (+${listed.length - 3} more)` : ''
+    return {
+      name: 'dnsbl',
+      label: 'DNS block-list checks',
+      severity: 'error',
+      message: `${listed.length} listing(s): ${summary}${more}`,
+      hint: 'A sender domain or IP is listed on a public DNSBL. Investigate the listing source — most lists publish a removal procedure on their website. Mail to the affected (domain, kind) bucket will likely land in spam until delisted.',
+    }
+  }
+  const errored = docs.filter((d) => d.result === 'error')
+  if (errored.length === docs.length) {
+    return {
+      name: 'dnsbl',
+      label: 'DNS block-list checks',
+      severity: 'warn',
+      message: `all ${docs.length} checks errored`,
+      hint: 'Lookups against block lists are failing — usually a DNS-resolution problem on the host running mailery, or a list rate-limiting your public resolver. Verify outbound DNS works.',
     }
   }
   return {
-    name: 'circuit_breaker',
-    label: 'Circuit breaker',
-    severity: 'error',
-    message: `tripped: ${h.trippedReason ?? 'unknown reason'}`,
-    hint: 'Marketing sends are held. Investigate the underlying bounce / complaint cause, then POST /api/health/resume.',
+    name: 'dnsbl',
+    label: 'DNS block-list checks',
+    severity: 'ok',
+    message: `clean (${docs.length} checks)`,
+  }
+}
+
+async function checkPostmaster(mailer: Mailer): Promise<SetupCheck> {
+  const cfg = mailer.config.postmaster
+  if (!cfg?.clientId || !cfg?.clientSecret || !cfg?.refreshToken) {
+    // Postmaster is opt-in (needs OAuth setup) and only meaningful at >100/day
+    // to Gmail. Treat "not configured" as ok so it doesn't spam every operator
+    // with a permanent warning banner.
+    return {
+      name: 'postmaster',
+      label: 'Google Postmaster Tools',
+      severity: 'ok',
+      message: 'not configured (optional)',
+      hint: 'Set mailer.config.postmaster with an OAuth client + refresh token to pull authoritative Gmail reputation data. Only meaningful at >100 sends/day to Gmail.',
+    }
+  }
+
+  const snapshots = await mailer.collections.postmasterSnapshots.find({}).sort({ fetchedAt: -1 }).toArray()
+  if (snapshots.length === 0) {
+    return {
+      name: 'postmaster',
+      label: 'Google Postmaster Tools',
+      severity: 'warn',
+      message: 'configured but no data yet',
+      hint: 'A pull runs once per postmaster.intervalHours (default 24h). To run now, POST /api/postmaster/refresh. Postmaster only reports for domains with >100 messages/day to Gmail; smaller senders see empty responses.',
+    }
+  }
+
+  // Find the latest snapshot per domain (snapshots are already sorted by fetchedAt desc).
+  const latestByDomain = new Map<string, typeof snapshots[number]>()
+  for (const s of snapshots) {
+    if (!latestByDomain.has(s.domain)) latestByDomain.set(s.domain, s)
+  }
+  const bad: string[] = []
+  const low: string[] = []
+  for (const s of latestByDomain.values()) {
+    if (s.domainReputation === 'BAD') bad.push(s.domain)
+    else if (s.domainReputation === 'LOW') low.push(s.domain)
+  }
+
+  if (bad.length > 0) {
+    return {
+      name: 'postmaster',
+      label: 'Google Postmaster Tools',
+      severity: 'error',
+      message: `BAD reputation on ${bad.join(', ')}`,
+      hint: 'Gmail considers these domains spammy. Most mail to Gmail addresses will land in spam folder. Marketing breaker has been tripped for affected domains. See docs/guide/warming.md §6 for recovery.',
+    }
+  }
+  if (low.length > 0) {
+    return {
+      name: 'postmaster',
+      label: 'Google Postmaster Tools',
+      severity: 'warn',
+      message: `LOW reputation on ${low.join(', ')}`,
+      hint: 'Reputation has slipped below Medium. Review recent complaint + bounce activity, slow down marketing volume, and re-engage your most active segment only.',
+    }
+  }
+  return {
+    name: 'postmaster',
+    label: 'Google Postmaster Tools',
+    severity: 'ok',
+    // Includes REPUTATION_CATEGORY_UNSPECIFIED ("no data yet") domains —
+    // surface that explicitly so the operator isn't misled.
+    message: (() => {
+      const tiers = new Set(Array.from(latestByDomain.values()).map((d) => d.domainReputation))
+      const hasUnspec = tiers.has('REPUTATION_CATEGORY_UNSPECIFIED' as any)
+      return `${latestByDomain.size} domain(s) tracked${hasUnspec ? ' (some have no reputation data yet)' : ', all High/Medium'}`
+    })(),
+  }
+}
+
+/**
+ * JMRP enrolment is a manual one-time setup on the Microsoft sender-support
+ * portal — there's no API to confirm completion. We surface a persistent
+ * info-level reminder whenever the operator has configured a dedicated IP,
+ * regardless of whether SNDS itself is set up. Operators can suppress this
+ * by setting `dnsbl.dedicatedIps = []` once they've confirmed enrolment in
+ * their runbook.
+ */
+function checkJmrp(mailer: Mailer): SetupCheck | null {
+  const hasDedicatedIp = (mailer.config.dnsbl?.dedicatedIps?.length ?? 0) > 0
+  if (!hasDedicatedIp) return null
+  return {
+    name: 'snds_jmrp',
+    label: 'Microsoft JMRP enrolment',
+    severity: 'ok',
+    message: 'manual setup — confirm in your runbook',
+    hint: 'Outlook spam complaints only land in mailery if you enrol each sending IP in JMRP. Visit https://sendersupport.olc.protection.outlook.com/snds/JMRP.aspx and complete the form for each IP. There is no API to verify completion; mailery shows this reminder whenever dedicatedIps is non-empty.',
+  }
+}
+
+async function checkSnds(mailer: Mailer): Promise<SetupCheck> {
+  const cfg = mailer.config.snds
+  const hasDedicatedIp = (mailer.config.dnsbl?.dedicatedIps?.length ?? 0) > 0
+
+  if (!cfg?.accessKey) {
+    if (!hasDedicatedIp) {
+      return {
+        name: 'snds',
+        label: 'Microsoft SNDS',
+        severity: 'ok',
+        message: 'not applicable (no dedicated IP)',
+        hint: 'SNDS reports IP-level Outlook/Hotmail reputation. Only meaningful when you send from a dedicated IP. Skip unless you do.',
+      }
+    }
+    return {
+      name: 'snds',
+      label: 'Microsoft SNDS',
+      severity: 'warn',
+      message: 'dedicated IP configured but SNDS access key not set',
+      hint: 'Sign in at https://sendersupport.olc.protection.outlook.com/snds/ , request access for your IP(s), then set mailer.config.snds.accessKey to enable daily pulls. Also enrol in JMRP at https://sendersupport.olc.protection.outlook.com/snds/JMRP.aspx so Outlook complaints flow back to your suppression list.',
+    }
+  }
+
+  const snapshots = await mailer.collections.sndsSnapshots.find({}).sort({ fetchedAt: -1 }).toArray()
+  if (snapshots.length === 0) {
+    return {
+      name: 'snds',
+      label: 'Microsoft SNDS',
+      severity: 'warn',
+      message: 'configured but no data yet',
+      hint: 'A pull runs every snds.intervalHours (default 24h). To run now, POST /api/snds/refresh. If you just enrolled, SNDS data can take 1-2 days to populate.',
+    }
+  }
+
+  const latestByIp = new Map<string, typeof snapshots[number]>()
+  for (const s of snapshots) {
+    if (!latestByIp.has(s.ip)) latestByIp.set(s.ip, s)
+  }
+  const red: string[] = []
+  const yellow: string[] = []
+  for (const s of latestByIp.values()) {
+    if (s.filterResult === 'RED') red.push(s.ip)
+    else if (s.filterResult === 'YELLOW') yellow.push(s.ip)
+  }
+
+  if (red.length > 0) {
+    return {
+      name: 'snds',
+      label: 'Microsoft SNDS',
+      severity: 'error',
+      message: `RED filter on ${red.join(', ')}`,
+      hint: 'Outlook/Hotmail is filtering mail from these IPs as spam. Reduce volume, audit recent complaints / trap hits, fix any auth alignment problems, and wait for reputation to recover (typically 1-2 weeks).',
+    }
+  }
+  if (yellow.length > 0) {
+    return {
+      name: 'snds',
+      label: 'Microsoft SNDS',
+      severity: 'warn',
+      message: `YELLOW filter on ${yellow.join(', ')}`,
+      hint: 'Outlook is putting some mail from these IPs in the junk folder. Investigate recent complaint rate and trap hits before reputation slips to RED.',
+    }
+  }
+  return {
+    name: 'snds',
+    label: 'Microsoft SNDS',
+    severity: 'ok',
+    message: `${latestByIp.size} IP(s) tracked, all GREEN`,
+  }
+}
+
+async function checkDmarc(mailer: Mailer): Promise<SetupCheck> {
+  const reportCount = await mailer.collections.dmarcReports.estimatedDocumentCount()
+  if (reportCount === 0) {
+    return {
+      name: 'dmarc',
+      label: 'DMARC RUA reports',
+      severity: 'ok',
+      message: 'no reports ingested yet',
+      hint: 'Publish DMARC `rua=mailto:<your-mailbox>` in DNS, then upload received reports via /admin/mailer/api/dmarc/upload (or drag-drop in the Health screen). RUA tells you who is sending mail as your domain — both legitimate sources and spoofers.',
+    }
+  }
+
+  const since = new Date(Date.now() - 7 * 86_400_000)
+  const recent = await mailer.collections.dmarcReports.find({ rangeEnd: { $gte: since } }).toArray()
+  if (recent.length === 0) {
+    return {
+      name: 'dmarc',
+      label: 'DMARC RUA reports',
+      severity: 'warn',
+      message: `no reports in the last 7 days (${reportCount} total)`,
+      hint: 'Receivers email RUA reports daily. A gap suggests inbound delivery is broken or the rua= mailbox is no longer monitored. Check inbound mail flow.',
+    }
+  }
+
+  // Merge config-defined tags with DB-defined tags so operator tags set via
+  // the admin UI count. Both labeled (non-ignored) and ignored sources are
+  // treated as "known" — operator already triaged them.
+  const tagged = await resolveSourceTags(mailer.getRunnerContext())
+  const known = new Set(Array.from(tagged.keys()))
+  const since30 = new Date(Date.now() - 30 * 86_400_000)
+  const failures = await mailer.collections.dmarcFailures.find({ receivedAt: { $gte: since30 } }).toArray()
+  const unknownFailing = failures.filter((f) => !known.has(f.sourceIp))
+
+  if (unknownFailing.length === 0) {
+    return {
+      name: 'dmarc',
+      label: 'DMARC RUA reports',
+      severity: 'ok',
+      message: `${recent.length} report(s) this week, no failing unknown sources`,
+    }
+  }
+
+  const totalFailing = unknownFailing.reduce((acc, f) => acc + f.count, 0)
+  const ips = Array.from(new Set(unknownFailing.map((f) => f.sourceIp))).slice(0, 3)
+  const more = unknownFailing.length > 3 ? ` (+${unknownFailing.length - 3} more)` : ''
+  return {
+    name: 'dmarc',
+    label: 'DMARC RUA reports',
+    severity: 'warn',
+    message: `${totalFailing} failing message(s) from ${ips.join(', ')}${more}`,
+    hint: 'These IPs sent mail claiming to be from your domain that failed DMARC alignment. Tag known-legit sources in mailer.config.dmarc.knownSources to silence them. Untagged sources are likely either forgotten SaaS tools or active spoofing.',
   }
 }
 

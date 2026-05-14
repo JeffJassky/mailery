@@ -23,6 +23,114 @@ export interface RedisOptions {
   tls?: boolean
 }
 
+export interface DnsblListSpec {
+  /** DNS suffix to query, e.g. `'dbl.spamhaus.org'`. */
+  host: string
+  /** Display label for the UI, e.g. `'Spamhaus DBL'`. */
+  label: string
+}
+
+export interface DnsblConfig {
+  /** Domain block lists (DBLs) — queried as `<domain>.<host>`. */
+  domainLists?: DnsblListSpec[]
+  /** IP block lists — queried as `<reversed-octets>.<host>`. */
+  ipLists?: DnsblListSpec[]
+  /** Dedicated sending IPs to check. Most operators on shared ESPs leave empty. */
+  dedicatedIps?: string[]
+  /** Hours between automatic runs. Default 24. Set to 0 to disable scheduled runs. */
+  intervalHours?: number
+}
+
+export const DEFAULT_DOMAIN_DNSBL_LISTS: DnsblListSpec[] = [
+  { host: 'dbl.spamhaus.org', label: 'Spamhaus DBL' },
+  { host: 'multi.surbl.org', label: 'SURBL' },
+  { host: 'multi.uribl.com', label: 'URIBL' },
+]
+
+export const DEFAULT_IP_DNSBL_LISTS: DnsblListSpec[] = [
+  { host: 'zen.spamhaus.org', label: 'Spamhaus ZEN' },
+  { host: 'b.barracudacentral.org', label: 'Barracuda' },
+  { host: 'dnsbl.sorbs.net', label: 'SORBS' },
+  { host: 'bl.spamcop.net', label: 'SpamCop' },
+]
+
+export interface MailTesterConfig {
+  /** API key from your Mail-Tester paid plan. */
+  apiKey: string
+  /** Minimum score (0-10) below which publish is blocked. Default 8.0. */
+  minScore?: number
+  /**
+   * How long a successful score remains cached for the same content. Default 24.
+   * Re-publishing the same body within the window does not burn a credit.
+   */
+  cacheHours?: number
+  /** API base URL. Defaults to `https://mail-tester.com/api`. Override for staging or alternate provider. */
+  baseUrl?: string
+}
+
+export interface DmarcSourceTag {
+  /** Source IP, e.g. `'149.72.45.10'`. */
+  ip: string
+  /** Operator-provided label, e.g. `'SendGrid (transactional)'` or `'Hubspot'`. */
+  label: string
+  /** When true, ignore failures from this source in the alignment-trend headline. */
+  ignored?: boolean
+}
+
+export interface DmarcConfig {
+  /**
+   * Operator-tagged sources. After RUA reports start arriving, the operator
+   * marks each source IP as known/legit (with a label) or rogue. Tagged
+   * sources are excluded from the headline failure count, surfacing only
+   * unknown senders.
+   */
+  knownSources?: DmarcSourceTag[]
+  /**
+   * How many days of failure rows to retain. Default 90. Older rows are
+   * trimmed by the daily tick to keep the collection bounded.
+   */
+  retentionDays?: number
+}
+
+export interface SndsConfig {
+  /**
+   * SNDS automated-access key. Obtained per-account from the SNDS portal at
+   * https://sendersupport.olc.protection.outlook.com/snds/ once each
+   * sending IP has been added and verified.
+   */
+  accessKey: string
+  /**
+   * Optional IP filter — when set, only rows for these IPs are persisted.
+   * Useful when an SNDS account covers a wider IP pool than this mailery
+   * deployment uses. Defaults to keeping all rows the API returns.
+   */
+  ips?: string[]
+  /** Hours between automatic pulls. Default 24. Set to 0 to disable scheduled pulls. */
+  intervalHours?: number
+}
+
+export interface PostmasterConfig {
+  /** OAuth client ID from a Google Cloud project with Postmaster Tools API enabled. */
+  clientId: string
+  clientSecret: string
+  /**
+   * A refresh token obtained via the OAuth consent flow with scope
+   * `https://www.googleapis.com/auth/postmaster.readonly` for the user that
+   * verified the domain(s) in Postmaster Tools. See
+   * docs/guide/deliverability.md → "Google Postmaster Tools" for the
+   * one-time setup procedure.
+   */
+  refreshToken: string
+  /**
+   * Domains to pull data for. When omitted, mailery uses every domain from the
+   * senderDomains registry plus the From defaults. Each must be verified in
+   * Postmaster Tools under the same Google account.
+   */
+  domains?: string[]
+  /** Hours between automatic pulls. Default 24. Set to 0 to disable scheduled pulls. */
+  intervalHours?: number
+}
+
 export interface CircuitBreakerThresholds {
   /** Trip when last-hour hard-bounce rate >= this percent (e.g. 2 = 2%). */
   hardBounceRatePctTrip: number
@@ -80,6 +188,51 @@ export interface MailerConfig {
 
   // ---- Circuit breaker ------------------------------------------------------
   circuitBreaker?: Partial<CircuitBreakerThresholds>
+
+  // ---- DNSBL monitoring -----------------------------------------------------
+  /**
+   * Daily DNS-based block-list checks on sender domains and (optionally) any
+   * dedicated sending IPs. Results surface in setup-status and on the Health
+   * screen. No external API needed — plain DNS lookups.
+   */
+  dnsbl?: DnsblConfig
+
+  // ---- Google Postmaster Tools ---------------------------------------------
+  /**
+   * Pulls daily reputation tiers + spam ratio + auth pass rates from Google
+   * Postmaster Tools. Trips the (domain × marketing) circuit breaker when a
+   * domain falls to reputation `BAD`. Only meaningful at >100/day to Gmail.
+   */
+  postmaster?: PostmasterConfig
+
+  // ---- Microsoft SNDS ------------------------------------------------------
+  /**
+   * Pulls daily Outlook/Hotmail/Live IP reputation from Microsoft's Smart
+   * Network Data Services. IP-level rather than domain-level — only useful
+   * if you send from a dedicated IP. Visibility-only: RED filter results
+   * surface as a setup-status error, no auto-trip.
+   */
+  snds?: SndsConfig
+
+  // ---- Mail-Tester deliverability check ------------------------------------
+  /**
+   * Optional Mail-Tester integration. When set, the template editor exposes
+   * a "Run deliverability check" button that sends a copy of the rendered
+   * draft to a Mail-Tester address and polls for a score (0-10) covering
+   * SpamAssassin verdict, auth alignment, content red flags, and link
+   * reputation. Score < minScore blocks publish until re-run or overridden.
+   */
+  mailTester?: MailTesterConfig
+
+  // ---- DMARC aggregate report ingestion ------------------------------------
+  /**
+   * DMARC RUA aggregate reports tell you who is sending mail that claims to
+   * be from your domain — both legitimate sources and spoofers. Operator
+   * uploads the report attachments (or POSTs them via SendGrid Inbound Parse
+   * to /admin/mailer/api/dmarc/upload). Mailery decompresses, parses, and
+   * surfaces alignment failures + unknown senders.
+   */
+  dmarc?: DmarcConfig
 
   // ---- Broadcast safety + throughput ---------------------------------------
   broadcastConfirmationThreshold?: number

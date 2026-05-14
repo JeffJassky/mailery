@@ -5,7 +5,7 @@ import { useLive } from '../lib/use-live'
 import { LoadState } from '../lib/load-state'
 
 export function SendDetail({ id }: any) {
-  const { data, loading, error, refetch } = useLive(() => api.send(id))
+  const { data, loading, error, refetch } = useLive(() => api.send(id), [id])
 
   return (
     <LoadState loading={loading && !data} error={error} empty={!data} emptyLabel="Send not found." retry={refetch}>

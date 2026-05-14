@@ -18,10 +18,14 @@ type FlowStep = any
 
 const STEP_TYPES = FLOW_STEP_KINDS
 
-function summarizeStep(s: FlowStep): { kind: string; label: string; meta: string; icon: string; iconClass: string } {
+function summarizeStep(
+  s: FlowStep,
+  templatesBySlug?: Map<string, any>,
+): { kind: string; label: string; meta: string; sub?: string; icon: string; iconClass: string } {
   const def = STEP_TYPES.find((t) => t.value === s.type) ?? STEP_TYPES[STEP_TYPES.length - 1]!
   let label = def.label
   let meta = ''
+  let sub: string | undefined
   switch (s.type) {
     case 'wait':
       meta = `${s.value} ${s.unit}`
@@ -34,10 +38,26 @@ function summarizeStep(s: FlowStep): { kind: string; label: string; meta: string
       label = 'Branch: ' + (predicateSummary(s.test) || 'predicate')
       meta = `${(s.ifTrueSteps ?? []).length} true / ${(s.ifFalseSteps ?? []).length} false`
       break
-    case 'send':
-      label = `Send · ${s.templateSlug || '(no template)'}`
-      meta = s.providerOverride ? `via ${s.providerOverride}` : 'default provider'
+    case 'send': {
+      const tpl = s.templateSlug ? templatesBySlug?.get(s.templateSlug) : undefined
+      const subject = tpl?.draft?.subject || tpl?.subject
+      const kind = tpl?.kind
+      if (subject) {
+        label = subject
+        meta = [s.templateSlug, kind].filter(Boolean).join(' · ')
+        const preheader = tpl?.draft?.preheader || tpl?.preheader
+        const plain = tpl?.body?.plainText
+        const tail = (preheader || plain || '').replace(/\s+/g, ' ').trim()
+        if (tail) sub = tail.length > 80 ? tail.slice(0, 80) + '…' : tail
+      } else if (s.templateSlug) {
+        label = `Send · ${s.templateSlug}`
+        meta = s.providerOverride ? `via ${s.providerOverride}` : 'default provider'
+      } else {
+        label = 'Send · (no template)'
+        meta = s.providerOverride ? `via ${s.providerOverride}` : 'default provider'
+      }
       break
+    }
     case 'tag':
       meta = [...(s.addTags ?? []).map((t: string) => `+${t}`), ...(s.removeTags ?? []).map((t: string) => `-${t}`)].join(', ') || '—'
       break
@@ -52,7 +72,7 @@ function summarizeStep(s: FlowStep): { kind: string; label: string; meta: string
       meta = s.reason ?? '—'
       break
   }
-  return { kind: def.value, label, meta, icon: def.icon, iconClass: def.iconClass }
+  return { kind: def.value, label, meta, sub, icon: def.icon, iconClass: def.iconClass }
 }
 
 function predicateSummary(p: any): string {
@@ -69,8 +89,53 @@ function predicateSummary(p: any): string {
   return 'predicate'
 }
 
+function EventTriggerInput({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (v: string) => void
+}) {
+  const { data } = useLive(() => api.events())
+  const registered = data?.registered ?? []
+  const seen = data?.seen ?? []
+  const policy = registered.find((r) => r.name === value)?.dedupePolicy
+  const listId = 'event-trigger-options'
+  return (
+    <div style={{ flex: 1 }}>
+      <input
+        className="input"
+        list={listId}
+        style={{ width: '100%', padding: '4px 8px', fontSize: 13 }}
+        placeholder="Created"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <datalist id={listId}>
+        {registered.map((r) => (
+          <option key={`r:${r.name}`} value={r.name}>
+            registered · {r.dedupePolicy}
+          </option>
+        ))}
+        {seen.map((n) => (
+          <option key={`s:${n}`} value={n}>
+            seen in mailer_events (unregistered)
+          </option>
+        ))}
+      </datalist>
+      {value && (
+        <div className="text-xs subtle" style={{ marginTop: 4 }}>
+          {policy
+            ? <>Registered · dedupe <span className="mono">{policy}</span></>
+            : <>Not registered. Trigger still fires; call <span className="mono">mailer.registerEvent</span> to declare a dedupe policy.</>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function FlowDetail({ slug, setRoute }: any) {
-  const { data: flow, loading, error, refetch } = useLive(() => api.flow(slug))
+  const { data: flow, loading, error, refetch } = useLive(() => api.flow(slug), [slug])
 
   if (loading && !flow) {
     return <LoadState loading error={null} empty={false}><></></LoadState>
@@ -82,6 +147,12 @@ export function FlowDetail({ slug, setRoute }: any) {
 }
 
 function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any; refetch: () => void; setRoute: any }) {
+  const { data: templates } = useLive(() => api.templates())
+  const templatesBySlug = React.useMemo(() => {
+    const m = new Map<string, any>()
+    for (const t of templates ?? []) m.set(t.slug, t)
+    return m
+  }, [templates])
   const [steps, setSteps] = React.useState<FlowStep[]>([])
   const [trigger, setTrigger] = React.useState<{ eventName: string; once: boolean }>({ eventName: '', once: true })
   const [selectedIdx, setSelectedIdx] = React.useState(0)
@@ -218,14 +289,11 @@ function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any
               <div className="flow-trigger-icon"><Icons.Rocket size={16} /></div>
               <div style={{ flex: 1 }}>
                 <div className="flow-trigger-label">Trigger</div>
-                <div className="hstack" style={{ gap: 6 }}>
-                  <span className="flow-trigger-name">Event ·</span>
-                  <input
-                    className="input"
-                    style={{ flex: 1, padding: '4px 8px', fontSize: 13 }}
-                    placeholder="Created"
+                <div className="hstack" style={{ gap: 6, alignItems: 'flex-start' }}>
+                  <span className="flow-trigger-name" style={{ paddingTop: 6 }}>Event ·</span>
+                  <EventTriggerInput
                     value={trigger.eventName}
-                    onChange={(e) => { setTrigger({ ...trigger, eventName: e.target.value }); setDirty(true) }}
+                    onChange={(v) => { setTrigger({ ...trigger, eventName: v }); setDirty(true) }}
                   />
                 </div>
                 <div className="flow-trigger-meta">
@@ -240,7 +308,7 @@ function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any
             <AddStepButton onPick={(t) => insertStep(0, t)} expanded={showAddPicker === 0} setExpanded={(b) => setShowAddPicker(b ? 0 : null)} />
 
             {steps.map((s, i) => {
-              const summary = summarizeStep(s)
+              const summary = summarizeStep(s, templatesBySlug)
               return (
                 <React.Fragment key={i}>
                   <div className={'flow-step ' + summary.iconClass + (selectedIdx === i ? ' selected' : '')} onClick={() => setSelectedIdx(i)}>
@@ -249,6 +317,7 @@ function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any
                       <div className="flow-step-kind">{summary.kind}</div>
                       <div className="flow-step-title">{summary.label}</div>
                       <div className="flow-step-meta">{summary.meta}</div>
+                      {summary.sub && <div className="flow-step-meta subtle" style={{ marginTop: 2 }}>{summary.sub}</div>}
                     </div>
                     <div className="flow-step-aside" style={{ alignItems: 'center', gap: 4 }}>
                       <button className="icon-btn" onClick={(e) => { e.stopPropagation(); moveStep(i, -1) }} title="Move up"><Icons.Chevron size={12} style={{ transform: 'rotate(-90deg)' }} /></button>
@@ -364,35 +433,23 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
         <>
           <div className="field">
             <label className="field-label">Predicate (JSON)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
-              defaultValue={JSON.stringify(step.test, null, 2)}
-              onBlur={(e) => {
-                try { onChange({ test: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
+            <JsonTextarea
+              value={step.test}
+              onChange={(v) => onChange({ test: v })}
             />
           </div>
           <div className="field">
             <label className="field-label">If TRUE — steps (JSON array)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
-              defaultValue={JSON.stringify(step.ifTrueSteps ?? [], null, 2)}
-              onBlur={(e) => {
-                try { onChange({ ifTrueSteps: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
+            <JsonTextarea
+              value={step.ifTrueSteps ?? []}
+              onChange={(v) => onChange({ ifTrueSteps: v })}
             />
           </div>
           <div className="field">
             <label className="field-label">If FALSE — steps (JSON array)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
-              defaultValue={JSON.stringify(step.ifFalseSteps ?? [], null, 2)}
-              onBlur={(e) => {
-                try { onChange({ ifFalseSteps: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
+            <JsonTextarea
+              value={step.ifFalseSteps ?? []}
+              onChange={(v) => onChange({ ifFalseSteps: v })}
             />
           </div>
           <div className="field-hint">Branch's nested step arrays are edited as JSON. For typical two-arm logic, prefer a <span className="mono">condition</span> step with <span className="mono">ifFalse: 'exit'</span>.</div>
@@ -400,36 +457,8 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
       )
 
     case 'send':
-      return (
-        <>
-          <div className="field">
-            <label className="field-label">Template</label>
-            <TemplatePicker value={step.templateSlug} onChange={(v) => onChange({ templateSlug: v })} />
-          </div>
-          <div className="field">
-            <label className="field-label">Provider override</label>
-            <input
-              className="input"
-              placeholder="(use default)"
-              value={step.providerOverride ?? ''}
-              onChange={(e) => onChange({ providerOverride: e.target.value || undefined })}
-            />
-            <div className="field-hint">Leave blank to use the default provider for this template's kind.</div>
-          </div>
-          <div className="field">
-            <label className="field-label">Vars (JSON, optional)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
-              defaultValue={JSON.stringify(step.vars ?? {}, null, 2)}
-              onBlur={(e) => {
-                try { onChange({ vars: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
-            />
-            <div className="field-hint">Per-step variables available in the template as <span className="mono">{'{{vars.x}}'}</span>.</div>
-          </div>
-        </>
-      )
+      return <SendStepEditor step={step} onChange={onChange} />
+
 
     case 'tag':
       return (
@@ -470,13 +499,10 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
           </div>
           <div className="field">
             <label className="field-label">Properties (JSON, optional)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
-              defaultValue={JSON.stringify(step.properties ?? {}, null, 2)}
-              onBlur={(e) => {
-                try { onChange({ properties: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
+            <JsonTextarea
+              value={step.properties ?? {}}
+              onChange={(v) => onChange({ properties: v })}
+              minHeight={60}
             />
           </div>
         </>
@@ -503,13 +529,10 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
           </div>
           <div className="field">
             <label className="field-label">Payload (JSON, optional)</label>
-            <textarea
-              className="input"
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 60 }}
-              defaultValue={JSON.stringify(step.payload ?? {}, null, 2)}
-              onBlur={(e) => {
-                try { onChange({ payload: JSON.parse(e.target.value) }) } catch { /* ignore */ }
-              }}
+            <JsonTextarea
+              value={step.payload ?? {}}
+              onChange={(v) => onChange({ payload: v })}
+              minHeight={60}
             />
             <div className="field-hint">If blank, mailer sends <span className="mono">{'{ externalId, flowRunId }'}</span>.</div>
           </div>
@@ -614,15 +637,155 @@ function PredicateEditor({ predicate, onChange }: { predicate: any; onChange: (p
         </div>
       )}
       {kind === '__json' && (
-        <textarea
-          className="input"
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 80 }}
-          defaultValue={JSON.stringify(predicate, null, 2)}
-          onBlur={(e) => {
-            try { onChange(JSON.parse(e.target.value)) } catch { /* ignore */ }
-          }}
-        />
+        <JsonTextarea value={predicate} onChange={(v) => onChange(v as any)} />
       )}
+    </div>
+  )
+}
+
+/**
+ * JSON textarea with inline parse-error display. Replaces the old
+ * silently-swallowing onBlur pattern so the operator sees when their JSON
+ * doesn't actually save.
+ */
+function JsonTextarea({
+  value,
+  onChange,
+  minHeight = 80,
+}: {
+  value: unknown
+  onChange: (parsed: any) => void
+  minHeight?: number
+}) {
+  const [text, setText] = React.useState(() => JSON.stringify(value, null, 2))
+  const [err, setErr] = React.useState<string | null>(null)
+  const externalRef = React.useRef(JSON.stringify(value))
+
+  // Re-sync on external value change (parent state replaced).
+  React.useEffect(() => {
+    const next = JSON.stringify(value)
+    if (next !== externalRef.current) {
+      externalRef.current = next
+      setText(JSON.stringify(value, null, 2))
+      setErr(null)
+    }
+  }, [value])
+
+  function commit() {
+    try {
+      const parsed = JSON.parse(text)
+      setErr(null)
+      externalRef.current = JSON.stringify(parsed)
+      onChange(parsed)
+    } catch (e: any) {
+      setErr(e?.message ?? 'invalid JSON')
+    }
+  }
+
+  return (
+    <>
+      <textarea
+        className={'input' + (err ? ' input-error' : '')}
+        style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight, borderColor: err ? 'var(--red-fg)' : undefined }}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+      />
+      {err && (
+        <div className="field-hint" style={{ color: 'var(--red-fg)' }}>
+          JSON not saved — {err}
+        </div>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Send-step editor with Config / Preview tabs
+// ---------------------------------------------------------------------------
+
+function SendStepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Partial<FlowStep>) => void }) {
+  const [tab, setTab] = React.useState<'config' | 'preview'>('config')
+  return (
+    <>
+      <div className="seg" style={{ marginBottom: 12 }}>
+        <span className={'seg-item' + (tab === 'config' ? ' active' : '')} onClick={() => setTab('config')}>Config</span>
+        <span className={'seg-item' + (tab === 'preview' ? ' active' : '')} onClick={() => setTab('preview')}>Preview</span>
+      </div>
+      {tab === 'config' ? (
+        <>
+          <div className="field">
+            <label className="field-label">Template</label>
+            <TemplatePicker value={step.templateSlug} onChange={(v) => onChange({ templateSlug: v })} />
+          </div>
+          <div className="field">
+            <label className="field-label">Provider override</label>
+            <input
+              className="input"
+              placeholder="(use default)"
+              value={step.providerOverride ?? ''}
+              onChange={(e) => onChange({ providerOverride: e.target.value || undefined })}
+            />
+            <div className="field-hint">Leave blank to use the default provider for this template's kind.</div>
+          </div>
+          <div className="field">
+            <label className="field-label">Vars (JSON, optional)</label>
+            <JsonTextarea
+              value={step.vars ?? {}}
+              onChange={(v) => onChange({ vars: v as any })}
+              minHeight={60}
+            />
+            <div className="field-hint">Per-step variables available in the template as <span className="mono">{'{{vars.x}}'}</span>.</div>
+          </div>
+        </>
+      ) : (
+        <SendStepPreview templateSlug={step.templateSlug} vars={step.vars} />
+      )}
+    </>
+  )
+}
+
+function SendStepPreview({ templateSlug, vars }: { templateSlug?: string; vars?: any }) {
+  const [data, setData] = React.useState<{ subject: string; preheader: string; html: string; plainText: string } | null>(null)
+  const [err, setErr] = React.useState<string | null>(null)
+  const [loading, setLoading] = React.useState(false)
+  // Stringify outside the deps so the React lint rule sees a stable
+  // primitive — and the latest vars object stays accessible via ref.
+  const varsKey = JSON.stringify(vars ?? {})
+  const varsRef = React.useRef(vars)
+  varsRef.current = vars
+
+  React.useEffect(() => {
+    if (!templateSlug) { setData(null); setErr(null); return }
+    let cancelled = false
+    setLoading(true)
+    setErr(null)
+    api
+      .previewTemplate(templateSlug, { useDraft: true, vars: varsRef.current ?? {} })
+      .then((out) => { if (!cancelled) setData(out) })
+      .catch((e) => { if (!cancelled) setErr(String(e?.message ?? e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [templateSlug, varsKey])
+
+  if (!templateSlug) {
+    return <div className="text-xs subtle">Pick a template in the Config tab to see a preview.</div>
+  }
+  if (loading && !data) return <div className="text-xs subtle">Rendering preview…</div>
+  if (err) return <div className="text-xs" style={{ color: 'var(--red-fg)' }}>Preview failed: {err}</div>
+  if (!data) return null
+  return (
+    <div className="vstack" style={{ gap: 8 }}>
+      <div>
+        <div className="text-sm f500">{data.subject}</div>
+        <div className="text-xs subtle">{data.preheader}</div>
+      </div>
+      <iframe
+        title="send-preview"
+        sandbox=""
+        srcDoc={data.html}
+        style={{ width: '100%', minHeight: 480, border: '1px solid var(--border)', borderRadius: 6, background: '#fff' }}
+      />
     </div>
   )
 }

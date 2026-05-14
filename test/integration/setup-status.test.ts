@@ -129,7 +129,7 @@ describe('runSetupChecks', () => {
     it('runTick writes a fresh heartbeat into the health collection', async () => {
       await H.mailer.collections.health.deleteMany({})
       await runTick(H.mailer.getRunnerContext())
-      const doc = await H.mailer.collections.health.findOne({ _id: 'singleton' })
+      const doc = await H.mailer.collections.health.findOne({ _id: 'agg' })
       expect(doc).toBeTruthy()
       expect(doc!.updatedAt).toBeInstanceOf(Date)
       expect(Date.now() - new Date(doc!.updatedAt).getTime()).toBeLessThan(5000)

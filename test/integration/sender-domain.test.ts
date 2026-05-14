@@ -37,11 +37,11 @@ beforeAll(async () => {
   server = app.listen(0)
   const port = (server.address() as AddressInfo).port
   baseUrl = `http://127.0.0.1:${port}`
-})
+}, 60_000)
 
 afterAll(async () => {
-  server.close()
-  await H.stop()
+  server?.close()
+  if (H) await H.stop()
 })
 
 async function post(path: string, body: unknown): Promise<{ status: number; body: any }> {
@@ -135,14 +135,42 @@ describe('senderDomains enforcement', () => {
     expect(res.body.code).toBe('wrong_kind')
   })
 
+  it('publish endpoint short-circuits with 400 sender_domain_invalid before the lint gate', async () => {
+    // Create a marketing template with a valid registry domain, then
+    // PATCH the fromEmail to an invalid one and stage a publish. The
+    // publish endpoint must return 400 sender_domain_invalid (not 422
+    // lint_failed) so external callers can rely on the prior contract.
+    await post('/admin/mailer/api/templates', {
+      slug: 'short-circuit',
+      name: 'Short circuit',
+      kind: 'marketing',
+      fromEmail: 'hello@news.example.com',
+    })
+    // Bypass kind-check on patch by setting both — registry still rejects.
+    await H.mailer.collections.templates.updateOne(
+      { slug: 'short-circuit' },
+      { $set: { fromEmail: 'hello@unregistered.example.com' } },
+    )
+    await patch('/admin/mailer/api/templates/short-circuit/draft', {
+      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi — welcome.</mj-text><mj-text><a href="{{unsubscribeUrl}}">u</a></mj-text></mj-column></mj-section></mj-body></mjml>',
+    })
+    const res = await post('/admin/mailer/api/templates/short-circuit/publish', {})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('sender_domain_invalid')
+  })
+
   it('publishes a valid template', async () => {
-    // Add MJML to the draft so it has content to compile.
+    // Add MJML with enough body text and an unsubscribe link so the content
+    // linter passes (marketing templates require {{unsubscribeUrl}}).
     const draftRes = await patch('/admin/mailer/api/templates/good-marketing/draft', {
-      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi</mj-text></mj-column></mj-section></mj-body></mjml>',
+      subject: 'Welcome to our newsletter',
+      preheader: 'Glad to have you',
+      mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Welcome — here is what to expect from our weekly newsletter.</mj-text><mj-text><a href="{{unsubscribeUrl}}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>',
     })
     expect(draftRes.status).toBe(200)
     const pubRes = await post('/admin/mailer/api/templates/good-marketing/publish', {})
     expect(pubRes.status).toBe(200)
     expect(pubRes.body.version).toBe(1)
+    expect(pubRes.body.lint?.errors ?? []).toEqual([])
   })
 })

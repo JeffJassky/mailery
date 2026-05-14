@@ -36,6 +36,18 @@ Aggregated KPIs + recent activity.
 }
 ```
 
+## Events registry
+
+### `GET /api/events`
+The full event registry — declared events with their dedupe policies, plus a sample of event names actually seen in the `mailer_events` collection.
+
+```ts
+→ {
+  registered: { name: string; dedupePolicy: 'once-per-contact' | 'once-per-day' | 'every-time' }[]
+  seen: string[]
+}
+```
+
 ## Flows
 
 ### `GET /api/flows`
@@ -127,19 +139,284 @@ body: {
 ### `GET /api/audit`
 List, newest-first (limit 200).
 
+## Templates — content linter + Mail-Tester
+
+### `POST /api/templates/:slug/lint`
+Run the content linter against a draft. Body fields are all optional — missing fields fall back to the saved draft, then to the last published values.
+
+```ts
+body: {
+  subject?: string
+  preheader?: string
+  mjml?: string
+  editorJson?: Record<string, unknown> | null
+  fromEmail?: string
+  kind?: 'marketing' | 'transactional'
+}
+→ {
+  errors:   { rule: string; severity: 'error';   message: string; hint?: string }[]
+  warnings: { rule: string; severity: 'warning'; message: string; hint?: string }[]
+  infos:    { rule: string; severity: 'info';    message: string; hint?: string }[]
+  compileFailed: boolean
+}
+```
+
+### `POST /api/templates/:slug/publish`
+Publish the saved draft. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` if a cached Mail-Tester score is below `minScore`. Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
+
+```ts
+body?: { bypassMailTester?: boolean }
+→ 200 { ok: true, version: number, warnings: CompilerWarning[], lint: LintResult }
+//   CompilerWarning ≈ { line?: number; message: string; tagName?: string; formattedMessage?: string }
+//   These come from the MJML / Maily compiler — formatting warnings that did
+//   not block compile (e.g. unknown attributes). Distinct from lint issues.
+→ 422 { error: 'lint_failed', message: string, lint: LintResult }
+→ 422 { error: 'mail_tester_blocked', message: string, score: MailTesterScoreDoc, hint: string }
+```
+
+### `GET /api/templates/:slug/mail-tester`
+Mail-Tester status + the cached score for the current content fingerprint, if one exists.
+
+```ts
+→ {
+  configured: boolean
+  minScore: number
+  cacheHours: number
+  score: MailTesterScoreDoc | null
+}
+```
+
+### `POST /api/templates/:slug/mail-tester-check`
+Provision a Mail-Tester check, send the rendered draft to the test address via the default provider, return either a cached score or a pending checkId to poll.
+
+```ts
+→ {
+  cached: boolean
+  status: 'pending' | 'ready'
+  checkId?: string
+  contentKey?: string
+  score?: MailTesterScoreDoc
+  message?: string
+}
+```
+
+Returns `400 { error: 'not_configured' }` when `MailerConfig.mailTester` is absent.
+
+### `GET /api/templates/:slug/mail-tester-result?checkId=...&contentKey=...`
+Poll the in-progress check. Returns `{ status: 'pending', score: null }` until Mail-Tester is ready, then the persisted score.
+
 ## Health
 
 ### `GET /api/health`
-The `mailer_health` singleton document, with safe defaults if uninitialized.
-
-### `POST /api/health/resume`
-Manual circuit-breaker reset.
+Per-(sender domain × kind) buckets plus the aggregate roll-up plus the configured trip thresholds. The top-level `status` is the worst bucket status (or `null` when no tick has run).
 
 ```ts
-→ { ok: true }
+→ {
+  status: 'healthy' | 'degraded' | 'tripped' | null
+  rates: { bounceRate, hardBounceRate, complaintRate, failureRate } | null
+  counters: HealthCounters | null
+  aggregate: HealthDoc | null
+  buckets: HealthDoc[]
+  thresholds: {
+    hardBounceRatePctTrip: number
+    complaintRatePctTrip: number
+    combinedBounceRatePctTrip: number
+    failedToSendRatePctDegrade: number
+  }
+}
+```
+
+### `POST /api/health/resume`
+Manual reset. Pass `{ senderDomain, kind }` to resume one bucket. Empty body resumes every tripped bucket.
+
+```ts
+body?: { senderDomain?: string; kind?: 'marketing' | 'transactional' }
+→ { ok: true, resumed: number }
 ```
 
 Audit-logged.
+
+### `GET /api/health/trips`
+The last 50 `health.trip` / `health.resume` audit-log rows.
+
+## DNSBL
+
+### `GET /api/dnsbl`
+Latest scan results across all configured targets and lists.
+
+```ts
+→ {
+  checks: DnsblCheckDoc[]
+  latestRunAt: string | null
+  intervalHours: number
+}
+```
+
+### `POST /api/dnsbl/recheck`
+Force an immediate scan (ignores throttle). Audit-logged.
+
+```ts
+→ { ran: boolean; reason?: string; totalChecks?: number; listedCount?: number }
+```
+
+## Google Postmaster Tools
+
+### `GET /api/postmaster`
+
+```ts
+→ {
+  configured: boolean
+  intervalHours: number
+  domains: Array<{
+    domain: string
+    latest: PostmasterSnapshotDoc | null
+    history: PostmasterSnapshotDoc[]   // up to 30
+  }>
+}
+```
+
+### `POST /api/postmaster/refresh`
+Force an immediate pull (ignores throttle). Audit-logged.
+
+```ts
+→ { ran: boolean; reason?: string; fetched?: number; trippedDomains?: string[] }
+```
+
+## Microsoft SNDS
+
+### `GET /api/snds`
+
+```ts
+→ {
+  configured: boolean
+  intervalHours: number
+  ips: Array<{
+    ip: string
+    latest: SndsSnapshotDoc | null
+    history: SndsSnapshotDoc[]   // up to 30
+  }>
+}
+```
+
+### `POST /api/snds/refresh`
+Force an immediate pull (ignores throttle). Audit-logged.
+
+```ts
+→ { ran: boolean; reason?: string; rowsParsed?: number; rowsPersisted?: number }
+```
+
+## DMARC
+
+### `GET /api/dmarc`
+
+```ts
+→ {
+  domains: Array<{
+    domain: string
+    passCount: number
+    failCount: number
+    totalMessages: number
+    reportCount: number
+    latestRangeEnd: string | null
+    alignmentRate: number | null
+    currentPolicy: 'none' | 'quarantine' | 'reject' | null
+    currentPct: number | null
+    progression: { policy, pct, reason, current: { policy, pct } } | null
+    series: Array<{ day: string; alignmentRate: number | null }>   // last 14 days
+  }>
+  sources: Array<{
+    sourceIp: string
+    domain: string
+    totalMessages: number
+    daysSeen: number
+    lastSeen: string
+    dkimResult: string
+    spfResult: string
+    dispositionApplied: string
+    label: string | null
+    ignored: boolean
+    tagSource: 'config' | 'db' | null
+  }>
+  recentReports: DmarcReportDoc[]   // up to 30
+  retentionDays: number
+}
+```
+
+### `POST /api/dmarc/upload`
+Upload one `.zip` / `.gz` / `.xml` aggregate report as `multipart/form-data` with a `file` field. Audit-logged.
+
+```ts
+→ {
+  ok: true
+  reportId: string
+  domain: string
+  rangeStart: string
+  rangeEnd: string
+  totalMessages: number
+  passCount: number
+  failCount: number
+  duplicate: boolean
+}
+```
+
+Returns `400` for `no_file` / `ingest_failed` (with the parse error in `message`).
+
+### `PUT /api/dmarc/sources/:ip`
+Tag a DMARC source IP as known.
+
+```ts
+body: { label: string; ignored?: boolean }
+→ { ok: true }
+```
+
+### `DELETE /api/dmarc/sources/:ip`
+Remove a DB-set tag (config-set tags can't be deleted via the API — edit `MailerConfig.dmarc.knownSources`).
+
+```ts
+→ { ok: true; deleted: number }
+```
+
+## List hygiene
+
+### `GET /api/hygiene`
+
+```ts
+→ {
+  totalSubscribers: number
+  totalWithSends: number
+  buckets: Array<{
+    label: string                       // "Engaged (last 30 days)", etc
+    minDays?: number | null
+    maxDays?: number | null
+    neverEngaged?: boolean
+    count: number
+    pctOfTotal: number
+  }>
+  sunsetCandidate: {
+    count: number
+    pctOfTotal: number
+    cohortLifetime: {
+      totalSends: number
+      bouncedRate: number
+      hardBouncedRate: number
+      complaintRate: number
+    } | null
+    projectedImpact: {
+      recentTotalSends: number
+      recentBounced: number
+      recentComplained: number
+      cohortRecentSends: number
+      cohortRecentBounced: number
+      cohortRecentComplained: number
+      currentOverallBounceRate: number
+      projectedBounceRate: number
+      currentOverallComplaintRate: number
+      projectedComplaintRate: number
+    } | null
+  }
+  computedAt: string
+}
+```
 
 ## Error shape
 

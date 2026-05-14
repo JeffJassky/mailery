@@ -6,7 +6,7 @@ import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
 
 export function ContactDetail({ id }: any) {
-  const { data, loading, error, refetch } = useLive(() => api.contact(id))
+  const { data, loading, error, refetch } = useLive(() => api.contact(id), [id])
 
   return (
     <LoadState loading={loading && !data} error={error} empty={!data} emptyLabel="Contact not found." retry={refetch}>

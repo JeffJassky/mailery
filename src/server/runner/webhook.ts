@@ -4,9 +4,15 @@
  */
 
 import type { NormalizedEvent } from '../../shared/types.js'
+import type { SendDoc } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 import { sha256Hex } from '../tokens.js'
-import { recordHealthCounter } from './health.js'
+import { recordHealthCounter, type HealthDims } from './health.js'
+
+function dimsFromSend(send: SendDoc | null | undefined): HealthDims | null {
+  if (!send) return null
+  return { fromEmail: send.fromEmail, kind: send.kind }
+}
 
 export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerContext): Promise<void> {
   const send = await ctx.collections.sends.findOne(
@@ -24,7 +30,7 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
           { $set: { status: 'delivered', deliveredAt: event.occurredAt } },
         )
       }
-      await recordHealthCounter(ctx, 'delivered')
+      await recordHealthCounter(ctx, 'delivered', dimsFromSend(send))
       break
 
     case 'open':
@@ -82,8 +88,11 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
           { $set: { status: 'bounced', updatedAt: new Date() } },
         )
       }
-      await recordHealthCounter(ctx, 'bounced')
-      await recordHealthCounter(ctx, bounceType === 'hard' ? 'hardBounced' : 'softBounced')
+      {
+        const dims = dimsFromSend(send)
+        await recordHealthCounter(ctx, 'bounced', dims)
+        await recordHealthCounter(ctx, bounceType === 'hard' ? 'hardBounced' : 'softBounced', dims)
+      }
       break
     }
 
@@ -100,7 +109,7 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
         { emailAtSubscribe: event.email },
         { $set: { status: 'complained', updatedAt: new Date() } },
       )
-      await recordHealthCounter(ctx, 'complained')
+      await recordHealthCounter(ctx, 'complained', dimsFromSend(send))
       break
 
     case 'unsubscribe':

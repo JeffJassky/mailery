@@ -21,6 +21,7 @@ import { SendDetail } from './screens/send-detail'
 import { Suppressions } from './screens/suppressions'
 import { Audit } from './screens/audit'
 import { Health } from './screens/health'
+import { ListHygiene } from './screens/hygiene'
 
 type Route = { screen: string; slug?: string; id?: string }
 type SetRoute = (r: Route) => void
@@ -47,6 +48,7 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
   suppressions:      { Comp: (_r, setRoute) => <Suppressions setRoute={setRoute} />,                    crumbs: () => ['Mailery', 'Suppressions'] },
   audit:             { Comp: (_r, setRoute) => <Audit setRoute={setRoute} />,                           crumbs: () => ['Mailery', 'Audit log'] },
   health:            { Comp: (_r, setRoute) => <Health setRoute={setRoute} />,                          crumbs: () => ['Mailery', 'Health'] },
+  hygiene:           { Comp: (_r, _setRoute) => <ListHygiene />,                                        crumbs: () => ['Mailery', 'List hygiene'] },
 }
 
 export function App() {

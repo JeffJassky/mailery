@@ -362,8 +362,22 @@ export interface WebhookEventDoc {
   raw: unknown
 }
 
+/**
+ * Health bucket. One doc per (senderDomain, kind) pair plus a single aggregate
+ * doc with _id='agg' that rolls up everything.
+ *
+ *   _id: 'agg'                              // cross-domain, cross-kind roll-up
+ *   _id: 'd:<senderDomain>|k:<kind>'        // per-bucket
+ *
+ * The aggregate is informational only — it never trips. Trips live on
+ * buckets so one subdomain tanking doesn't hold mail for the others.
+ */
 export interface HealthDoc {
-  _id: 'singleton'
+  _id: string
+  /** null on the aggregate doc, set on bucket docs. */
+  senderDomain: string | null
+  /** null on the aggregate doc, set on bucket docs. */
+  kind: TemplateKind | null
   windowStartedAt: Date
   windowDurationMs: number
   counters: {
@@ -386,6 +400,175 @@ export interface HealthDoc {
   trippedReason: string | null
   manuallyResumedAt: Date | null
   updatedAt: Date
+}
+
+export const HEALTH_AGG_ID = 'agg'
+
+export function healthBucketId(senderDomain: string | null, kind: TemplateKind): string {
+  return `d:${senderDomain ?? '_unknown'}|k:${kind}`
+}
+
+export type PostmasterReputation = 'HIGH' | 'MEDIUM' | 'LOW' | 'BAD' | 'REPUTATION_CATEGORY_UNSPECIFIED'
+
+/**
+ * One day's traffic stats for a domain from Google Postmaster Tools.
+ * Stored per (domain, date) so we can chart trends.
+ */
+export interface PostmasterSnapshotDoc {
+  _id?: ObjectId
+  domain: string
+  /** Reporting date in YYYY-MM-DD per Postmaster's stat day. */
+  date: string
+  domainReputation: PostmasterReputation | null
+  ipReputations: Array<{ reputation: PostmasterReputation; ipCount: number }> | null
+  userReportedSpamRatio: number | null
+  spfSuccessRatio: number | null
+  dkimSuccessRatio: number | null
+  dmarcSuccessRatio: number | null
+  outboundEncryptionRatio: number | null
+  inboundEncryptionRatio: number | null
+  deliveryErrors: Array<{ errorType: string; errorClass: string; errorRatio: number }> | null
+  spammyFeedbackLoops: Array<{ id: string; spamRatio: number }> | null
+  fetchedAt: Date
+}
+
+export interface MailTesterFeedback {
+  category: string
+  severity: 'info' | 'warning' | 'error'
+  message: string
+}
+
+/**
+ * Cached Mail-Tester deliverability score for a given (template content)
+ * fingerprint. Operators don't burn a credit re-running on identical
+ * content within cacheHours.
+ */
+export interface MailTesterScoreDoc {
+  _id?: ObjectId
+  templateSlug: string
+  /** Hash of bodyHash + subject + fromEmail — the cache key. */
+  contentKey: string
+  checkId: string
+  score: number
+  feedback: MailTesterFeedback[]
+  rawSummary: string | null
+  fetchedAt: Date
+  expiresAt: Date
+}
+
+export type DmarcPolicy = 'none' | 'quarantine' | 'reject'
+export type DmarcAuthResult = 'pass' | 'fail' | 'softfail' | 'neutral' | 'temperror' | 'permerror' | 'none' | 'unknown'
+
+/**
+ * One DMARC RUA aggregate report. Receivers (Google, Yahoo, Microsoft, etc.)
+ * email one per day per sending domain. We store one DmarcReportDoc per
+ * incoming report, plus one DmarcFailureDoc per non-aligned record row.
+ */
+export interface DmarcReportDoc {
+  _id?: ObjectId
+  reportId: string
+  /** Reporting org, e.g. 'google.com', 'enterprise.protection.outlook.com'. */
+  orgName: string
+  /** Reporter contact email from <report_metadata>. */
+  email: string
+  /** The domain we publish DMARC for, from <policy_published><domain>. */
+  domain: string
+  policyP: DmarcPolicy
+  /** % of mail subject to the policy (1-100). */
+  policyPct: number
+  /** Activity window the report covers. */
+  rangeStart: Date
+  rangeEnd: Date
+  /** Sum of <count> across all records. */
+  totalMessages: number
+  /** Messages that passed DMARC (DKIM aligned OR SPF aligned). */
+  passCount: number
+  failCount: number
+  receivedAt: Date
+}
+
+/**
+ * One alignment-failing source × day. Composite key `(sourceIp, domain, day)`
+ * lets us roll up "this IP sent N misaligned messages over the past week."
+ * Failures from multiple reports for the same key get counted once per
+ * report (we de-dupe on reportId × sourceIp).
+ */
+export interface DmarcFailureDoc {
+  _id?: ObjectId
+  reportId: string
+  domain: string
+  sourceIp: string
+  count: number
+  headerFrom: string
+  dkimResult: DmarcAuthResult
+  spfResult: DmarcAuthResult
+  dispositionApplied: 'none' | 'quarantine' | 'reject' | string
+  /** YYYY-MM-DD bucket derived from the reporting window's mid-point. */
+  day: string
+  receivedAt: Date
+}
+
+/**
+ * Operator-set DMARC source tag. Created/updated/deleted from the admin UI
+ * so operators can mark "this IP is our SendGrid", "this is Hubspot", etc.
+ * Merged with `MailerConfig.dmarc.knownSources` at read time — the config
+ * version is read-only baseline, the collection is mutable runtime state.
+ */
+export interface DmarcSourceTagDoc {
+  _id?: ObjectId
+  ip: string
+  label: string
+  ignored: boolean
+  setBy: string
+  setAt: Date
+}
+
+export type SndsFilterResult = 'GREEN' | 'YELLOW' | 'RED' | 'UNKNOWN'
+
+/**
+ * One row from a Microsoft SNDS data export covering a single activity
+ * window for one sending IP. Stored unique per (ip, activityStart) so
+ * historical windows accumulate without re-writing.
+ */
+export interface SndsSnapshotDoc {
+  _id?: ObjectId
+  ip: string
+  activityStart: Date
+  activityEnd: Date
+  rcptCommands: number
+  dataCommands: number
+  messageRecipients: number
+  filterResult: SndsFilterResult
+  /** 0-1 fraction. SNDS reports as "<0.1%", "0.1-0.3%", etc; we store the upper bound. null when unknown. */
+  complaintRate: number | null
+  trapMessageCount: number
+  sampleHelo: string | null
+  sampleMailFrom: string | null
+  fetchedAt: Date
+}
+
+export type DnsblResult = 'clean' | 'listed' | 'error'
+export type DnsblTargetKind = 'domain' | 'ip'
+
+/**
+ * Latest DNSBL check result per (target, list). Replaced in-place on each run
+ * so the collection stays small. History (if needed later) lives in audit_log.
+ */
+export interface DnsblCheckDoc {
+  _id?: ObjectId
+  /** Domain (e.g. `mkt.example.com`) or dotted-quad IP (e.g. `203.0.113.5`). */
+  target: string
+  targetKind: DnsblTargetKind
+  /** DNS suffix queried (e.g. `dbl.spamhaus.org`). */
+  list: string
+  /** Display label for the UI (e.g. `Spamhaus DBL`). */
+  listLabel: string
+  result: DnsblResult
+  /** A records returned by the lookup, when listed. */
+  returnCodes: string[]
+  /** When result is 'error', the message; otherwise null. */
+  errorMessage: string | null
+  runAt: Date
 }
 
 export interface ContactTagDoc {
@@ -417,6 +600,13 @@ export interface Collections {
   webhookEvents: Collection<WebhookEventDoc>
   health: Collection<HealthDoc>
   contactTags: Collection<ContactTagDoc>
+  dnsblChecks: Collection<DnsblCheckDoc>
+  postmasterSnapshots: Collection<PostmasterSnapshotDoc>
+  sndsSnapshots: Collection<SndsSnapshotDoc>
+  dmarcReports: Collection<DmarcReportDoc>
+  dmarcFailures: Collection<DmarcFailureDoc>
+  dmarcSourceTags: Collection<DmarcSourceTagDoc>
+  mailTesterScores: Collection<MailTesterScoreDoc>
 }
 
 export function getCollections(db: Db, prefix = 'mailer_'): Collections {
@@ -437,6 +627,13 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
     webhookEvents: db.collection<WebhookEventDoc>(`${prefix}webhook_events`),
     health: db.collection<HealthDoc>(`${prefix}health`),
     contactTags: db.collection<ContactTagDoc>(`${prefix}contact_tags`),
+    dnsblChecks: db.collection<DnsblCheckDoc>(`${prefix}dnsbl_checks`),
+    postmasterSnapshots: db.collection<PostmasterSnapshotDoc>(`${prefix}postmaster_snapshots`),
+    sndsSnapshots: db.collection<SndsSnapshotDoc>(`${prefix}snds_snapshots`),
+    dmarcReports: db.collection<DmarcReportDoc>(`${prefix}dmarc_reports`),
+    dmarcFailures: db.collection<DmarcFailureDoc>(`${prefix}dmarc_failures`),
+    dmarcSourceTags: db.collection<DmarcSourceTagDoc>(`${prefix}dmarc_source_tags`),
+    mailTesterScores: db.collection<MailTesterScoreDoc>(`${prefix}mail_tester_scores`),
   }
 }
 
@@ -515,5 +712,57 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { externalId: 1, tag: 1 }, unique: true },
       { key: { tag: 1 } },
     ]),
+    c.health.createIndexes([
+      { key: { senderDomain: 1, kind: 1 } },
+      { key: { status: 1 } },
+      // setup-status reads the most-recently-touched health doc as a heartbeat.
+      { key: { updatedAt: -1 } },
+    ]),
+    c.dnsblChecks.createIndexes([
+      { key: { target: 1, list: 1 }, unique: true },
+      // Supports the admin /dnsbl GET sort: result asc, then target asc, list asc.
+      { key: { result: 1, target: 1, list: 1 } },
+      // TTL — stale rows for targets the operator removed disappear after
+      // 60 days without manual cleanup. The puller refreshes runAt on
+      // every active target so existing targets stay indefinitely.
+      { key: { runAt: 1 }, expireAfterSeconds: 60 * 24 * 60 * 60 },
+    ]),
+    c.postmasterSnapshots.createIndexes([
+      { key: { domain: 1, date: 1 }, unique: true },
+      { key: { domain: 1, fetchedAt: -1 } },
+      { key: { domainReputation: 1 } },
+    ]),
+    c.sndsSnapshots.createIndexes([
+      { key: { ip: 1, activityStart: 1 }, unique: true },
+      { key: { ip: 1, fetchedAt: -1 } },
+      { key: { filterResult: 1 } },
+    ]),
+    c.dmarcReports.createIndexes([
+      { key: { reportId: 1, orgName: 1 }, unique: true },
+      { key: { domain: 1, rangeEnd: -1 } },
+      // Cross-domain "most recent reports" queries scan a lot without this.
+      { key: { rangeEnd: -1 } },
+      { key: { receivedAt: -1 } },
+    ]),
+    c.dmarcFailures.createIndexes([
+      { key: { reportId: 1, sourceIp: 1 }, unique: true },
+      { key: { domain: 1, day: -1 } },
+      { key: { sourceIp: 1, day: -1 } },
+      { key: { receivedAt: 1 } }, // for retention pruning
+    ]),
+    c.dmarcSourceTags.createIndexes([
+      { key: { ip: 1 }, unique: true },
+    ]),
+    c.mailTesterScores.createIndexes([
+      { key: { contentKey: 1 }, unique: true },
+      { key: { templateSlug: 1, fetchedAt: -1 } },
+      // TTL — Mongo auto-deletes expired scores so we never serve stale data.
+      { key: { expiresAt: 1 }, expireAfterSeconds: 0 },
+    ]),
   ])
+
+  // One-shot migrations — run after indexes are in place so any DELETE
+  // plan can use them. Idempotent at MongoDB level (returns 0 when
+  // nothing is there).
+  await c.health.deleteOne({ _id: 'singleton' as any }).catch(() => {})
 }
