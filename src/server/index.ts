@@ -2,7 +2,7 @@
  * Public exports for the `mailery` package.
  */
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.6.0'
 
 // Core
 export { Mailer } from './mailer.js'
@@ -13,6 +13,8 @@ export type { SenderDomainValidation } from './templates/sender-domain.js'
 // Adapters
 export { MongoContactAdapter } from './adapters/mongo.js'
 export type { MongoContactAdapterOptions } from './adapters/mongo.js'
+export { defineVars, varsJsonSchema, RESERVED_VAR_KEYS } from './adapters/vars.js'
+export type { VarsAdapter, VarsResolveInfo } from './adapters/vars.js'
 
 // Providers
 export { NullProvider } from './providers/null.js'
@@ -71,10 +73,13 @@ export type {
 export { signUnsubscribeToken, verifyUnsubscribeToken, sha256Hex } from './tokens.js'
 
 // Shared types
+export { computeDeliveryTime } from './runner/delivery-window.js'
+
 export type {
   Contact,
   ContactAdapter,
   AdapterFilter,
+  DeliveryWindow,
   MailProvider,
   SendArgs,
   SendResult,

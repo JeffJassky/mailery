@@ -16,6 +16,7 @@ import {
   type RenderContext,
 } from '../templates/render.js'
 import { signUnsubscribeToken } from '../tokens.js'
+import { resolveVars } from '../adapters/vars.js'
 import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
 import { getBucketStatus, recordHealthCounter } from './health.js'
@@ -147,13 +148,26 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   }
 
   const run = send.flowRunId ? await ctx.collections.flowRuns.findOne({ _id: send.flowRunId }) : null
-  const renderCtx = buildRenderContext(
-    contact,
-    run,
-    send.vars ?? {},
-    ctx,
-  )
-  const rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
+
+  // Resolve host vars + render. A throw here (host DB hiccup, bad template)
+  // marks the send failed and rethrows so the queue retries with backoff —
+  // never dispatch a half-rendered email.
+  let renderCtx: RenderContext
+  let rendered: Awaited<ReturnType<typeof renderTemplate>>
+  try {
+    const resolved = await resolveVars(ctx.varsAdapter, contact, {
+      reason: 'send',
+      templateSlug: template.slug,
+      flowSlug: run?.flowSlug,
+      eventName: run?.triggerEvent?.name,
+      eventProperties: run?.triggerEvent?.properties,
+    })
+    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved)
+    rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
+  } catch (err: any) {
+    await markFailed(send._id!, `render error: ${String(err?.message ?? err)}`, ctx)
+    throw err // let the queue retry per the attempts policy
+  }
 
   // 4. Apply tracking using the now-known send id.
   const tracking = applyTracking(rendered.html, {
@@ -251,6 +265,7 @@ function buildRenderContext(
   run: FlowRunDoc | null,
   vars: Record<string, unknown>,
   ctx: RunnerContext,
+  resolved: Record<string, unknown> = {},
 ): RenderContext {
   const scope = 'marketing'
   const expiresAt = new Date(Date.now() + ctx.config.unsubscribeTokenLifetimeDays * 24 * 60 * 60 * 1000)
@@ -260,10 +275,11 @@ function buildRenderContext(
   )
   const unsubscribeUrl = `${ctx.config.publicUrl}/m/unsub/${token}`
 
-  void run
   return {
+    ...resolved,
     contact,
     vars,
+    event: run?.triggerEvent?.properties ?? {},
     unsubscribeUrl,
     senderAddress: ctx.config.senderAddress,
   }

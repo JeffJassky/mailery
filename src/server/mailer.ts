@@ -85,6 +85,7 @@ export class Mailer {
       db: this.db,
       collections: this.collections,
       adapter: this.adapter,
+      varsAdapter: this.config.varsAdapter,
       providers: this.providers,
       queues: this.queues,
       config: this.config,
@@ -180,6 +181,10 @@ export class Mailer {
     const config = resolveConfig(input)
     if (!config.providers[config.defaultProvider]) {
       throw new Error(`defaultProvider "${config.defaultProvider}" not in providers map`)
+    }
+    if (config.varsAdapter) {
+      const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
+      assertNoReservedVarKeys(config.varsAdapter)
     }
 
     const collections = getCollections(config.db, config.collectionPrefix)

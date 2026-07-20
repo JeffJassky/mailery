@@ -10,6 +10,7 @@ import type { FlowStep } from '../../shared/types.js'
 import type { FlowRunDoc, FlowDoc } from '../models/index.js'
 import { evaluatePredicate } from './predicate.js'
 import type { RunnerContext } from './index.js'
+import { computeDeliveryTime } from './delivery-window.js'
 import { handleSend } from './send.js'
 
 export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Promise<void> {
@@ -50,8 +51,17 @@ export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Pr
       return handleCondition(run, step, contact, ctx)
     case 'branch':
       return handleBranch(run, step, contact, ctx)
-    case 'send':
+    case 'send': {
+      // Delivery window: push the send to the next allowed slot (weekday /
+      // time-of-day, optionally in the contact's timezone) before rendering.
+      if (step.delivery) {
+        const deliverAt = computeDeliveryTime(new Date(), step.delivery, contact.timezone)
+        if (deliverAt.getTime() > Date.now() + 30_000) {
+          return deferSendForWindow(run, deliverAt, ctx)
+        }
+      }
       return handleSend(run, step, contact, flow, ctx)
+    }
     case 'tag':
       return handleTag(run, step, ctx)
     case 'fire_event':
@@ -247,6 +257,42 @@ async function handleWebhookStep(
       )
     }
   }
+}
+
+/**
+ * Park the run on the SAME step until the delivery window opens, then let the
+ * normal advance job re-enter processOneRunStep — at which point the window
+ * check passes and handleSend runs. Idempotent via the jobId (one defer job
+ * per step per slot) and the nextActionAt guard.
+ */
+async function deferSendForWindow(run: FlowRunDoc, deliverAt: Date, ctx: RunnerContext): Promise<void> {
+  const updated = await ctx.collections.flowRuns.findOneAndUpdate(
+    // Only write once per deferral — if nextActionAt already points at (or
+    // past) the slot, another worker/tick got here first.
+    { _id: run._id, currentStepIndex: run.currentStepIndex, nextActionAt: { $lt: deliverAt } },
+    {
+      $set: { nextActionAt: deliverAt, updatedAt: new Date() },
+      $push: {
+        history: {
+          stepIndex: run.currentStepIndex,
+          action: 'send_deferred' as const,
+          at: new Date(),
+          details: { until: deliverAt },
+        },
+      },
+    },
+    { returnDocument: 'after' },
+  )
+  if (!updated) return
+
+  await ctx.queues.advance.add(
+    'advance',
+    { flowRunId: String(run._id) },
+    {
+      delay: Math.max(0, deliverAt.getTime() - Date.now()),
+      jobId: `advance:${run._id}:${run.currentStepIndex}:window:${deliverAt.getTime()}`,
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

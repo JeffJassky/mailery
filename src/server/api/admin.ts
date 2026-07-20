@@ -23,6 +23,8 @@ import {
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { lintTemplate } from '../templates/linter.js'
+import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
+import type { Contact } from '../../shared/types.js'
 import { runSetupChecks } from './setup-status.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -105,12 +107,25 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
   const r = Router()
   const c = mailer.collections
 
+  // Computed once — the vars schema is fixed for the process lifetime.
+  const varsSchema = mailer.config.varsAdapter ? varsJsonSchema(mailer.config.varsAdapter) : null
+
   function getMailTesterClient(): MailTesterClient | null {
     if (opts.mailTesterClient) return opts.mailTesterClient
     const cfg = mailer.config.mailTester
     if (!cfg?.apiKey) return null
     return createMailTesterClient(cfg)
   }
+
+  // Vars contract for the template editor — JSON Schema of the host's
+  // varsAdapter (null when none configured) plus the mailery-provided
+  // built-in keys, so autocomplete/linting have one source of truth.
+  r.get(
+    '/vars-schema',
+    asyncHandler(async (_req, res) => {
+      res.json({ schema: varsSchema, builtins: RESERVED_VAR_KEYS })
+    }),
+  )
 
   r.get(
     '/me',
@@ -1395,7 +1410,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
 
       const lint = lintTemplate(
         { subject, preheader, mjml, editorJson, html, plainText, kind, fromEmail },
-        { senderDomains: mailer.config.senderDomains },
+        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
       )
       res.json({ ...lint, compileFailed: false })
     }),
@@ -1455,7 +1470,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
           kind: tpl.kind,
           fromEmail: tpl.fromEmail,
         },
-        { senderDomains: mailer.config.senderDomains },
+        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
       )
 
       if (lint.errors.length > 0) {
@@ -1558,44 +1573,115 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         plainText = tpl.body.plainText
       }
 
-      const sampleContact = req.body?.sampleContact ?? {
-        externalId: 'preview-contact',
-        email: 'preview@example.com',
-        tags: [],
-        fields: { firstName: 'Alex' },
+      // Preview as a real contact when contactId is given — pulls the actual
+      // contact through the adapter and runs the host's varsAdapter, so the
+      // preview shows exactly what that person would receive.
+      let contact: Contact
+      const contactId = typeof req.body?.contactId === 'string' ? req.body.contactId : null
+      if (contactId) {
+        const found = await mailer.adapter.getById(contactId)
+        if (!found) return res.status(404).json({ error: 'contact_not_found', contactId })
+        contact = found
+      } else {
+        contact = req.body?.sampleContact ?? {
+          externalId: 'preview-contact',
+          email: 'preview@example.com',
+          tags: [],
+          fields: { firstName: 'Alex' },
+        }
       }
+
+      // Optional simulated trigger-event properties, so account/topic-scoped
+      // templates ({{event.*}} or resolver branching) preview realistically.
+      const eventProperties =
+        req.body?.eventProperties && typeof req.body.eventProperties === 'object'
+          ? (req.body.eventProperties as Record<string, unknown>)
+          : undefined
+
+      let resolved: Record<string, unknown> = {}
+      try {
+        resolved = await resolveVars(mailer.config.varsAdapter, contact, {
+          reason: 'preview',
+          templateSlug: tpl.slug,
+          eventProperties,
+        })
+      } catch (err: any) {
+        return res.status(502).json({
+          error: 'vars_resolve_failed',
+          message: `varsAdapter.resolve threw: ${String(err?.message ?? err)}`,
+        })
+      }
+
       const renderCtx = {
-        contact: sampleContact,
+        ...resolved,
+        contact,
         vars: req.body?.vars ?? {},
+        event: eventProperties ?? {},
         unsubscribeUrl: `${mailer.config.publicUrl}/m/unsub/preview`,
         senderAddress: mailer.config.senderAddress,
       }
 
       const previewTpl = { ...tpl, body: { ...tpl.body, html, plainText } }
       const rendered = await renderTemplate(previewTpl as any, renderCtx, { helpers: mailer.config.handlebarsHelpers })
-      return res.json({ subject: rendered.subject, preheader: rendered.preheader, html: rendered.html, plainText: rendered.plainText })
+      return res.json({
+        subject: rendered.subject,
+        preheader: rendered.preheader,
+        html: rendered.html,
+        plainText: rendered.plainText,
+        contact: { externalId: contact.externalId, email: contact.email },
+      })
     }),
   )
 
   r.post(
     '/templates/:slug/send-test',
     asyncHandler(async (req, res) => {
-      const { to, sampleData } = req.body ?? {}
+      const { to, sampleData, contactId, eventProperties } = req.body ?? {}
       if (!to) return res.status(400).json({ error: 'to_required' })
       const tpl = await c.templates.findOne({ slug: req.params.slug })
       if (!tpl) return res.status(404).json({ error: 'not_found' })
 
-      const contact = sampleData?.contact ?? {
-        externalId: 'test-recipient',
-        email: to,
-        tags: [],
-        fields: { firstName: 'Test' },
+      // Render as a real contact when contactId is given (vars included),
+      // but always deliver to the operator-typed address.
+      let contact: Contact
+      if (typeof contactId === 'string' && contactId) {
+        const found = await mailer.adapter.getById(contactId)
+        if (!found) return res.status(404).json({ error: 'contact_not_found', contactId })
+        contact = { ...found, email: to }
+      } else {
+        contact = sampleData?.contact ?? {
+          externalId: 'test-recipient',
+          email: to,
+          tags: [],
+          fields: { firstName: 'Test' },
+        }
+        contact.email = to
       }
-      contact.email = to
+
+      const evProps =
+        eventProperties && typeof eventProperties === 'object'
+          ? (eventProperties as Record<string, unknown>)
+          : undefined
+
+      let resolved: Record<string, unknown> = {}
+      try {
+        resolved = await resolveVars(mailer.config.varsAdapter, contact, {
+          reason: 'test',
+          templateSlug: tpl.slug,
+          eventProperties: evProps,
+        })
+      } catch (err: any) {
+        return res.status(502).json({
+          error: 'vars_resolve_failed',
+          message: `varsAdapter.resolve threw: ${String(err?.message ?? err)}`,
+        })
+      }
 
       const renderCtx = {
+        ...resolved,
         contact,
         vars: sampleData?.vars ?? {},
+        event: evProps ?? {},
         unsubscribeUrl: `${mailer.config.publicUrl}/m/unsub/test`,
         senderAddress: mailer.config.senderAddress,
       }

@@ -13,7 +13,7 @@ type FlowStep =
   | { type: 'wait'; value: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' }
   | { type: 'condition'; test: Predicate; ifFalse: 'continue' | 'exit' }
   | { type: 'branch'; test: Predicate; ifTrueSteps: FlowStep[]; ifFalseSteps: FlowStep[] }
-  | { type: 'send'; templateSlug: string; providerOverride?: string; vars?: Record<string, unknown> }
+  | { type: 'send'; templateSlug: string; providerOverride?: string; vars?: Record<string, unknown>; delivery?: DeliveryWindow }
   | { type: 'tag'; addTags?: string[]; removeTags?: string[] }
   | { type: 'fire_event'; eventName: string; properties?: Record<string, unknown> }
   | { type: 'webhook'; url: string; method?: 'POST' | 'PUT'; payload?: Record<string, unknown>; failureMode?: 'soft' | 'fail_run' }
@@ -69,6 +69,19 @@ Recurse into one or the other sub-list. When the chosen sub-list completes, the 
 ```
 
 `templateSlug` references a published `mailer_templates` row by slug. The dedupeKey = `${flowRunId}:${stepIndex}` ensures a given step in a given run produces at most one send.
+
+The optional `delivery` window delays the send until the next allowed slot:
+
+```ts
+interface DeliveryWindow {
+  weekdaysOnly?: boolean       // Sat/Sun slot → Monday, same clock time
+  timeOfDay?: string           // 'HH:mm' local wall-clock delivery time
+  useContactTimezone?: boolean // prefer contact.timezone when present
+  timezone?: string            // IANA fallback zone; default UTC
+}
+```
+
+See [Flows → Delivery windows](/guide/flows#delivery-windows) for semantics.
 
 Provider selection priority: step `providerOverride` > template `providerOverride` > kind-specific default > global `defaultProvider`.
 

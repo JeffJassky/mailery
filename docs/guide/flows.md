@@ -49,6 +49,83 @@ Flows are event-triggered automations. They live as documents in `mailer_flows` 
 
 Full type definitions: [Flow steps & predicates](/reference/types-flow).
 
+## Event parameters (scoped flows)
+
+Contacts are always people — suppression, subscription, and unsubscribe are
+per-email-address. When a flow is *about* something else (an account the user
+belongs to, a topic that hit a milestone), the trigger event carries that
+scope:
+
+```ts
+// Host code: a topic met its criteria → notify every member of the account.
+for (const member of await accountMembers(accountId)) {
+  await mailer.fire('TopicReady', member.userId, { accountId, topicId },
+    `topic-ready:${accountId}:${topicId}:${member.userId}`)  // explicit dedupeKey
+}
+```
+
+Each run snapshots the triggering event. From there:
+
+- Templates read the raw properties: `{{event.accountId}}`, `{{event.topicId}}`.
+- Your [`varsAdapter`](./templates#host-variables-varsadapter) resolver gets
+  `info.eventProperties` and `info.eventName`, and uses them to load the
+  *right* account/topic for typed, structured variables:
+
+```ts
+async resolve(contact, info) {
+  const accountId = info.eventProperties?.accountId
+  return {
+    user: await loadUser(contact.externalId),
+    account: accountId ? await loadAccount(accountId) : null,
+    topic: info.eventProperties?.topicId ? await loadTopic(info.eventProperties.topicId) : null,
+  }
+}
+```
+
+Re-entry semantics: `trigger.once` is once per **contact** per flow, forever —
+a user can never re-enter for a second account. For "once per contact per
+account/topic", set `once: false` and scope the `fire()` dedupeKey as above:
+the event insert dedupes on the key, so flow entry dedupes with it.
+
+Previews can simulate the scope: pass `eventProperties` to
+`POST /api/templates/:slug/preview` (or send-test) and both `{{event.*}}` and
+the resolver see it.
+
+## Delivery windows
+
+A `send` step can constrain **when** the email actually goes out. The flow's
+waits set the earliest moment (T + N days); the window pushes that moment
+forward — never backward — to the next allowed slot:
+
+```ts
+{
+  type: 'send',
+  templateSlug: 'day-3-tips',
+  delivery: {
+    weekdaysOnly: true,        // lands on Sat/Sun → waits until Monday
+    timeOfDay: '09:00',        // deliver at 9am local time
+    useContactTimezone: true,  // 9am in contact.timezone when known…
+    timezone: 'America/New_York', // …else 9am here (IANA name; default UTC)
+  },
+}
+```
+
+Semantics:
+
+- **`weekdaysOnly`** — if the computed slot falls on a Saturday or Sunday (in
+  the resolved timezone), it moves to Monday at the same clock time. So a
+  trial-start flow with `wait 3 days` where T+3 lands on Saturday delivers
+  Monday morning instead.
+- **`timeOfDay`** (`'HH:mm'`) — the send waits for the next occurrence of that
+  local wall-clock time. Arriving *shortly after* the slot (≤ 1 hour) sends
+  immediately, so tick jitter never adds a day; arriving later waits for
+  tomorrow's slot.
+- **Timezone resolution** — `contact.timezone` (when `useContactTimezone` and
+  present) → `timezone` → UTC. Invalid zone names fall back down the chain.
+- The run parks on the send step (`send_deferred` in the run history) and a
+  delayed advance job re-fires it when the window opens. All other checks
+  (suppression, circuit breaker, subscription) still run at actual send time.
+
 ## Predicates
 
 Predicates evaluate against the contact (host fields + tags) and mailer state (events, sends, subscription).

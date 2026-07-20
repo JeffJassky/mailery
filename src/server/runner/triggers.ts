@@ -58,6 +58,7 @@ async function tryEnterFlow(flow: FlowDoc, event: EventDoc, ctx: RunnerContext):
     flowSlug: flow.slug,
     flowVersion: flow.version,
     emailAtEntry: sub.emailAtSubscribe,
+    triggerEvent: { name: event.name, properties: event.properties ?? {}, occurredAt: event.occurredAt },
     enteredAt: new Date(),
     status: 'active',
     currentStepIndex: 0,

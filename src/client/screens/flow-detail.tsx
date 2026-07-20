@@ -737,11 +737,92 @@ function SendStepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: 
             />
             <div className="field-hint">Per-step variables available in the template as <span className="mono">{'{{vars.x}}'}</span>.</div>
           </div>
+          <DeliveryWindowEditor
+            value={step.delivery}
+            onChange={(delivery) => onChange({ delivery } as Partial<FlowStep>)}
+          />
         </>
       ) : (
         <SendStepPreview templateSlug={step.templateSlug} vars={step.vars} />
       )}
     </>
+  )
+}
+
+type DeliveryWindowValue = {
+  weekdaysOnly?: boolean
+  timeOfDay?: string
+  useContactTimezone?: boolean
+  timezone?: string
+}
+
+function DeliveryWindowEditor({
+  value,
+  onChange,
+}: {
+  value: DeliveryWindowValue | undefined
+  onChange: (v: DeliveryWindowValue | undefined) => void
+}) {
+  const v = value ?? {}
+
+  function patch(p: Partial<DeliveryWindowValue>) {
+    const next = { ...v, ...p }
+    // Drop falsy/empty keys; an all-empty window means "no constraints".
+    if (!next.weekdaysOnly) delete next.weekdaysOnly
+    if (!next.timeOfDay) delete next.timeOfDay
+    if (!next.useContactTimezone) delete next.useContactTimezone
+    if (!next.timezone) delete next.timezone
+    onChange(Object.keys(next).length > 0 ? next : undefined)
+  }
+
+  return (
+    <div className="field">
+      <label className="field-label">Delivery window</label>
+      <div className="vstack" style={{ gap: 8 }}>
+        <label className="hstack text-sm" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!v.weekdaysOnly}
+            onChange={(e) => patch({ weekdaysOnly: e.target.checked })}
+          />
+          Weekdays only — a send landing on Sat/Sun waits until Monday
+        </label>
+        <div className="hstack" style={{ gap: 8, alignItems: 'center' }}>
+          <span className="text-sm" style={{ minWidth: 90 }}>Time of day</span>
+          <input
+            className="input"
+            type="time"
+            style={{ width: 130 }}
+            value={v.timeOfDay ?? ''}
+            onChange={(e) => patch({ timeOfDay: e.target.value || undefined })}
+          />
+          {v.timeOfDay && (
+            <button className="btn btn-xs" onClick={() => patch({ timeOfDay: undefined })}>Clear</button>
+          )}
+        </div>
+        <label className="hstack text-sm" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!v.useContactTimezone}
+            onChange={(e) => patch({ useContactTimezone: e.target.checked })}
+          />
+          Use the contact's timezone when known
+        </label>
+        <div className="hstack" style={{ gap: 8, alignItems: 'center' }}>
+          <span className="text-sm" style={{ minWidth: 90 }}>Fallback zone</span>
+          <input
+            className="input"
+            placeholder="UTC"
+            style={{ width: 220 }}
+            value={v.timezone ?? ''}
+            onChange={(e) => patch({ timezone: e.target.value || undefined })}
+          />
+        </div>
+      </div>
+      <div className="field-hint">
+        Times are interpreted in the contact's timezone (when enabled and known), else the fallback IANA zone, else UTC. The window only delays sends — never moves them earlier.
+      </div>
+    </div>
   )
 }
 

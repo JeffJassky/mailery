@@ -38,11 +38,30 @@ export interface ContactAdapter {
 
 // Flow definitions ------------------------------------------------------------
 
+/**
+ * Constrains WHEN a send step's email may go out. The flow's waits decide the
+ * earliest moment (T + N days); the window then pushes that moment forward —
+ * never backward — to the next allowed slot:
+ *
+ *  - `timeOfDay` — deliver at this local wall-clock time ('HH:mm'). A send
+ *    arriving after that time waits for the next day's slot (with a short
+ *    grace period so tick jitter doesn't add 24h).
+ *  - `weekdaysOnly` — a slot landing on Saturday/Sunday moves to Monday.
+ *  - `useContactTimezone` — interpret times in `contact.timezone` when set,
+ *    else fall back to `timezone` (IANA name, default UTC).
+ */
+export interface DeliveryWindow {
+  weekdaysOnly?: boolean
+  timeOfDay?: string
+  useContactTimezone?: boolean
+  timezone?: string
+}
+
 export type FlowStep =
   | { type: 'wait'; value: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' }
   | { type: 'condition'; test: Predicate; ifFalse: 'continue' | 'exit' }
   | { type: 'branch'; test: Predicate; ifTrueSteps: FlowStep[]; ifFalseSteps: FlowStep[] }
-  | { type: 'send'; templateSlug: string; providerOverride?: string; vars?: Record<string, unknown> }
+  | { type: 'send'; templateSlug: string; providerOverride?: string; vars?: Record<string, unknown>; delivery?: DeliveryWindow }
   | { type: 'tag'; addTags?: string[]; removeTags?: string[] }
   | { type: 'fire_event'; eventName: string; properties?: Record<string, unknown> }
   | { type: 'webhook'; url: string; method?: 'POST' | 'PUT'; payload?: Record<string, unknown>; failureMode?: 'soft' | 'fail_run' }

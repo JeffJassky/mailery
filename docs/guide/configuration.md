@@ -233,6 +233,24 @@ Tags merge with the mutable `mailer_dmarc_source_tags` collection that the admin
 
 Enables the deliverability-check card in the template editor. Each check sends one real email via the default provider and consumes one Mail-Tester credit. Cache key is `(bodyHash, subject, fromEmail)`. See [Deliverability → Mail-Tester integration](./deliverability#mail-tester-integration-optional).
 
+## Host variables (varsAdapter)
+
+Give templates typed access to your product data — resolved from your own
+database at send time, with the zod schema driving editor autocomplete and
+lint. See [Templates → Host variables](./templates#host-variables-varsadapter).
+
+```ts
+import { defineVars } from 'mailery'
+import { z } from 'zod'
+
+{
+  varsAdapter: defineVars({
+    schema: z.object({ user: z.object({ name: z.string() }) }),
+    resolve: async (contact) => ({ user: { name: await lookupName(contact.externalId) } }),
+  }),
+}
+```
+
 ## Hooks
 
 Custom Handlebars helpers + alert callbacks:

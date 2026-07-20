@@ -139,6 +139,37 @@ body: {
 ### `GET /api/audit`
 List, newest-first (limit 200).
 
+## Vars schema
+
+### `GET /api/vars-schema`
+The host's `varsAdapter` schema as JSON Schema (drives editor autocomplete and the `unknown_variable` lint rule), plus the built-in render-context keys.
+
+```ts
+→ { schema: JSONSchema | null, builtins: string[] }
+```
+
+## Templates — preview + test send
+
+### `POST /api/templates/:slug/preview`
+Render the draft (or published body with `useDraft: false`). Pass `contactId` to render as a real contact — the contact is loaded through the adapter and the `varsAdapter` resolver runs (`reason: 'preview'`). Without it, a sample contact and empty host vars are used.
+
+Pass `eventProperties` to simulate a trigger event — both `{{event.*}}` and the resolver's `info.eventProperties` receive it.
+
+```ts
+body: { useDraft?: boolean; contactId?: string; sampleContact?: Contact; vars?: Record<string, unknown>; eventProperties?: Record<string, unknown> }
+→ { subject, preheader, html, plainText, contact: { externalId, email } }
+→ 404 { error: 'contact_not_found', contactId }
+→ 502 { error: 'vars_resolve_failed', message }
+```
+
+### `POST /api/templates/:slug/send-test`
+Send the published template to an operator-typed address. With `contactId`, the render uses that contact's data + resolved host vars (`reason: 'test'`) while still delivering to `to`.
+
+```ts
+body: { to: string; contactId?: string; sampleData?: { contact?: Contact; vars?: Record<string, unknown> }; eventProperties?: Record<string, unknown> }
+→ { ok: true, providerId: string }
+```
+
 ## Templates — content linter + Mail-Tester
 
 ### `POST /api/templates/:slug/lint`

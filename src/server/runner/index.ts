@@ -13,11 +13,13 @@ import type {
 import type { ResolvedConfig } from '../config.js'
 import type { Collections } from '../models/index.js'
 import type { Queues } from '../queues/index.js'
+import type { VarsAdapter } from '../adapters/vars.js'
 
 export interface RunnerContext {
   db: Db
   collections: Collections
   adapter: ContactAdapter
+  varsAdapter?: VarsAdapter
   providers: Record<string, MailProvider>
   queues: Queues
   config: ResolvedConfig

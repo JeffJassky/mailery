@@ -88,7 +88,9 @@ A self-hosted library you `npm install` into your Express + MongoDB app. Fire ev
 - **Pluggable queue** — BullMQ + Redis (default) or Agenda + Mongo (no Redis required).
 - **`mailery setup-sendgrid` CLI** that wires up domain auth, Cloudflare DNS records, Signed Event Webhook key, and Event Webhook URL in one idempotent command. See [docs/guide/deliverability](https://jeffjassky.github.io/mailery/guide/deliverability#automated-setup-cloudflare).
 - **MJML** templates with click + open tracking, plain-text auto-derivation, scope-aware suppression at send time.
-- **React admin SPA** (Vite-bundled, served as static assets — no build step in your app).
+- **Typed host variables** — declare a zod schema + resolver (`defineVars`) and templates get your product data at the root (`{{user.name}}`, `{{firstActiveTopic.title}}`), with editor autocomplete and lint checks driven by the same schema.
+- **Delivery windows** on flow send steps — weekdays-only (Saturday lands → Monday sends), time-of-day delivery, optionally in the contact's timezone.
+- **React admin SPA** (Vite-bundled, served as static assets — no build step in your app) — including template preview as any real contact (cycle with ←/→) and test sends with real resolved variables.
 
 ## Status & roadmap
 

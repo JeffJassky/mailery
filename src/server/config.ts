@@ -10,6 +10,7 @@ import type {
 } from '../shared/types.js'
 import type { QueueDriverConfig } from './queues/types.js'
 import type { SenderDomainRegistry } from './templates/sender-domain.js'
+import type { VarsAdapter } from './adapters/vars.js'
 
 export type { SenderDomainConfig, SenderDomainRegistry } from './templates/sender-domain.js'
 
@@ -146,6 +147,14 @@ export interface MailerConfig {
   db: Db
   collectionPrefix?: string
   adapter: ContactAdapter
+  /**
+   * Optional host-provided template variables. `resolve(contact)` runs at
+   * send/preview/test render time; its result is merged into the template
+   * context root (schema key `user` → `{{user.name}}`). The zod schema
+   * drives admin-editor autocomplete and the `unknown_variable` lint rule.
+   * Build one with `defineVars({ schema, resolve })`.
+   */
+  varsAdapter?: VarsAdapter<any>
 
   // ---- Queue ----------------------------------------------------------------
   /**

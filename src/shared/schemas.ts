@@ -120,6 +120,14 @@ export const flowStepSchema: z.ZodType<unknown> = z.lazy(() =>
       templateSlug: slugSchema,
       providerOverride: z.string().optional(),
       vars: z.record(z.string(), z.unknown()).optional(),
+      delivery: z
+        .object({
+          weekdaysOnly: z.boolean().optional(),
+          timeOfDay: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:mm').optional(),
+          useContactTimezone: z.boolean().optional(),
+          timezone: z.string().optional(),
+        })
+        .optional(),
     }),
     z.object({
       type: z.literal('tag'),

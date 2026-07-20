@@ -5,6 +5,7 @@ import type { Editor as TiptapEditor, JSONContent } from '@tiptap/core'
 
 import { Icons } from '../components/icons'
 import { PageHead } from '../components/shell'
+import { VarInput } from '../components/var-input'
 import {
   api,
   type LintIssue,
@@ -12,7 +13,9 @@ import {
   type MailTesterFeedback,
   type MailTesterScore,
   type MailTesterStatusResponse,
+  type PreviewResponse,
 } from '../lib/api'
+import { BUILTIN_VAR_PATHS, flattenVarPaths, type VarPathEntry } from '../lib/vars-schema'
 import { useLive } from '../lib/use-live'
 import { LoadState } from '../lib/load-state'
 
@@ -42,21 +45,60 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const editorRef = React.useRef<TiptapEditor | null>(null)
   const hydratedRef = React.useRef(false)
 
-  // Preview modal state.
-  const [previewing, setPreviewing] = React.useState<null | { subject: string; preheader: string; html: string; plainText: string }>(null)
+  // Vars schema — drives subject/preheader autocomplete + the Variables card.
+  const { data: varsData } = useLive(() => api.varsSchema(), [])
+  const varPaths = React.useMemo<VarPathEntry[]>(
+    () => [...flattenVarPaths(varsData?.schema ?? null), ...BUILTIN_VAR_PATHS],
+    [varsData],
+  )
+
+  // Preview modal state. `previewContacts` is the pageable list of real
+  // contacts the operator can cycle through with ←/→.
+  const [previewing, setPreviewing] = React.useState<PreviewResponse | null>(null)
   const [previewErr, setPreviewErr] = React.useState<string | null>(null)
+  const [previewContacts, setPreviewContacts] = React.useState<any[]>([])
+  const [previewCursor, setPreviewCursor] = React.useState<string | undefined>(undefined)
+  const [previewIdx, setPreviewIdx] = React.useState<number | null>(null)
+  const [previewBusy, setPreviewBusy] = React.useState(false)
   // Test-send dialog state.
   const [testDialog, setTestDialog] = React.useState(false)
   const [testTo, setTestTo] = React.useState('')
   const [testStatus, setTestStatus] = React.useState<string | null>(null)
   const [testBusy, setTestBusy] = React.useState(false)
 
+  async function renderPreview(contactId?: string) {
+    setPreviewBusy(true)
+    try {
+      const out = await api.previewTemplate(slug, { useDraft: true, contactId })
+      setPreviewing(out)
+      setPreviewErr(null)
+    } catch (e: any) {
+      setPreviewErr(String(e?.message ?? e))
+    } finally {
+      setPreviewBusy(false)
+    }
+  }
+
   async function openPreview() {
     setPreviewErr(null)
     setStatus('Generating preview…')
     try {
-      const out = await api.previewTemplate(slug, { useDraft: true })
-      setPreviewing(out)
+      // Load real contacts so the preview shows actual resolved variables;
+      // fall back to the sample contact when the adapter has none.
+      let contacts = previewContacts
+      if (contacts.length === 0) {
+        const page = await api.contacts()
+        contacts = page.contacts
+        setPreviewContacts(page.contacts)
+        setPreviewCursor(page.nextCursor)
+      }
+      if (contacts.length > 0) {
+        setPreviewIdx(0)
+        await renderPreview(String(contacts[0].externalId))
+      } else {
+        setPreviewIdx(null)
+        await renderPreview()
+      }
       setStatus('')
     } catch (e: any) {
       setPreviewErr(String(e?.message ?? e))
@@ -64,12 +106,52 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
     }
   }
 
+  const cycleTo = React.useCallback(
+    async (nextIdx: number) => {
+      if (previewBusy || nextIdx < 0) return
+      let contacts = previewContacts
+      // Reached the end of loaded pages — pull the next page if there is one.
+      if (nextIdx >= contacts.length) {
+        if (!previewCursor) return
+        const page = await api.contacts(previewCursor)
+        contacts = [...contacts, ...page.contacts]
+        setPreviewContacts(contacts)
+        setPreviewCursor(page.nextCursor)
+        if (nextIdx >= contacts.length) return
+      }
+      setPreviewIdx(nextIdx)
+      await renderPreview(String(contacts[nextIdx].externalId))
+    },
+    [previewBusy, previewContacts, previewCursor, slug],
+  )
+
+  // ←/→ cycles the previewed contact while the modal is open.
+  React.useEffect(() => {
+    if (!previewing || previewIdx == null) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        void cycleTo(previewIdx! + 1)
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        void cycleTo(previewIdx! - 1)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [previewing, previewIdx, cycleTo])
+
   async function submitTestSend() {
     if (!testTo.trim() || testBusy) return
     setTestBusy(true)
     setTestStatus('Sending…')
     try {
-      await api.sendTestTemplate(slug, { to: testTo.trim() })
+      // Render as the contact currently selected in the preview (if any), so
+      // the test email carries real resolved variables.
+      const contactId = previewIdx != null && previewContacts[previewIdx]
+        ? String(previewContacts[previewIdx].externalId)
+        : undefined
+      await api.sendTestTemplate(slug, { to: testTo.trim(), contactId })
       setTestStatus(`Sent test to ${testTo.trim()}`)
     } catch (e: any) {
       setTestStatus(`Failed: ${e?.message ?? e}`)
@@ -171,11 +253,11 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
           <div style={{ padding: 16 }}>
             <div className="field">
               <label className="field-label">Subject</label>
-              <input className="input" value={subject} onChange={(e) => { setSubject(e.target.value); setDirty(true) }} />
+              <VarInput value={subject} paths={varPaths} onChange={(v) => { setSubject(v); setDirty(true) }} />
             </div>
             <div className="field">
               <label className="field-label">Preheader</label>
-              <input className="input" value={preheader} onChange={(e) => { setPreheader(e.target.value); setDirty(true) }} />
+              <VarInput value={preheader} paths={varPaths} onChange={(v) => { setPreheader(v); setDirty(true) }} />
             </div>
           </div>
 
@@ -215,6 +297,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <LintCard lint={lint} />
+          <VariablesCard paths={varPaths} hasSchema={!!varsData?.schema} />
           <MailTesterCard slug={slug} refetchTemplate={refetch} />
           <div className="card">
             <div className="card-head"><span className="card-title">Sender</span></div>
@@ -253,7 +336,20 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       </div>
 
       {previewing && (
-        <Modal onClose={() => setPreviewing(null)} title="Preview">
+        <Modal onClose={() => { setPreviewing(null); setPreviewIdx(null) }} title="Preview">
+          {previewIdx != null && previewContacts.length > 0 && (
+            <div className="hstack" style={{ gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <button className="btn btn-xs" disabled={previewBusy || previewIdx === 0} onClick={() => cycleTo(previewIdx - 1)} title="Previous contact (←)">←</button>
+              <span className="text-xs mono">
+                {previewing.contact?.email ?? previewContacts[previewIdx]?.email}
+              </span>
+              <span className="text-xs subtle">
+                {previewIdx + 1} / {previewContacts.length}{previewCursor ? '+' : ''}
+              </span>
+              <button className="btn btn-xs" disabled={previewBusy} onClick={() => cycleTo(previewIdx + 1)} title="Next contact (→)">→</button>
+              {previewBusy && <span className="text-xs subtle">Rendering…</span>}
+            </div>
+          )}
           <div className="text-sm f500">{previewing.subject}</div>
           <div className="text-xs subtle" style={{ marginBottom: 8 }}>{previewing.preheader}</div>
           <iframe
@@ -342,6 +438,48 @@ function useLiveLint(slug: string, input: LiveLintInput): LiveLintState {
   }, [key, slug])
 
   return state
+}
+
+function VariablesCard({ paths, hasSchema }: { paths: VarPathEntry[]; hasSchema: boolean }) {
+  const [copied, setCopied] = React.useState<string | null>(null)
+
+  function copy(path: string) {
+    void navigator.clipboard?.writeText(`{{${path}}}`)
+    setCopied(path)
+    setTimeout(() => setCopied((c) => (c === path ? null : c)), 1200)
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <span className="card-title">Variables</span>
+        <span className="card-sub">{hasSchema ? 'Click to copy' : 'Built-ins only'}</span>
+      </div>
+      <div className="card-body" style={{ padding: 0 }}>
+        {!hasSchema && (
+          <div className="text-xs subtle" style={{ padding: 12 }}>
+            No <code>varsAdapter</code> configured — define one with <code>defineVars()</code> in <code>Mailer.init</code> to expose host data ({'{{user.name}}'}, …) to templates.
+          </div>
+        )}
+        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+          {paths.map((p) => (
+            <div
+              key={p.path}
+              onClick={() => copy(p.path)}
+              title={p.description ?? `{{${p.path}}}`}
+              style={{
+                display: 'flex', justifyContent: 'space-between', gap: 12, cursor: 'pointer',
+                padding: '6px 12px', borderTop: '1px solid var(--border)',
+              }}
+            >
+              <span className="mono text-xs">{copied === p.path ? 'Copied!' : `{{${p.path}}}`}</span>
+              <span className="text-xs subtle">{p.type}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function LintBadge({ data }: { data: LintResponse }) {

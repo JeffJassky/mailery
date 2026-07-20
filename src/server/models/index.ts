@@ -132,6 +132,7 @@ export interface FlowRunHistoryEntry {
     | 'branch_taken'
     | 'sent'
     | 'send_skipped'
+    | 'send_deferred'
     | 'tagged'
     | 'event_fired'
     | 'webhook_called'
@@ -148,6 +149,13 @@ export interface FlowRunDoc {
   flowSlug: string
   flowVersion: number
   emailAtEntry: string
+  /**
+   * Snapshot of the event that triggered this run. Properties surface in
+   * templates as `{{event.*}}` and in `varsAdapter.resolve` via
+   * `info.eventProperties` — this is how account/topic-scoped flows know
+   * which account or topic the run is about. Null for non-event entries.
+   */
+  triggerEvent?: { name: string; properties: Record<string, unknown>; occurredAt: Date } | null
   enteredAt: Date
   status: FlowRunStatus
   currentStepIndex: number

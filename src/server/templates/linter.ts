@@ -50,6 +50,12 @@ export interface LintInput {
 
 export interface LintConfig {
   senderDomains?: SenderDomainRegistry
+  /**
+   * JSON Schema of the host's varsAdapter (see `varsJsonSchema`). When set,
+   * `{{paths}}` in subject/preheader/MJML/editorJson that don't exist in the
+   * schema (or the built-in keys) are flagged as `unknown_variable` warnings.
+   */
+  varsJsonSchema?: Record<string, unknown> | null
 }
 
 const URL_SHORTENERS = ['bit.ly', 't.co', 'tinyurl.com', 'goo.gl', 'ow.ly']
@@ -192,6 +198,20 @@ export function lintTemplate(rawInput: LintInput, config: LintConfig = {}): Lint
     })
   }
 
+  // 11a. Unknown template variables — warning (only when a vars schema is provided)
+  if (config.varsJsonSchema) {
+    const sources = [input.subject, input.preheader, input.mjml, JSON.stringify(input.editorJson ?? null)]
+    const unknown = findUnknownVariables(sources.join('\n'), config.varsJsonSchema)
+    if (unknown.length > 0) {
+      issues.push({
+        rule: 'unknown_variable',
+        severity: 'warning',
+        message: `Template references variable(s) not in the vars schema: ${unknown.join(', ')}.`,
+        hint: 'These render as empty strings. Check for typos, or add the key to your varsAdapter schema. Paths inside {{#each}}/{{#with}} blocks are relative and not checked.',
+      })
+    }
+  }
+
   // 11. Too many links — warning
   // Match href= with or without surrounding quotes — same shape as
   // extractHrefs above.
@@ -280,6 +300,91 @@ function findSpamSignals(text: string): string[] {
   }
   if (/!{3,}/.test(text)) out.add('excessive "!!!"')
   return Array.from(out)
+}
+
+// --- unknown_variable helpers ----------------------------------------------
+
+/** Render-context keys mailery provides regardless of the host schema. */
+const BUILTIN_VAR_ROOTS = new Set([
+  'contact',
+  'vars',
+  'event',
+  'unsubscribeUrl',
+  'viewInBrowserUrl',
+  'preferenceCenterUrl',
+  'senderAddress',
+  'this',
+])
+
+const PATH_TOKEN = /^@?[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)*$/
+
+/**
+ * Extract `{{ ... }}` expressions and return the dotted paths that cannot be
+ * found in the vars JSON Schema. Conservative by design: helper arguments,
+ * block-relative paths, and any schema shape we can't confidently walk are
+ * treated as valid — a warning here should never be a false alarm the
+ * operator has to fight.
+ */
+export function findUnknownVariables(source: string, schema: Record<string, unknown>): string[] {
+  // Block helpers introduce relative scopes ({{#each topics}} → {{title}}),
+  // so bare single-segment identifiers can't be validated when any exist.
+  const hasBlockScopes = /\{\{[#^]\s*(each|with)\b/.test(source)
+
+  const unknown = new Set<string>()
+  const re = /\{\{\{?\s*([^{}]+?)\s*\}?\}\}/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(source))) {
+    const expr = m[1]!.trim()
+    if (!expr || /^[#^/>!]/.test(expr) || expr === 'else') continue // blocks, partials, comments
+    if (expr.includes('(')) continue // subexpressions — too dynamic to check
+
+    // Helper call: skip the helper name, validate path-shaped args.
+    // Single token: validate it directly.
+    const parts = expr.split(/\s+/)
+    const candidates = parts.length > 1 ? parts.slice(1) : parts
+    for (const raw of candidates) {
+      if (!PATH_TOKEN.test(raw)) continue // quoted strings, numbers, key=val hash args
+      if (raw.startsWith('@')) continue // @index, @key, @root
+      const segments = raw.split('.')
+      if (BUILTIN_VAR_ROOTS.has(segments[0]!)) continue
+      if (hasBlockScopes && segments.length === 1) continue // possibly block-relative
+      if (!schemaHasPath(schema, segments)) unknown.add(raw)
+    }
+  }
+  return Array.from(unknown)
+}
+
+/**
+ * Walk a JSON Schema along `segments`. Returns false only when we positively
+ * know the path is absent (an object node with declared properties that lacks
+ * the segment and forbids extras). Unions, arrays, open objects → true.
+ */
+function schemaHasPath(node: unknown, segments: string[]): boolean {
+  if (segments.length === 0) return true
+  if (!node || typeof node !== 'object') return true // can't tell — accept
+  const n = node as Record<string, any>
+
+  // Union shapes (zod nullable/optional/union): valid if any branch accepts.
+  for (const key of ['anyOf', 'oneOf', 'allOf']) {
+    if (Array.isArray(n[key])) {
+      return (n[key] as unknown[]).some((branch) => schemaHasPath(branch, segments))
+    }
+  }
+
+  if (Array.isArray(n.type) && n.type.includes('object') && !n.properties) return true
+  if (n.type === 'array') {
+    if (segments[0] === 'length') return true // {{topics.length}}
+    return schemaHasPath(n.items, segments)
+  }
+
+  const props = n.properties
+  if (!props || typeof props !== 'object') return true // not a closed object — accept
+
+  const [head, ...rest] = segments
+  if (head! in props) return schemaHasPath(props[head!], rest)
+  // Segment missing — only reject when the object doesn't allow extras.
+  if (n.additionalProperties === undefined || n.additionalProperties === false) return false
+  return true
 }
 
 function isAllCaps(subject: string): boolean {

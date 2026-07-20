@@ -48,10 +48,11 @@ export const api = {
       method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     }),
-  previewTemplate: (slug: string, body: { useDraft?: boolean; sampleContact?: any; vars?: any }) =>
-    json<{ subject: string; preheader: string; html: string; plainText: string }>(`/templates/${slug}/preview`, { method: 'POST', body: JSON.stringify(body) }),
-  sendTestTemplate: (slug: string, body: { to: string; sampleData?: any }) =>
+  previewTemplate: (slug: string, body: { useDraft?: boolean; sampleContact?: any; vars?: any; contactId?: string; eventProperties?: Record<string, unknown> }) =>
+    json<PreviewResponse>(`/templates/${slug}/preview`, { method: 'POST', body: JSON.stringify(body) }),
+  sendTestTemplate: (slug: string, body: { to: string; sampleData?: any; contactId?: string; eventProperties?: Record<string, unknown> }) =>
     json<{ ok: boolean; providerId: string }>(`/templates/${slug}/send-test`, { method: 'POST', body: JSON.stringify(body) }),
+  varsSchema: () => json<VarsSchemaResponse>('/vars-schema'),
 
   // Broadcasts
   broadcasts: () => json<any[]>('/broadcasts'),
@@ -209,6 +210,21 @@ export interface MailTesterStartResponse {
 export interface MailTesterResultResponse {
   status: 'pending' | 'ready'
   score: MailTesterScore | null
+}
+
+export interface PreviewResponse {
+  subject: string
+  preheader: string
+  html: string
+  plainText: string
+  contact?: { externalId: string; email: string }
+}
+
+export interface VarsSchemaResponse {
+  /** JSON Schema of the host's varsAdapter, or null when none configured. */
+  schema: Record<string, unknown> | null
+  /** Render-context keys mailery always provides ({{unsubscribeUrl}}, {{contact.*}}, …). */
+  builtins: string[]
 }
 
 export interface LintIssue {

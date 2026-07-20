@@ -64,8 +64,16 @@ export function derivePlaintext(html: string): string {
 // ---------------------------------------------------------------------------
 
 export interface RenderContext {
+  /**
+   * Host-resolved variables (varsAdapter) live at the context root, so a
+   * schema key `user` renders as `{{user.name}}`. Reserved keys below always
+   * win over resolved keys.
+   */
+  [resolvedVar: string]: unknown
   contact: Contact
   vars: Record<string, unknown>
+  /** Properties of the event that triggered the flow run ({{event.*}}). Empty outside flow sends. */
+  event?: Record<string, unknown>
   /** URL the recipient hits to one-click unsubscribe. */
   unsubscribeUrl: string
   /** URL to view this email in a browser (when implemented). */

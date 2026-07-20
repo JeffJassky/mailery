@@ -48,12 +48,14 @@ await db.collection('mailer_templates').updateOne(
 
 ## Variables
 
-Handlebars syntax. Two namespaces:
+Handlebars syntax. Three sources:
 
 | Namespace | Source | Examples |
 |---|---|---|
 | `contact.*` | The `Contact` object from your adapter | `contact.email`, `contact.fields.firstName`, `contact.timezone` |
 | `vars.*` | Per-send vars passed via flow step config, broadcast definition, or `sendOneOff` args | `vars.daysRemaining`, `vars.resetUrl` |
+| `event.*` | Properties of the event that triggered the flow run (empty outside flow sends) | `event.accountId`, `event.topicId` |
+| *(root)* | Host variables resolved by your [`varsAdapter`](#host-variables-varsadapter) at send time | `user.name`, `account.plan.name`, `firstActiveTopic.title` |
 
 ```mjml
 <mj-section>
@@ -64,6 +66,70 @@ Handlebars syntax. Two namespaces:
   </mj-column>
 </mj-section>
 ```
+
+### Host variables (varsAdapter)
+
+Static `vars` cover per-send values, but most product data lives in your own
+database — the user's name, their plan, the first topic they created. Declare
+those once with `defineVars` and every template can use them:
+
+```ts
+import { defineVars, Mailer } from 'mailery'
+import { z } from 'zod'
+
+const varsAdapter = defineVars({
+  schema: z.object({
+    user: z.object({ name: z.string(), email: z.string() }),
+    account: z.object({
+      name: z.string(),
+      plan: z.object({ name: z.string(), interval: z.enum(['monthly', 'annual']) }),
+    }),
+    firstActiveTopic: z.object({ title: z.string(), url: z.string() }).nullable(),
+  }),
+  async resolve(contact, info) {
+    // info.reason is 'send' | 'preview' | 'test' — keep this side-effect free.
+    const user = await users.findOne({ _id: new ObjectId(contact.externalId) })
+    const account = await accounts.findOne({ _id: user.accountId })
+    const topic = await topics.find({ accountId: account._id, active: true }).sort({ createdAt: 1 }).limit(1).next()
+    return {
+      user: { name: user.name, email: user.email },
+      account: { name: account.name, plan: { name: account.plan, interval: account.interval } },
+      firstActiveTopic: topic ? { title: topic.title, url: `https://app.example.com/t/${topic._id}` } : null,
+    }
+  },
+})
+
+await Mailer.init({ /* ... */, varsAdapter })
+```
+
+Templates then reference the schema's root keys directly:
+
+```mjml
+<mj-text>Hi {{user.name}} — your {{account.plan.interval}} plan is active.</mj-text>
+{{#if firstActiveTopic}}<mj-button href="{{firstActiveTopic.url}}">{{firstActiveTopic.title}}</mj-button>{{/if}}
+```
+
+How it behaves:
+
+- **Resolved at dispatch time**, per send, with the contact as it exists at that
+  moment. A `resolve` throw marks the send `failed` and lets the queue retry —
+  a half-rendered email never goes out.
+- **The schema is the contract.** The admin editor fetches it (as JSON Schema
+  via `GET /api/vars-schema`) to power `{{` autocomplete in subject/preheader
+  and the Variables sidebar card; the linter flags `{{paths}}` that don't
+  exist in it (`unknown_variable` warning).
+- **Previews and test sends run the resolver too** — previewing as a real
+  contact shows exactly what that person would receive, and you can cycle
+  contacts with ←/→ in the preview modal.
+- **Trigger-event scope:** for flow sends, `info.eventName` /
+  `info.eventProperties` carry the triggering event — use them to load the
+  right account/topic when a user belongs to several. See
+  [Flows → Event parameters](./flows#event-parameters-scoped-flows).
+- **Reserved keys** (`contact`, `vars`, `event`, `unsubscribeUrl`,
+  `viewInBrowserUrl`, `preferenceCenterUrl`, `senderAddress`) can't be
+  declared in the schema — `Mailer.init` throws.
+- Return type is checked against `z.infer<typeof schema>` — typos in `resolve`
+  fail at compile time.
 
 ### Built-in helpers
 

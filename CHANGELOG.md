@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0 — Host variables, delivery windows, event-scoped flows
+
+### Added
+
+#### Host variables (`varsAdapter`)
+- `defineVars({ schema, resolve })` — declare a zod schema + resolver in `Mailer.init({ varsAdapter })`; resolved keys land at the template-context root (`{{user.name}}`, `{{firstActiveTopic.title}}`). Return type checked against `z.infer<schema>`.
+- Resolver runs at dispatch time per send; a throw marks the send `failed` and lets the queue retry — a half-rendered email never goes out.
+- `GET /api/vars-schema` — the schema as JSON Schema + built-in context keys.
+- Linter rule `unknown_variable` (warning) — `{{paths}}` in subject/preheader/MJML/editorJson checked against the schema; helper args validated, `{{#each}}`-relative paths and open shapes skipped.
+- Admin editor: `{{` autocomplete in subject/preheader, Variables sidebar card (click-to-copy), both driven by the schema.
+- Reserved keys (`contact`, `vars`, `event`, `unsubscribeUrl`, …) rejected at `Mailer.init`.
+
+#### Real-contact preview + test sends
+- `POST /api/templates/:slug/preview` accepts `contactId` — renders as a real contact through the adapter with resolved host vars; preview modal cycles contacts with ←/→.
+- `POST /api/templates/:slug/send-test` accepts `contactId` — renders with that contact's data, delivers to the typed address.
+- Both accept `eventProperties` to simulate a trigger event.
+
+#### Delivery windows
+- `delivery` on flow `send` steps: `weekdaysOnly` (Sat/Sun slot → Monday), `timeOfDay: 'HH:mm'` (next local slot, 1-hour grace for tick jitter), `useContactTimezone` + IANA `timezone` fallback (default UTC). Pure Intl math, no new dependency.
+- Runner parks the run (`send_deferred` history action) and re-fires when the window opens; suppression/breaker/subscription still checked at actual send time.
+- Flow editor UI for the window fields.
+
+#### Event-scoped flows
+- Flow runs snapshot the triggering event (`triggerEvent: { name, properties, occurredAt }`).
+- Templates read `{{event.*}}`; `varsAdapter.resolve` receives `info.eventName` / `info.eventProperties` / `info.flowSlug` to scope lookups (account/topic flows for users in many accounts).
+
+### Docs
+- New guide sections: Templates → Host variables, Flows → Event parameters, Flows → Delivery windows; reference updates for the new endpoints and step fields.
+
 ## 0.1.0 — Phase 0 spike
 
 **First working release.** End-to-end pipeline from `mailer.fire()` to a delivered email is functional.

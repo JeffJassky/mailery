@@ -67,7 +67,13 @@ Calling plain `mailer.fire()` inside a transaction is a bug — the event will d
 }
 ```
 
-Properties are passed via the third arg to `fire()`. They're stored as-is and can be used in flow predicates (e.g. `hasFiredEvent: 'Created'` could check property values in a future version).
+Properties are passed via the third arg to `fire()`. When a flow enters from
+the event, the run snapshots `{ name, properties, occurredAt }` — properties
+surface in templates as `{{event.*}}` and in `varsAdapter.resolve` via
+`info.eventProperties`. This is how flows about a *scoped thing* (an account,
+a topic) work for users who belong to many of them: the event carries the
+scope, the person stays the contact. See
+[Flows → Event parameters](./flows#event-parameters-scoped-flows).
 
 ## Naming conventions
 
