@@ -14,6 +14,8 @@ import type {
   MailProvider,
 } from '../shared/types.js'
 import {
+  abortAllFlowsInputSchema,
+  abortFlowInputSchema,
   fireInputSchema,
   registerEventSchema,
   sendOneOffInputSchema,
@@ -44,6 +46,7 @@ import {
 } from './queues/index.js'
 import {
   dispatchSend,
+  exitFlowRun,
   processOneRunStep,
   runTick,
   type RunnerContext,
@@ -436,6 +439,97 @@ export class Mailer {
     } else {
       await this.collections.contactTags.deleteOne({ externalId: parsed.externalId, tag: parsed.tag })
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Flow abort
+  // -------------------------------------------------------------------------
+
+  /**
+   * Abort every active run of one flow for a contact, immediately. Runs parked
+   * in a `wait` exit too — their delayed wake-up jobs find the run exited and
+   * no-op. Also cancels any of the flow's emails still sitting in the send
+   * queue for this contact (queued or awaiting retry), so an abort means no
+   * further mail, not just no further steps.
+   *
+   * No-op (returns zero counts) when nothing is active. Safe to call from the
+   * same handler that processes the business event ("user upgraded").
+   */
+  async abortFlow(
+    flowSlug: string,
+    externalId: string,
+    opts: { reason?: string } = {},
+  ): Promise<{ abortedRuns: number; cancelledSends: number }> {
+    const parsed = abortFlowInputSchema.parse({ flowSlug, externalId, reason: opts.reason })
+    const flow = await this.collections.flows.findOne(
+      { slug: parsed.flowSlug },
+      { projection: { _id: 1 } },
+    )
+    if (!flow) throw new Error(`abortFlow: unknown flow slug "${parsed.flowSlug}"`)
+
+    const result = await this.abortActiveRuns(
+      { externalId: parsed.externalId, flowId: flow._id! },
+      parsed.reason ? `aborted_by_host:${parsed.reason}` : 'aborted_by_host',
+    )
+    if (result.abortedRuns > 0 || result.cancelledSends > 0) {
+      await this.audit({
+        actor: 'host',
+        action: 'flow.abort',
+        resource: { collection: 'mailer_flow_runs', slug: parsed.flowSlug },
+        diffSummary: `abortFlow slug=${parsed.flowSlug} externalId=${parsed.externalId} runs=${result.abortedRuns} sends=${result.cancelledSends}${parsed.reason ? ` reason=${parsed.reason}` : ''}`,
+      })
+    }
+    return result
+  }
+
+  /**
+   * Abort every active flow run for a contact across all flows. Same semantics
+   * as `abortFlow` — for "stop everything" events (account deleted, churned).
+   */
+  async abortAllFlows(
+    externalId: string,
+    opts: { reason?: string } = {},
+  ): Promise<{ abortedRuns: number; cancelledSends: number }> {
+    const parsed = abortAllFlowsInputSchema.parse({ externalId, reason: opts.reason })
+
+    const result = await this.abortActiveRuns(
+      { externalId: parsed.externalId },
+      parsed.reason ? `aborted_by_host:${parsed.reason}` : 'aborted_by_host',
+    )
+    if (result.abortedRuns > 0 || result.cancelledSends > 0) {
+      await this.audit({
+        actor: 'host',
+        action: 'flow.abort_all',
+        resource: { collection: 'mailer_flow_runs' },
+        diffSummary: `abortAllFlows externalId=${parsed.externalId} runs=${result.abortedRuns} sends=${result.cancelledSends}${parsed.reason ? ` reason=${parsed.reason}` : ''}`,
+      })
+    }
+    return result
+  }
+
+  private async abortActiveRuns(
+    filter: { externalId: string; flowId?: ObjectId },
+    exitReason: string,
+  ): Promise<{ abortedRuns: number; cancelledSends: number }> {
+    const runs = await this.collections.flowRuns
+      .find({ ...filter, status: 'active' })
+      .toArray()
+    if (runs.length === 0) return { abortedRuns: 0, cancelledSends: 0 }
+
+    for (const run of runs) {
+      await exitFlowRun(run, exitReason, this.runnerContext)
+    }
+
+    // Exiting the runs stops future steps; this stops mail already produced by
+    // past send steps but not yet dispatched (provider retry backoff, tripped
+    // circuit breaker, stranded-send sweep). 'failed' is included because the
+    // send queue re-dispatches failed sends on retry.
+    const cancelled = await this.collections.sends.updateMany(
+      { flowRunId: { $in: runs.map((r) => r._id!) }, status: { $in: ['queued', 'failed'] } },
+      { $set: { status: 'cancelled', errorMessage: `cancelled: ${exitReason}`, updatedAt: new Date() } },
+    )
+
+    return { abortedRuns: runs.length, cancelledSends: cancelled.modifiedCount }
   }
 
   /**

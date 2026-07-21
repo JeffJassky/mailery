@@ -149,6 +149,17 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
 
   const run = send.flowRunId ? await ctx.collections.flowRuns.findOne({ _id: send.flowRunId }) : null
 
+  // Aborted-run guard: closes the race where a send is enqueued between the
+  // abort's send-cancellation sweep and dispatch. Only host aborts block here —
+  // completed/naturally-exited runs may still have legitimately queued mail.
+  if (run && run.status === 'exited' && run.exitReason?.startsWith('aborted_by_host')) {
+    await ctx.collections.sends.updateOne(
+      { _id: send._id },
+      { $set: { status: 'cancelled', errorMessage: `cancelled: ${run.exitReason}`, updatedAt: new Date() } },
+    )
+    return
+  }
+
   // Resolve host vars + render. A throw here (host DB hiccup, bad template)
   // marks the send failed and rethrows so the queue retries with backoff —
   // never dispatch a half-rendered email.

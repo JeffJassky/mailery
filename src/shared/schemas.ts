@@ -84,6 +84,16 @@ export const tagInputSchema = z.object({
 })
 export type TagInput = z.infer<typeof tagInputSchema>
 
+export const abortFlowInputSchema = z.object({
+  flowSlug: slugSchema,
+  externalId: externalIdSchema,
+  reason: z.string().min(1).max(200).optional(),
+})
+export type AbortFlowInput = z.infer<typeof abortFlowInputSchema>
+
+export const abortAllFlowsInputSchema = abortFlowInputSchema.omit({ flowSlug: true })
+export type AbortAllFlowsInput = z.infer<typeof abortAllFlowsInputSchema>
+
 export const sendOneOffInputSchema = z.object({
   templateSlug: slugSchema,
   externalId: externalIdSchema,

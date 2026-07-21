@@ -15,6 +15,7 @@ export type SendStatus =
   | 'complained'
   | 'failed'
   | 'suppressed'
+  | 'cancelled'
 
 export type TemplateKind = 'transactional' | 'marketing'
 

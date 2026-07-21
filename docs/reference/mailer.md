@@ -133,6 +133,41 @@ untag(externalId: string, tag: string): Promise<void>
 
 Adds / removes a tag. Routes through `adapter.addTags` / `removeTags` if defined; otherwise writes to `mailer_contact_tags`.
 
+## Flow abort
+
+### `abortFlow(flowSlug, externalId, opts?)`
+
+```ts
+abortFlow(
+  flowSlug: string,
+  externalId: string,
+  opts?: { reason?: string },
+): Promise<{ abortedRuns: number; cancelledSends: number }>
+```
+
+Aborts every active run of the flow for that contact, immediately. Exits the runs (`exitReason: 'aborted_by_host:<reason>'`) — including runs parked in a `wait`, whose delayed wake-up then no-ops — and cancels any of the flow's emails still sitting undispatched in the send queue (`queued`, or `failed` awaiting retry → `cancelled`). Writes an audit row (`flow.abort`).
+
+Call it from the same handler that processes the business event:
+
+```ts
+// user upgraded — stop the trial sequences
+await mailer.abortFlow('trial-onboarding', userId, { reason: 'upgraded' })
+await mailer.abortFlow('trial-winback', userId, { reason: 'upgraded' })
+```
+
+No-op (zero counts) when nothing is active. Throws on an unknown `flowSlug`. Note: a flow with `trigger: { once: true }` will not re-enter for a contact with any prior run, aborted included.
+
+### `abortAllFlows(externalId, opts?)`
+
+```ts
+abortAllFlows(
+  externalId: string,
+  opts?: { reason?: string },
+): Promise<{ abortedRuns: number; cancelledSends: number }>
+```
+
+Same semantics with no flow filter — exits every active run for the contact across all flows (audit action `flow.abort_all`). For "stop everything" events: account deleted, churned.
+
 ## GDPR
 
 ### `forget(externalId)`

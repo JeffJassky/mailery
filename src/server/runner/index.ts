@@ -39,7 +39,7 @@ export interface RunnerContext {
 }
 
 export { runTick } from './tick.js'
-export { processOneRunStep } from './step.js'
+export { processOneRunStep, exitFlowRun } from './step.js'
 export { dispatchSend } from './send.js'
 export { processNewlyFiredEventTriggers } from './triggers.js'
 export { sweepStrandedFlowRuns } from './sweep.js'
