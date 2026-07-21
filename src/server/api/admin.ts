@@ -1408,6 +1408,13 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         })
       }
 
+      // Script-seeded templates can have no draft source at all (body.html +
+      // body.plainText inserted directly, editorJson/mjml empty). Fall back to
+      // the stored body so lint judges what actually sends instead of
+      // reporting an empty template.
+      if (!html && typeof tpl.body?.html === 'string') html = tpl.body.html
+      if (!plainText && typeof tpl.body?.plainText === 'string') plainText = tpl.body.plainText
+
       const lint = lintTemplate(
         { subject, preheader, mjml, editorJson, html, plainText, kind, fromEmail },
         { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },

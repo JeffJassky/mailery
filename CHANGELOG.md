@@ -26,6 +26,10 @@
 - Flow runs snapshot the triggering event (`triggerEvent: { name, properties, occurredAt }`).
 - Templates read `{{event.*}}`; `varsAdapter.resolve` receives `info.eventName` / `info.eventProperties` / `info.flowSlug` to scope lookups (account/topic flows for users in many accounts).
 
+### Fixed
+- Live lint no longer reports `missing_plain_text` (and friends) for script-seeded / MJML templates: the editor stops sending its placeholder empty Maily doc for non-Maily templates, and the lint endpoint falls back to the stored `body.html` / `body.plainText` when the draft has no compilable source.
+- Save-draft/publish on a non-Maily template no longer risks clobbering the body with an empty Maily doc — the draft carries the MJML source forward instead.
+
 ### Docs
 - New guide sections: Templates → Host variables, Flows → Event parameters, Flows → Delivery windows; reference updates for the new endpoints and step fields.
 

@@ -44,6 +44,12 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const [busy, setBusy] = React.useState(false)
   const editorRef = React.useRef<TiptapEditor | null>(null)
   const hydratedRef = React.useRef(false)
+  // True only when the template has a real Maily doc (hydrated or user-edited
+  // in Design). MJML/script-seeded templates must NOT send the editor's
+  // placeholder EMPTY_DOC — the server would compile it (empty) instead of
+  // falling back to the MJML / stored body, breaking lint and, worse,
+  // clobbering the body on publish.
+  const [isMailyAuthored, setIsMailyAuthored] = React.useState(false)
 
   // Vars schema — drives subject/preheader autocomplete + the Variables card.
   const { data: varsData } = useLive(() => api.varsSchema(), [])
@@ -169,7 +175,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const lint = useLiveLint(slug, {
     subject,
     preheader,
-    editorJson: editorJson as Record<string, unknown> | null,
+    editorJson: isMailyAuthored ? (editorJson as Record<string, unknown>) : null,
     fromEmail: fromEmail || tpl.fromEmail,
     kind: tplKind,
   })
@@ -179,7 +185,10 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
     if (hydratedRef.current) return
     hydratedRef.current = true
     const incoming = tpl.draft?.editorJson ?? tpl.body?.editorJson
-    if (incoming) setEditorJson(incoming)
+    if (incoming) {
+      setEditorJson(incoming)
+      setIsMailyAuthored(true)
+    }
   }, [tpl])
 
   async function saveDraft() {
@@ -187,7 +196,9 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
     await api.updateTemplateDraft(slug, {
       subject,
       preheader,
-      editorJson,
+      // Maily templates save the doc; MJML/seeded templates carry their MJML
+      // source forward instead so publish recompiles the real content.
+      ...(isMailyAuthored ? { editorJson } : mjmlSource ? { mjml: mjmlSource } : {}),
       fromName: fromName || undefined,
       fromEmail: fromEmail || undefined,
       replyTo: replyTo || undefined,
@@ -269,6 +280,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
                 onUpdate={(editor) => {
                   editorRef.current = editor
                   setEditorJson(editor.getJSON())
+                  setIsMailyAuthored(true)
                   setDirty(true)
                 }}
                 config={{
