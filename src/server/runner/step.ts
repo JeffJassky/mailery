@@ -36,8 +36,11 @@ export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Pr
     return
   }
 
-  // Marketing-flow subscription gate. Transactional sends bypass this at
-  // send-step level (re-checked there).
+  // Subscription gate: flows are marketing-scope. Any non-subscribed status
+  // exits the run before the next step, regardless of template kind — there is
+  // deliberately no transactional bypass here. Transactional mail that must
+  // reach not-subscribed contacts (receipts, password resets) goes through
+  // sendOneOff, not a flow. Entry is gated the same way in triggers.ts.
   const sub = await ctx.collections.subscriptions.findOne({ externalId: run.externalId })
   if (sub && sub.status !== 'subscribed') {
     await exitFlowRun(run, sub.status, ctx)
