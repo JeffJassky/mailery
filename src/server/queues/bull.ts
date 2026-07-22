@@ -58,7 +58,16 @@ export class BullDriver implements QueueDriver {
   private constructor(bull: BullModule, redis: IORedis) {
     this.bull = bull
     this.redis = redis
-    const opts = { connection: redis }
+    // Bounded retention: completed/failed jobs must not accumulate in Redis
+    // forever. Completed jobs also need to leave promptly so jobId-based
+    // idempotent re-adds aren't dropped against a stale completed job.
+    const opts = {
+      connection: redis,
+      defaultJobOptions: {
+        removeOnComplete: { age: 24 * 3600, count: 1000 },
+        removeOnFail: { age: 7 * 24 * 3600 },
+      },
+    }
     this.bullQueues = {
       tick: new bull.Queue(QUEUE_NAMES.tick, opts),
       advance: new bull.Queue(QUEUE_NAMES.advance, opts),
@@ -77,7 +86,11 @@ export class BullDriver implements QueueDriver {
     await (this.bullQueues.tick as any).upsertJobScheduler(
       'mailer-tick-repeat',
       { every: intervalSeconds * 1000 },
-      { name: 'tick', data: {} },
+      {
+        name: 'tick',
+        data: {},
+        opts: { removeOnComplete: { count: 20 }, removeOnFail: { count: 50 } },
+      },
     )
   }
 
