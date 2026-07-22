@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.8.0 — Test system, Mail-Tester `requireScore`
+
+### Added
+
+#### Three-tier end-to-end test system
+- **Fast matrix** (`test/matrix`) — offline, real in-memory MongoDB, frozen clock. Systematic coverage of variable rendering (contact fields, `{{event.*}}`, step vars, `varsAdapter` root keys, `unsubscribeUrl`, built-in and host helpers), the html/plain-text pair and tracking rewrites, delivery windows (time-of-day slots and grace, weekday gating, contact-timezone resolution and fallback chain, DST edges), and the full flow lifecycle (every step type, abort, mid-flow unsubscribe, suppression, idempotency).
+- **Real-clock gating** (`test/longhorizon`) — the same delivery gating with no fake clock, deriving expectations from the day it runs on.
+- **Live SendGrid tier** (`test/live`) — provider-adapter axes against the real API, gated on `MAILERY_LIVE_E2E`. Sandbox by default (real auth and payload validation, nothing delivered); the deliver path reads the message back over Gmail IMAP to confirm the multipart/alternative, headers, unicode subject and link handling survive.
+- **Scheduled workflow** (`.github/workflows/live-e2e.yml`) — hourly and weekend crons so the real calendar supplies the axes that cannot be compressed, plus a `libfaketime` job for multi-day waits.
+
+#### `mailery/testing` additions
+- `buildTemplate(spec)` / `buildFlow(spec)` and the `step` shorthands — every required document field defaulted, so a fixture states only what it asserts on.
+- `drain(ctx, opts?)` and `harness.drain()` — run the runner to quiescence instead of hand-sequencing `runTick` / `processOneRunStep` / `dispatchSend`.
+- `RecordingProvider` — wraps any provider, records every `SendArgs`; the harness always applies it, so `provider.sent` works whether you run against `NullProvider` or real SendGrid.
+- Harness helpers `seedContact`, `seedTemplate`, `seedFlow`, `ctx`, plus `provider: 'null' | 'sendgrid' | MailProvider`, `queue` and `startWorkers` options.
+
+#### Mail-Tester `requireScore`
+- `mailTester.requireScore` (default `false`) — when `true`, publishing content that has never been scored is blocked, not just content already known to score below `minScore`. Without it, any edit changed the content key, missed the cache and published freely.
+- The `mail_tester_blocked` response carries a `code` distinguishing "scored too low" from "never scored", with the matching next step in `hint`.
+- `GET /api/templates/:slug/mail-tester-status` returns `requireScore`; the editor warns when publish is gated on an unscored body.
+
+### Changed
+- **`List-Unsubscribe` is sent on marketing mail only.** The unsubscribe token is scoped `marketing`, so advertising one-click unsubscribe on a transactional send misrepresented the header and offered an opt-out that would not stop the mail in question.
+- Admin client errors now surface the server's `message` and `hint` instead of the bare status line, so a refused publish explains itself.
+
+## 0.7.0 — Flow abort primitives
+
+### Added
+- `mailer.abortFlow(flowSlug, externalId, { reason })` and `mailer.abortAllFlows(externalId, { reason })` — exit active runs immediately, including runs parked in a `wait`, and cancel the flow's queued or retrying sends so an abort means no further mail rather than just no further steps. Both are no-ops when nothing is active, and a dispatch-time guard closes the race where a send was enqueued between the cancellation sweep and dispatch.
+
+### Fixed
+- Linter no longer reports a false `missing_plain_text` on script-seeded templates.
+
 ## 0.6.0 — Host variables, delivery windows, event-scoped flows
 
 ### Added
