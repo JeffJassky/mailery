@@ -12,8 +12,32 @@ async function json<T = unknown>(input: string, init?: RequestInit): Promise<T> 
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     ...init,
   })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  if (!res.ok) throw await apiError(res)
   return res.json() as Promise<T>
+}
+
+/**
+ * Build an Error carrying the server's own explanation. Endpoints that refuse
+ * a request (lint errors, the Mail-Tester gate, sender-domain checks) return
+ * `{ error, message, hint }`; surfacing "422 Unprocessable Entity" instead
+ * loses the one thing the operator needs to act on. `body` is attached so a
+ * caller can branch on `error` / `code` when it wants richer UI.
+ */
+async function apiError(res: Response): Promise<Error> {
+  let body: any = null
+  try {
+    body = await res.json()
+  } catch {
+    /* non-JSON error body — fall back to the status line */
+  }
+  const detail = [body?.message, body?.hint].filter(Boolean).join(' ')
+  const err = new Error(detail || `${res.status} ${res.statusText}`) as Error & {
+    status?: number
+    body?: unknown
+  }
+  err.status = res.status
+  err.body = body
+  return err
 }
 
 export const api = {
@@ -194,6 +218,8 @@ export interface MailTesterScore {
 export interface MailTesterStatusResponse {
   configured: boolean
   minScore: number
+  /** When true, publishing content with no score is refused, not just a low one. */
+  requireScore: boolean
   cacheHours: number
   score: MailTesterScore | null
 }

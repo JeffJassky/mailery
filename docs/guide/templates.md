@@ -131,13 +131,21 @@ How it behaves:
 - Return type is checked against `z.infer<typeof schema>` — typos in `resolve`
   fail at compile time.
 
-### Built-in helpers
+### Built-in variables
 
-| Helper | Use | Example |
+Render-context values, not helpers — reference them directly. They're reserved
+keys, so a `varsAdapter` schema can't declare them.
+
+| Variable | Use | Example |
 |---|---|---|
 | `unsubscribeUrl` | One-click unsub link for this send | `<a href="{{unsubscribeUrl}}">Unsubscribe</a>` |
 | `preferenceCenterUrl` | Per-contact preferences (when implemented) | `{{preferenceCenterUrl}}` |
 | `senderAddress` | The CAN-SPAM postal address from config | `{{senderAddress}}` |
+
+### Built-in helpers
+
+| Helper | Use | Example |
+|---|---|---|
 | `formatDate` | Locale-aware date | `{{formatDate vars.expiresAt 'long'}}` → "May 15, 2026" |
 | `pluralize` | English-only pluralization | `{{pluralize vars.count 'shot' 'shots'}}` |
 | `formatCurrency` | Currency from cents | `{{formatCurrency vars.amountCents 'usd'}}` |

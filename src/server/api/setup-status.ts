@@ -544,7 +544,7 @@ async function checkPostalAddress(mailer: Mailer): Promise<SetupCheck> {
     label: 'CAN-SPAM postal address',
     severity: 'warn',
     message: `${marketingCount} published marketing template${marketingCount === 1 ? '' : 's'} but senderAddress is unset`,
-    hint: 'CAN-SPAM requires a postal address in marketing emails. Set `senderAddress` in your Mailer config and reference it via `{{senderAddress}}` in your templates.',
+    hint: 'CAN-SPAM requires a postal address in marketing emails. Set `senderAddress` in your Mailer config and reference the `{{senderAddress}}` render variable in your templates.',
   }
 }
 

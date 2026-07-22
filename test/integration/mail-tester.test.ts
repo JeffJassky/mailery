@@ -54,10 +54,10 @@ afterAll(async () => {
   if (H) await H.stop()
 })
 
-function send(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+function sendTo(base: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
     const data = body != null ? JSON.stringify(body) : ''
-    const req = request(`${baseUrl}${path}`, {
+    const req = request(`${base}${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
     }, (res) => {
@@ -73,6 +73,7 @@ function send(method: string, path: string, body?: unknown): Promise<{ status: n
     req.end()
   })
 }
+const send = (method: string, p: string, b?: unknown) => sendTo(baseUrl, method, p, b)
 const post = (p: string, b?: unknown) => send('POST', p, b)
 const patch = (p: string, b: unknown) => send('PATCH', p, b)
 const get = (p: string) => send('GET', p)
@@ -200,6 +201,86 @@ describe('Mail-Tester publish gate', () => {
     const start = await post('/admin/mailer/api/templates/mt-good/mail-tester-check')
     await get(`/admin/mailer/api/templates/mt-good/mail-tester-result?checkId=${start.body.checkId}&contentKey=${start.body.contentKey}`)
     const pub = await post('/admin/mailer/api/templates/mt-good/publish')
+    expect(pub.status).toBe(200)
+  })
+})
+
+/**
+ * `requireScore: true` turns the ratchet into a real gate: unchecked content
+ * is refused, and because the content key covers body + subject + fromEmail,
+ * editing after a check invalidates the score rather than slipping past it.
+ */
+describe('Mail-Tester publish gate — requireScore', () => {
+  let H2: TestMailerHarness
+  let srv: ReturnType<express.Express['listen']>
+  let url2: string
+
+  beforeAll(async () => {
+    H2 = await createTestMailer({
+      config: {
+        senderDomains: { 'news.example.com': { kind: 'marketing' } },
+        fromDefaults: { name: 'Test', email: 'hello@news.example.com' },
+        mailTester: { apiKey: 'mt-test', minScore: 8.0, cacheHours: 24, requireScore: true },
+      },
+    })
+    const app = express()
+    app.use(express.json())
+    app.use('/admin/mailer', createAdminRouter(H2.mailer, { mailTesterClient: client }))
+    srv = app.listen(0)
+    url2 = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`
+  }, 60_000)
+
+  afterAll(async () => {
+    srv?.close()
+    if (H2) await H2.stop()
+  })
+
+  const send2 = (method: string, path: string, body?: unknown) =>
+    sendTo(url2, method, path, body)
+
+  async function makeTemplate2(slug: string) {
+    await send2('POST', '/admin/mailer/api/templates', {
+      slug, name: slug, kind: 'marketing', fromEmail: 'hello@news.example.com',
+    })
+    await send2('PATCH', `/admin/mailer/api/templates/${slug}/draft`, DRAFT)
+  }
+
+  it('blocks publish when the content has never been checked', async () => {
+    await makeTemplate2('mtr-unchecked')
+    const pub = await send2('POST', '/admin/mailer/api/templates/mtr-unchecked/publish')
+    expect(pub.status).toBe(422)
+    expect(pub.body.error).toBe('mail_tester_blocked')
+    expect(pub.body.code).toBe('no_score')
+    expect(pub.body.score).toBeNull()
+    expect(pub.body.hint).toContain('mail-tester-check')
+  })
+
+  it('allows publish once a passing score exists for that content', async () => {
+    await makeTemplate2('mtr-checked')
+    stub.resultReturns = { ready: true, score: 9.1, feedback: [], rawSummary: null }
+    const start = await send2('POST', '/admin/mailer/api/templates/mtr-checked/mail-tester-check')
+    await send2('GET', `/admin/mailer/api/templates/mtr-checked/mail-tester-result?checkId=${start.body.checkId}&contentKey=${start.body.contentKey}`)
+
+    const pub = await send2('POST', '/admin/mailer/api/templates/mtr-checked/publish')
+    expect(pub.status).toBe(200)
+  })
+
+  it('re-blocks after an edit invalidates the score', async () => {
+    await makeTemplate2('mtr-edited')
+    stub.resultReturns = { ready: true, score: 9.1, feedback: [], rawSummary: null }
+    const start = await send2('POST', '/admin/mailer/api/templates/mtr-edited/mail-tester-check')
+    await send2('GET', `/admin/mailer/api/templates/mtr-edited/mail-tester-result?checkId=${start.body.checkId}&contentKey=${start.body.contentKey}`)
+
+    // Same body, different subject → different content key → cache miss.
+    await send2('PATCH', '/admin/mailer/api/templates/mtr-edited/draft', { ...DRAFT, subject: 'Welcome to our newsletter!' })
+    const pub = await send2('POST', '/admin/mailer/api/templates/mtr-edited/publish')
+    expect(pub.status).toBe(422)
+    expect(pub.body.code).toBe('no_score')
+  })
+
+  it('still honours bypassMailTester', async () => {
+    await makeTemplate2('mtr-bypass')
+    const pub = await send2('POST', '/admin/mailer/api/templates/mtr-bypass/publish', { bypassMailTester: true })
     expect(pub.status).toBe(200)
   })
 })

@@ -175,36 +175,63 @@ export interface MailTesterGateResult {
   reason: string | null
   /** The cached score (if one exists for the content being published). */
   score: MailTesterScoreDoc | null
+  /**
+   * Why the gate blocked, for callers that render different guidance:
+   *  - 'low_score'   — a score exists and is below minScore
+   *  - 'no_score'    — requireScore is on and this content was never checked
+   * Null when allowed.
+   */
+  code: 'low_score' | 'no_score' | null
 }
 
 /**
- * Check whether a publish is allowed under the Mail-Tester gate. The gate
- * only blocks when:
- *   - Mail-Tester is configured AND
- *   - There exists a non-expired cached score for this exact content AND
- *   - That score is below minScore
+ * Check whether a publish is allowed under the Mail-Tester gate.
  *
- * No cached score = silent pass. The operator must run a check explicitly;
- * we never auto-trigger one at publish time.
+ * Default mode (`requireScore` unset/false) blocks only content already known
+ * to score below `minScore`. That is a ratchet on known-bad content, not a
+ * gate: the content key covers body + subject + fromEmail, so any edit misses
+ * the cache and publishes freely — a failing score is one whitespace change
+ * away from irrelevant.
+ *
+ * With `requireScore: true`, a cache miss blocks too, so every publish is
+ * backed by a score for that exact content. Costs one Mail-Tester credit per
+ * content revision. Either mode is overridable per-request with
+ * `bypassMailTester: true`.
+ *
+ * We never auto-trigger a check at publish time — that would send mail as a
+ * side effect of a publish request.
  */
 export async function evaluateMailTesterGate(
   ctx: RunnerContext,
   input: { bodyHash: string; subject: string; fromEmail: string },
 ): Promise<MailTesterGateResult> {
   const cfg = ctx.config.mailTester
-  if (!cfg?.apiKey) return { allowed: true, reason: null, score: null }
+  if (!cfg?.apiKey) return { allowed: true, reason: null, score: null, code: null }
 
   const minScore = cfg.minScore ?? 8.0
   const key = mailTesterContentKey(input)
   const cached = await findCachedScore(ctx, key)
-  if (!cached) return { allowed: true, reason: null, score: null }
+
+  if (!cached) {
+    if (cfg.requireScore) {
+      return {
+        allowed: false,
+        reason:
+          'No Mail-Tester score for this exact content. Run a deliverability check before publishing.',
+        score: null,
+        code: 'no_score',
+      }
+    }
+    return { allowed: true, reason: null, score: null, code: null }
+  }
 
   if (cached.score < minScore) {
     return {
       allowed: false,
       reason: `Mail-Tester score ${cached.score.toFixed(1)} is below minimum ${minScore.toFixed(1)}`,
       score: cached,
+      code: 'low_score',
     }
   }
-  return { allowed: true, reason: null, score: cached }
+  return { allowed: true, reason: null, score: cached, code: null }
 }

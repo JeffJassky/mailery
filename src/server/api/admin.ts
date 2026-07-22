@@ -1231,6 +1231,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
       res.json({
         configured,
         minScore: cfg?.minScore ?? 8.0,
+        requireScore: !!cfg?.requireScore,
         cacheHours: cfg?.cacheHours ?? 24,
         score: cached,
       })
@@ -1488,9 +1489,10 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         })
       }
 
-      // Mail-Tester gate — only blocks when configured AND a cached score for
-      // this exact content exists AND that score is below minScore. Operator
-      // can override with `bypassMailTester: true` in the request body.
+      // Mail-Tester gate. Blocks when a cached score for this exact content is
+      // below minScore, and — when `requireScore` is configured — when no score
+      // for this content exists at all. Operator can override either with
+      // `bypassMailTester: true` in the request body.
       const bypass = Boolean(req.body?.bypassMailTester)
       if (!bypass) {
         const gate = await evaluateMailTesterGate(mailer.getRunnerContext(), {
@@ -1501,9 +1503,13 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         if (!gate.allowed) {
           return res.status(422).json({
             error: 'mail_tester_blocked',
+            code: gate.code,
             message: gate.reason,
             score: gate.score,
-            hint: 'Re-run the deliverability check after fixing the feedback, or POST `bypassMailTester: true` to publish anyway.',
+            hint:
+              gate.code === 'no_score'
+                ? 'POST to `/templates/:slug/mail-tester-check`, poll `/mail-tester-result`, then publish — or POST `bypassMailTester: true` to publish anyway.'
+                : 'Re-run the deliverability check after fixing the feedback, or POST `bypassMailTester: true` to publish anyway.',
           })
         }
       }

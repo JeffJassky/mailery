@@ -193,7 +193,7 @@ body: {
 ```
 
 ### `POST /api/templates/:slug/publish`
-Publish the saved draft. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` if a cached Mail-Tester score is below `minScore`. Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
+Publish the saved draft. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` when a cached Mail-Tester score is below `minScore` (`code: 'low_score'`), or — with `mailTester.requireScore` enabled — when the content has no score at all (`code: 'no_score'`, `score: null`). Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
 
 ```ts
 body?: { bypassMailTester?: boolean }

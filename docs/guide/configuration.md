@@ -38,7 +38,7 @@ await Mailer.init({
 })
 ```
 
-- `senderAddress` — your postal address, required by CAN-SPAM for marketing email. Configure your templates to use the `{{senderAddress}}` Handlebars helper to inject it into footers.
+- `senderAddress` — your postal address, required by CAN-SPAM for marketing email. Exposed to templates as the `{{senderAddress}}` render variable — reference it in your footers.
 - `fromDefaults` — global default From identity (overridable per template).
 - `transactionalFromDefaults` — distinct From for transactional emails. Recommended for reputation isolation.
 - `defaultTransactionalProvider` — route transactional templates through a provider optimized for inbox placement (Postmark), while marketing goes through one optimized for volume (SendGrid).
@@ -225,13 +225,21 @@ Tags merge with the mutable `mailer_dmarc_source_tags` collection that the admin
   mailTester: {
     apiKey: process.env.MAIL_TESTER_API_KEY!,
     minScore: 8.0,                       // default — publish blocks when below
+    requireScore: false,                 // default — see below
     cacheHours: 24,                      // re-running same content within window is a no-op
     baseUrl: 'https://mail-tester.com/api',  // override for staging
   },
 }
 ```
 
-Enables the deliverability-check card in the template editor. Each check sends one real email via the default provider and consumes one Mail-Tester credit. Cache key is `(bodyHash, subject, fromEmail)`. See [Deliverability → Mail-Tester integration](./deliverability#mail-tester-integration-optional).
+Enables the deliverability-check card in the template editor. Each check sends one real email via the default provider and consumes one Mail-Tester credit. Cache key is `(bodyHash, subject, fromEmail)`.
+
+`requireScore` decides how strict the publish gate is:
+
+- **`false` (default)** — only content with a cached score *below* `minScore` is blocked. Unchecked content publishes freely, and since the cache key covers the body, subject and From address, any edit misses the cache and publishes too. A ratchet on known-bad content, not a gate.
+- **`true`** — a cache miss blocks as well (`422`, `code: 'no_score'`). Every publish is then backed by a score for that exact content, at the cost of one credit per content revision.
+
+`bypassMailTester: true` on the publish call overrides both. See [Deliverability → Mail-Tester integration](./deliverability#mail-tester-integration-optional).
 
 ## Host variables (varsAdapter)
 

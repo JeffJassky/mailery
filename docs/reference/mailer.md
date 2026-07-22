@@ -327,6 +327,7 @@ interface MailerConfig {
   mailTester?: {
     apiKey: string
     minScore?: number                      // default 8.0
+    requireScore?: boolean                 // default false — true also blocks never-checked content
     cacheHours?: number                    // default 24
     baseUrl?: string                       // override for staging
   }

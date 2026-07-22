@@ -667,6 +667,12 @@ function MailTesterCard({ slug, refetchTemplate }: { slug: string; refetchTempla
         {error && (
           <div className="text-xs" style={{ color: 'var(--red-fg)' }}>{error}</div>
         )}
+        {status?.configured && status.requireScore && !currentScore && (
+          <div className="text-xs" style={{ color: 'var(--amber-fg)' }}>
+            <code>requireScore</code> is on — publish is blocked until this exact content has a
+            score. Editing the subject or body after a check invalidates it.
+          </div>
+        )}
         {currentScore && (
           <>
             <div className="hstack" style={{ gap: 16, alignItems: 'baseline' }}>

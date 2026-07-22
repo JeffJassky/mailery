@@ -61,6 +61,14 @@ export interface MailTesterConfig {
   /** Minimum score (0-10) below which publish is blocked. Default 8.0. */
   minScore?: number
   /**
+   * When true, publishing content that has no cached score is blocked too —
+   * the operator must run a deliverability check for that exact content first.
+   * Default false, which only blocks content already known to score below
+   * `minScore`; in that mode any edit (even whitespace) changes the content
+   * key, misses the cache, and publishes freely.
+   */
+  requireScore?: boolean
+  /**
    * How long a successful score remains cached for the same content. Default 24.
    * Re-publishing the same body within the window does not burn a credit.
    */

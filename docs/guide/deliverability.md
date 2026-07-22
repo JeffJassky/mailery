@@ -126,7 +126,7 @@ After domain auth, the next deliverability levers in order of impact:
 | **Per-(sender domain × kind) circuit breaker** auto-trip on high bounce / complaint rates | ✓ |
 | **GDPR-forget hashed suppression** so re-imports don't email deleted users | ✓ |
 | **Plain-text auto-derivation** sent alongside HTML (spam filters check both) | ✓ |
-| **CAN-SPAM postal address** Handlebars helper | ✓ |
+| **CAN-SPAM postal address** `{{senderAddress}}` render variable + setup-status check | ✓ |
 | **DNSBL monitoring** of sender domains + dedicated IPs (Spamhaus, SURBL, URIBL, Barracuda, SORBS, SpamCop) | ✓ |
 | **Google Postmaster Tools pull** (when configured) — daily reputation tier + spam rate per domain | ✓ |
 | **Microsoft SNDS pull** (when configured) — per-IP filter verdict + complaint rate | ✓ |
@@ -486,9 +486,26 @@ await Mailer.init({
   mailTester: {
     apiKey: process.env.MAIL_TESTER_API_KEY!,
     minScore: 8.0,
+    requireScore: true,   // refuse to publish content that was never checked
     cacheHours: 24,
   },
 })
 ```
+
+### How strict the gate is
+
+By default the gate only stops content already known to be bad. Because the
+cache key is `(bodyHash, subject, fromEmail)`, editing a template after a
+failing score produces a new key, misses the cache, and publishes — a 4.2 is
+one whitespace change away from irrelevant.
+
+Set `requireScore: true` to close that: an unchecked content revision is
+refused with `422 { error: 'mail_tester_blocked', code: 'no_score' }` and the
+operator must run a check first. Budget one credit per content revision you
+intend to publish. A score below `minScore` still returns `code: 'low_score'`
+with the cached score attached, and `bypassMailTester: true` overrides both.
+
+Mailery never auto-triggers a check during publish — that would send real mail
+as a side effect of a publish request.
 
 Each check sends one real email through your provider — audit-logged. Skip the integration if you don't have a Mail-Tester paid plan; the publish path is silent when not configured.

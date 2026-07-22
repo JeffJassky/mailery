@@ -211,6 +211,18 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     return
   }
 
+  // List-Unsubscribe belongs on bulk mail only. The unsubscribe token is
+  // scoped 'marketing', so advertising one-click unsub on a password reset
+  // both misrepresents the header and offers an opt-out that wouldn't stop
+  // the transactional mail the recipient is looking at.
+  const headers: Record<string, string> =
+    send.kind === 'marketing'
+      ? {
+          'List-Unsubscribe': `<${renderCtx.unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        }
+      : {}
+
   try {
     const result = await provider.send({
       to: send.emailAtSend,
@@ -220,10 +232,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       subject: rendered.subject,
       html: tracking.html,
       text: rendered.plainText,
-      headers: {
-        'List-Unsubscribe': `<${renderCtx.unsubscribeUrl}>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      },
+      headers,
       messageMeta: { sendId: String(send._id) },
     })
 
