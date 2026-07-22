@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.8.1 — Queue and scheduling correctness
+
+A full review of the queue drivers and runner turned up a set of scheduling and
+concurrency defects. All are fixed here; no API changes.
+
+### Fixed
+
+- **Event triggers could be skipped permanently.** The trigger scan
+  watermarked on `occurredAt`, so an event committed "in the past" — an
+  outbox-drained `fireFromSession` event carrying its host-transaction
+  timestamp, or a `fire()` racing an in-flight scan — fell behind the watermark
+  and never started its flow. The scan now watermarks on `createdAt` with a
+  30-second overlap window, deduped by a unique partial
+  `(flowId, triggerDedupeKey)` index on flow runs.
+- **Webhook events could be applied more than once.** Concurrent webhook
+  workers scanned the same unprocessed batch, double-counting opens, clicks,
+  bounces and complaints — inflated bounce rates could trip the circuit
+  breaker. Workers now claim each event atomically before applying.
+- **Crash recovery could deliver an email twice.** The stranded-send sweep and
+  the queue's stalled-job retry can both fire a job for the same send, and the
+  status check was read-then-act. `dispatchSend` now claims the send
+  atomically; exactly one dispatcher proceeds.
+- **A large broadcast froze the tick for its whole duration.** Recipient
+  enqueue ran inline in the single-concurrency tick, starving trigger scans and
+  sweeps for hours on big segments. Dispatch now runs as a queue job (inline
+  under the `noop` driver, which has no workers), heartbeats progress, and a
+  new tick-side sweep resumes broadcasts whose dispatcher died — resumption is
+  idempotent via per-recipient dedupe keys.
+- **Agenda driver: ticks could be silently swallowed.** `Mailer.init` started
+  Agenda with a placeholder no-op tick handler; a process that never called
+  `startWorkers` (an API-only process in a web/worker split) locked and
+  completed real tick jobs doing nothing. Agenda now starts only in
+  `startWorkers`, after the real handlers are defined.
+- **BullMQ: completed and failed jobs accumulated in Redis forever.** Queues
+  now set bounded retention (`removeOnComplete`: 24 h / 1000 jobs,
+  `removeOnFail`: 7 days). This also un-poisons jobId-based idempotent re-adds
+  that were dropped against stale completed jobs.
+- **Delayed wake-ups could collide across branches.** Advance jobIds used
+  `(runId, stepIndex)`, but `currentStepIndex` resets to 0 on branch entry, so
+  a wait step inside a branch could be deduped against an earlier step's
+  completed job and stall until the sweep rescued it. JobIds now include the
+  branch path.
+- **Agenda driver: a custom `collectionName` broke queue counts and dedupe.**
+  Internal reads hardcoded `_mailerJobs` regardless of the configured name,
+  so `getWaitingCount` returned 0 (disabling broadcast backpressure) and
+  jobId dedupe never matched.
+- **Stranded webhook events are now drained by the tick.** If the queue add
+  failed at ingest, webhook events sat unprocessed until the next webhook
+  happened to arrive. The tick now applies rows older than 5 minutes.
+- **`sendOneOff` no longer throws on a concurrent duplicate.** Two calls
+  racing on the same `dedupeKey` returned E11000 to one caller; it now returns
+  the winner's `sendId`.
+- **Tracked link URLs with HTML entities decode correctly.**
+
+### Changed
+
+- **`respectRecipientTimezone` broadcasts: recipients east of the schedule
+  timezone now get the next occurrence of the wall-clock slot** (same time
+  next day) instead of a mistimed immediate send — delays can only push
+  forward, and their local slot has already passed when dispatch starts.
+  Per-recipient delays also anchor to `scheduledAt`, so backpressure pauses no
+  longer drift later batches.
+- **`bullmq` peer range narrowed to `^5.16.0`.** The driver has always called
+  `upsertJobScheduler` (added in 5.16); the old `^5.0.0` range admitted
+  versions that crashed at init.
+- Two Mongo indexes are added automatically at init: `(name, createdAt)` on
+  events and the unique partial `(flowId, triggerDedupeKey)` on flow runs.
+  The unique index only applies to new runs (legacy docs lack the field), so
+  existing deployments upgrade without migration.
+
 ## 0.8.0 — Test system, Mail-Tester `requireScore`
 
 ### Added
