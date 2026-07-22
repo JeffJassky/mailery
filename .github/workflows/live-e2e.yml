@@ -1,0 +1,150 @@
+name: Live E2E
+
+# Tiers 2 and 3 of the test system. The fast matrix (tier 1) runs in ci.yml on
+# every push and needs none of this.
+#
+# The crons exist because some axes cannot be compressed: a "weekdays only"
+# delivery gate can only be exercised for real ON a weekend, and a time-of-day
+# slot only near that hour. Rather than fake the clock, the schedule is chosen
+# so the real calendar supplies the axis. The faketime job covers what even
+# that cannot reach — multi-day waits.
+#
+# Required secrets:
+#   SENDGRID_API_KEY     — sandbox jobs authenticate with it but deliver nothing
+#   SENDGRID_FROM_EMAIL  — a sender domain authenticated in SendGrid
+#   GMAIL_USERNAME       — inbox for delivered-mail assertions (deliver job only)
+#   GMAIL_PASSWORD       — app password for that account (2FA required)
+
+on:
+  schedule:
+    # Hourly — time-of-day slot boundaries against the real current hour.
+    - cron: '0 * * * *'
+    # Saturday and Sunday 09:00 UTC — real weekend gating.
+    - cron: '0 9 * * 6,0'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'SendGrid mode'
+        type: choice
+        options: [sandbox, deliver]
+        default: sandbox
+      faketime:
+        description: 'Also run the shifted-clock job'
+        type: boolean
+        default: false
+
+concurrency:
+  group: live-e2e
+  cancel-in-progress: false
+
+jobs:
+  # Real-clock delivery gating. No secrets, no network — the value is entirely
+  # in WHEN it runs, so it is the one job every cron triggers.
+  real-clock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - name: Report the calendar this run sees
+        run: "date -u '+UTC now: %Y-%m-%d %H:%M (%A)'"
+      - run: npx vitest run test/longhorizon
+
+  # Provider-adapter axes against the real SendGrid API. Sandbox by default:
+  # real auth and payload validation, zero delivery, zero quota.
+  live-sendgrid:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 * * * *'
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - name: Live SendGrid suite
+        env:
+          MAILERY_LIVE_E2E: ${{ github.event.inputs.mode || 'sandbox' }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SENDGRID_FROM_EMAIL: ${{ secrets.SENDGRID_FROM_EMAIL }}
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          # Real BullMQ workers — the only setup that exercises job delays,
+          # retries and the send rate limiter.
+          MAILERY_TEST_REDIS_URL: redis://localhost:6379
+        run: yarn test:live
+
+  # Multi-day waits, compressed. libfaketime shifts the whole process clock via
+  # LD_PRELOAD, so Node, the workers, the Mongo client and the SendGrid calls
+  # all agree it is Friday night — and the Monday gate resolves in minutes.
+  #
+  # Linux-only (no macOS equivalent), and SendGrid's own timestamps stay real,
+  # so assert on mailery's state, never on provider timestamps.
+  faketime:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.faketime == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - name: Install libfaketime
+        run: sudo apt-get update && sudo apt-get install -y faketime
+      - name: Friday 23:55 — the weekend gate must push to Monday
+        run: faketime '2026-03-06 23:55:00' npx vitest run test/longhorizon
+      - name: Saturday midday — the weekend gate must hold
+        run: faketime '2026-03-07 12:00:00' npx vitest run test/longhorizon
+      - name: Sunday — still held
+        run: faketime '2026-03-08 12:00:00' npx vitest run test/longhorizon
+      - name: Monday — released
+        run: faketime '2026-03-09 09:00:00' npx vitest run test/longhorizon
+
+  # A cron failure with nobody watching the Actions tab is a silent failure.
+  report:
+    runs-on: ubuntu-latest
+    needs: [real-clock, live-sendgrid]
+    if: failure() && github.event_name == 'schedule'
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Live E2E cron is failing'
+            const body = `The scheduled live E2E run failed.\n\n` +
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n` +
+              `Triggered: ${context.payload.schedule || 'schedule'}`
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'live-e2e',
+            })
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body,
+              })
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['live-e2e'],
+              })
+            }

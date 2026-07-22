@@ -8,87 +8,27 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 
-import { createTestMailer, type TestMailerHarness } from '../../src/testing/index.js'
+import { createTestMailer, step, type TestMailerHarness } from '../../src/testing/index.js'
 import { processOneRunStep, runTick, dispatchSend } from '../../src/server/runner/index.js'
-import { compileTemplate } from '../../src/server/templates/render.js'
-import type { TemplateDoc, FlowDoc } from '../../src/server/models/index.js'
-import type { FlowStep } from '../../src/shared/types.js'
 
 let H: TestMailerHarness
 
-async function seedTemplate(slug: string): Promise<void> {
-  const tplCompile = await compileTemplate(
-    `<mjml><mj-body><mj-section><mj-column><mj-text>Hello {{contact.fields.firstName}}</mj-text></mj-column></mj-section></mj-body></mjml>`,
-  )
-  const doc: TemplateDoc = {
-    slug,
-    name: slug,
-    description: '',
-    kind: 'marketing',
-    fromName: 'Test',
-    fromEmail: 'hello@example.com',
-    replyTo: null,
-    providerOverride: null,
-    subject: 'Hello',
-    preheader: '',
-    body: { mjml: '', editorJson: null, html: tplCompile.html, plainText: tplCompile.plainText, compiledAt: new Date() },
-    variablesSchema: {},
-    draft: null,
-    tags: [],
-    trackOpens: false,
-    trackClicks: false,
-    stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
-    publishedAt: new Date(),
-    publishedBy: 'test',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  }
-  await H.db.collection('mailer_templates').insertOne(doc)
-}
-
-async function seedFlow(slug: string, eventName: string, steps: FlowStep[]): Promise<void> {
-  const doc: FlowDoc = {
-    slug,
-    name: slug,
-    description: '',
-    trigger: { type: 'event', eventName, once: true },
-    enabled: true,
-    steps,
-    version: 1,
-    draft: null,
-    goal: 'activation',
-    audience: 'test',
-    expectedVolumePerWeek: null,
-    stats: { activeRuns: 0, completedRuns: 0, sendsTotal: 0, sendsLast7Days: 0 },
-    lastTriggerScanAt: null,
-    publishedAt: new Date(),
-    publishedBy: 'test',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  }
-  await H.db.collection('mailer_flows').insertOne(doc)
-}
-
 beforeAll(async () => {
-  H = await createTestMailer({
-    seedContacts: [
-      { externalId: 'u1', email: 'alice@example.com', tags: [], fields: { firstName: 'Alice' } },
-      { externalId: 'u2', email: 'bob@example.com', tags: [], fields: { firstName: 'Bob' } },
-    ],
-  })
+  H = await createTestMailer()
   const { mailer } = H
-  await mailer.upsertSubscription({ externalId: 'u1', source: 'test' })
-  await mailer.upsertSubscription({ externalId: 'u2', source: 'test' })
-  await seedTemplate('abort-tpl')
-  await seedFlow('trial-onboarding', 'Trial Started', [
-    { type: 'send', templateSlug: 'abort-tpl' },
-    { type: 'wait', value: 1, unit: 'days' },
-    { type: 'send', templateSlug: 'abort-tpl' },
-  ])
-  await seedFlow('trial-winback', 'Trial Expired', [
-    { type: 'wait', value: 1, unit: 'days' },
-    { type: 'send', templateSlug: 'abort-tpl' },
-  ])
+  await H.seedContact({ externalId: 'u1', email: 'alice@example.com', tags: [], fields: { firstName: 'Alice' } })
+  await H.seedContact({ externalId: 'u2', email: 'bob@example.com', tags: [], fields: { firstName: 'Bob' } })
+  await H.seedTemplate({ slug: 'abort-tpl', subject: 'Hello', text: 'Hello {{contact.fields.firstName}}' })
+  await H.seedFlow({
+    slug: 'trial-onboarding',
+    eventName: 'Trial Started',
+    steps: [step.send('abort-tpl'), step.wait(1, 'days'), step.send('abort-tpl')],
+  })
+  await H.seedFlow({
+    slug: 'trial-winback',
+    eventName: 'Trial Expired',
+    steps: [step.wait(1, 'days'), step.send('abort-tpl')],
+  })
   mailer.registerEvent({ name: 'Trial Started', dedupePolicy: 'once-per-contact' })
   mailer.registerEvent({ name: 'Trial Expired', dedupePolicy: 'once-per-contact' })
 }, 60_000)

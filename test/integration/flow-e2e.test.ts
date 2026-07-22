@@ -9,11 +9,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ObjectId } from 'mongodb'
 
-import { createTestMailer, type TestMailerHarness } from '../../src/testing/index.js'
+import { createTestMailer, step, type TestMailerHarness } from '../../src/testing/index.js'
 import { processOneRunStep, runTick, dispatchSend } from '../../src/server/runner/index.js'
-import { compileTemplate } from '../../src/server/templates/render.js'
-import type { TemplateDoc, FlowDoc } from '../../src/server/models/index.js'
-import type { FlowStep } from '../../src/shared/types.js'
 
 let H: TestMailerHarness
 
@@ -36,61 +33,31 @@ afterAll(async () => {
 
 describe('end-to-end flow run', () => {
   it('fires event → creates flow_run → advances wait → dispatches send', async () => {
-    const { mailer, db, provider } = H
+    const { mailer, provider } = H
     const ctx = mailer.getRunnerContext()
 
     // 1. Subscribe the contact.
     await mailer.upsertSubscription({ externalId: 'u1', source: 'test' })
 
     // 2. Create a published template.
-    const tplCompile = await compileTemplate(`<mjml><mj-body><mj-section><mj-column><mj-text>Hi {{contact.fields.firstName}}</mj-text></mj-column></mj-section></mj-body></mjml>`)
-    const templateDoc: TemplateDoc = {
+    await H.seedTemplate({
       slug: 'welcome-1',
       name: 'Welcome',
-      description: '',
-      kind: 'marketing',
-      fromName: 'Test',
-      fromEmail: 'hello@example.com',
-      replyTo: null,
-      providerOverride: null,
       subject: 'Hi {{contact.fields.firstName}}',
       preheader: 'Welcome',
-      body: { mjml: '', editorJson: null, html: tplCompile.html, plainText: tplCompile.plainText, compiledAt: new Date() },
-      variablesSchema: {},
-      draft: null,
-      tags: [],
+      text: 'Hi {{contact.fields.firstName}}',
       trackOpens: true,
       trackClicks: true,
-      stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
-      publishedAt: new Date(),
-      publishedBy: 'test',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }
-    await db.collection('mailer_templates').insertOne(templateDoc)
+    })
 
     // 3. Create a published flow: trigger=event:Created, send welcome-1.
-    const steps: FlowStep[] = [{ type: 'send', templateSlug: 'welcome-1' }]
-    const flowDoc: FlowDoc = {
+    await H.seedFlow({
       slug: 'welcome',
       name: 'Welcome',
-      description: '',
-      trigger: { type: 'event', eventName: 'Created', once: true },
-      enabled: true,
-      steps,
-      version: 1,
-      draft: null,
-      goal: 'activation',
+      eventName: 'Created',
       audience: 'all new users',
-      expectedVolumePerWeek: null,
-      stats: { activeRuns: 0, completedRuns: 0, sendsTotal: 0, sendsLast7Days: 0 },
-      lastTriggerScanAt: null,
-      publishedAt: new Date(),
-      publishedBy: 'test',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }
-    await db.collection('mailer_flows').insertOne(flowDoc)
+      steps: [step.send('welcome-1')],
+    })
 
     // 4. Fire the trigger event.
     mailer.registerEvent({ name: 'Created', dedupePolicy: 'once-per-contact' })
