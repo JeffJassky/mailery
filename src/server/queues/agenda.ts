@@ -72,9 +72,10 @@ export class AgendaDriver implements QueueDriver {
       )
     }
 
+    const collectionName = opts.collectionName ?? '_mailerJobs'
     const backend = new backendMod.MongoBackend({
       mongo: opts.db,
-      collection: opts.collectionName ?? '_mailerJobs',
+      collection: collectionName,
     })
 
     const agenda = new agendaMod.Agenda({
@@ -85,15 +86,17 @@ export class AgendaDriver implements QueueDriver {
       defaultConcurrency: 5,
     } as any)
 
-    return new AgendaDriver(agenda, agendaMod, opts.db)
+    return new AgendaDriver(agenda, agendaMod, opts.db, collectionName)
   }
 
   private db: Db
+  private collName: string
 
-  private constructor(agenda: Agenda, agendaMod: AgendaModule, db: Db) {
+  private constructor(agenda: Agenda, agendaMod: AgendaModule, db: Db, collectionName: string) {
     this.agenda = agenda
     this.agendaMod = agendaMod
     this.db = db
+    this.collName = collectionName
     this.queues = {
       tick: this.makeQueueAPI(QUEUE_NAMES.tick),
       advance: this.makeQueueAPI(QUEUE_NAMES.advance),
@@ -127,12 +130,7 @@ export class AgendaDriver implements QueueDriver {
 
   /** Direct access to the Mongo collection Agenda persists jobs into. */
   private jobsCollection() {
-    return this.db.collection(this.collectionName())
-  }
-
-  private collectionName(): string {
-    // We set this on the backend; the field isn't exposed publicly so we keep it in sync.
-    return '_mailerJobs'
+    return this.db.collection(this.collName)
   }
 
   private async findPending(name: string, jobId: string): Promise<unknown> {
@@ -144,14 +142,11 @@ export class AgendaDriver implements QueueDriver {
   }
 
   async scheduleRepeatingTick(intervalSeconds: number): Promise<void> {
-    if (!this.started) {
-      // Define tick first so Agenda knows about it before start.
-      // We'll re-define it during startWorkers() with the real handler; until
-      // then this is a no-op handler that the tick should never actually run.
-      this.agenda.define(QUEUE_NAMES.tick, async () => {}, { concurrency: 1 })
-      await this.agenda.start()
-      this.started = true
-    }
+    // Persist the repeating job only — do NOT start Agenda here. Starting with
+    // a placeholder tick handler would let a process that never calls
+    // startWorkers (API-only process in a web/worker split) lock and complete
+    // tick jobs as no-ops, silently swallowing real ticks. Agenda starts in
+    // startWorkers, after the real handlers are defined.
     await this.agenda.every(`${intervalSeconds} seconds`, QUEUE_NAMES.tick)
   }
 
