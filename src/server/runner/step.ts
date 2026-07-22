@@ -107,7 +107,7 @@ async function handleWait(
   await ctx.queues.advance.add(
     'advance',
     { flowRunId: String(run._id) },
-    { delay: ms, jobId: `advance:${run._id}:${run.currentStepIndex + 1}` },
+    { delay: ms, jobId: `advance:${run._id}:${branchKey(run)}:${run.currentStepIndex + 1}` },
   )
 }
 
@@ -253,7 +253,7 @@ async function handleWebhookStep(
       await ctx.queues.advance.add(
         'advance',
         { flowRunId: String(run._id) },
-        { delay: 60_000, jobId: `advance:${run._id}:${run.currentStepIndex}:retry-${attempts}` },
+        { delay: 60_000, jobId: `advance:${run._id}:${branchKey(run)}:${run.currentStepIndex}:retry-${attempts}` },
       )
     }
   }
@@ -290,7 +290,7 @@ async function deferSendForWindow(run: FlowRunDoc, deliverAt: Date, ctx: RunnerC
     { flowRunId: String(run._id) },
     {
       delay: Math.max(0, deliverAt.getTime() - Date.now()),
-      jobId: `advance:${run._id}:${run.currentStepIndex}:window:${deliverAt.getTime()}`,
+      jobId: `advance:${run._id}:${branchKey(run)}:${run.currentStepIndex}:window:${deliverAt.getTime()}`,
     },
   )
 }
@@ -389,6 +389,15 @@ export function locateStep(
   }
 
   return arr[currentStepIndex] ?? null
+}
+
+/**
+ * Branch-path discriminator for advance jobIds. `currentStepIndex` resets to 0
+ * on branch entry, so (runId, stepIndex) alone is not unique across a run's
+ * lifetime — the same numeric index recurs inside each branch arm.
+ */
+function branchKey(run: FlowRunDoc): string {
+  return run.currentBranchPath.join('_')
 }
 
 function unitToMs(value: number, unit: 'minutes' | 'hours' | 'days' | 'weeks'): number {
