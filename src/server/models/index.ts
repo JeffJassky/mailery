@@ -156,6 +156,12 @@ export interface FlowRunDoc {
    * which account or topic the run is about. Null for non-event entries.
    */
   triggerEvent?: { name: string; properties: Record<string, unknown>; occurredAt: Date } | null
+  /**
+   * Dedupe key of the triggering event. Unique per flow (partial index) so the
+   * trigger scan's overlap window can re-read an event without creating a
+   * second run. Null for non-event entries (manual/API).
+   */
+  triggerDedupeKey?: string | null
   enteredAt: Date
   status: FlowRunStatus
   currentStepIndex: number
@@ -665,6 +671,7 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { dedupeKey: 1 }, unique: true },
       { key: { externalId: 1, occurredAt: -1 } },
       { key: { name: 1, occurredAt: -1 } },
+      { key: { name: 1, createdAt: 1 } },
       { key: { externalId: 1, name: 1 } },
     ]),
     c.flows.createIndexes([
@@ -676,6 +683,11 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { status: 1, nextActionAt: 1 } },
       { key: { externalId: 1, flowId: 1 } },
       { key: { flowId: 1, status: 1 } },
+      {
+        key: { flowId: 1, triggerDedupeKey: 1 },
+        unique: true,
+        partialFilterExpression: { triggerDedupeKey: { $type: 'string' } },
+      },
     ]),
     c.templates.createIndexes([
       { key: { slug: 1 }, unique: true },
