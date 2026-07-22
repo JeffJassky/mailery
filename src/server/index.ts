@@ -2,7 +2,13 @@
  * Public exports for the `mailery` package.
  */
 
-export const VERSION = '0.8.1'
+declare const __PKG_VERSION__: string | undefined
+
+/**
+ * Library version, stamped from package.json at build time (tsup/vitest
+ * `define`). 'dev' when the source runs without a bundler define (plain tsx).
+ */
+export const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
 
 // Core
 export { Mailer } from './mailer.js'
