@@ -109,9 +109,17 @@ export async function handleSend(
 // ---------------------------------------------------------------------------
 
 export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promise<void> {
-  const send = await ctx.collections.sends.findOne({ _id: sendId })
-  if (!send) return
-  if (send.status !== 'queued' && send.status !== 'failed') return // already dispatched / cancelled
+  // Atomic claim: flip queued/failed → sending so exactly one worker proceeds.
+  // The stranded-send sweep and the queue's stalled-job retry can both fire a
+  // job for the same send; a read-then-act status check lets both through and
+  // the recipient gets the email twice. Every downstream path writes a
+  // terminal status (or resets to 'queued' for the breaker retry); a crash
+  // leaves 'sending', which the stranded-send sweep resets after 5 minutes.
+  const send = await ctx.collections.sends.findOneAndUpdate(
+    { _id: sendId, status: { $in: ['queued', 'failed'] } },
+    { $set: { status: 'sending', updatedAt: new Date() } },
+  )
+  if (!send) return // already claimed / dispatched / cancelled
 
   const template = await ctx.collections.templates.findOne({ _id: send.templateId })
   if (!template) {
@@ -135,6 +143,11 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   if (send.kind === 'marketing') {
     const bucket = await getBucketStatus(ctx, send.fromEmail, send.kind)
     if (bucket?.status === 'tripped') {
+      // Release the claim so the delayed retry can re-claim it.
+      await ctx.collections.sends.updateOne(
+        { _id: send._id },
+        { $set: { status: 'queued', updatedAt: new Date() } },
+      )
       await ctx.queues.send.add('send', { sendId: String(send._id) }, { delay: 60_000 })
       return
     }
