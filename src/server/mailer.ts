@@ -45,6 +45,7 @@ import {
   type Queues,
 } from './queues/index.js'
 import {
+  dispatchBroadcastById,
   dispatchSend,
   exitFlowRun,
   processOneRunStep,
@@ -726,7 +727,12 @@ export class Mailer {
           await runTick(this.runnerContext)
         },
         advance: async (data) => {
-          if (!ObjectIdCtor.isValid(data.flowRunId)) return
+          if (data.broadcastId) {
+            if (!ObjectIdCtor.isValid(data.broadcastId)) return
+            await dispatchBroadcastById(new ObjectIdCtor(data.broadcastId), this.runnerContext)
+            return
+          }
+          if (!data.flowRunId || !ObjectIdCtor.isValid(data.flowRunId)) return
           await processOneRunStep(new ObjectIdCtor(data.flowRunId), this.runnerContext)
         },
         send: async (data) => {

@@ -46,7 +46,8 @@ export interface Queues {
 
 export interface QueueHandlers {
   tick: (data: unknown) => Promise<void>
-  advance: (data: { flowRunId: string }) => Promise<void>
+  /** Payload is either a flow-run advance or a broadcast-dispatch job. */
+  advance: (data: { flowRunId?: string; broadcastId?: string }) => Promise<void>
   send: (data: { sendId: string }) => Promise<void>
   webhook: (data: { provider: string }) => Promise<void>
 }

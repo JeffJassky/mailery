@@ -30,7 +30,7 @@ beforeAll(async () => {
     retryAttempts: 1,
     handlers: {
       tick: async () => {},
-      advance: async (data) => { firedAdvances.push(data.flowRunId) },
+      advance: async (data) => { if (data.flowRunId) firedAdvances.push(data.flowRunId) },
       send: async (data) => { seenSends.push(data.sendId) },
       webhook: async () => {},
     },

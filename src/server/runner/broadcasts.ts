@@ -14,8 +14,15 @@ import { sha256Hex } from '../tokens.js'
 import type { RunnerContext } from './index.js'
 
 /**
+ * Broadcasts stuck in 'sending' with updatedAt older than this are assumed
+ * dead (worker crashed mid-dispatch). dispatchBroadcast heartbeats updatedAt
+ * on every page, so a stale timestamp means no live dispatcher.
+ */
+const STALLED_BROADCAST_THRESHOLD_MS = 10 * 60 * 1000
+
+/**
  * Process scheduled broadcasts whose `scheduledAt` has passed. Called from the
- * tick. Marks each broadcast `sending` before streaming so concurrent ticks
+ * tick. Marks each broadcast `sending` before dispatch so concurrent ticks
  * don't double-dispatch.
  */
 export async function processScheduledBroadcasts(ctx: RunnerContext): Promise<void> {
@@ -32,16 +39,70 @@ export async function processScheduledBroadcasts(ctx: RunnerContext): Promise<vo
       { returnDocument: 'after' },
     )
     if (!claimed) continue
+    await startBroadcastDispatch(claimed, ctx)
+  }
+}
 
-    try {
-      await dispatchBroadcast(claimed, ctx)
-    } catch (err) {
-      console.error('mailery: broadcast dispatch failed', { id: String(b._id), err })
-      await ctx.collections.broadcasts.updateOne(
-        { _id: b._id },
-        { $set: { status: 'failed', updatedAt: new Date() } },
-      )
-    }
+/**
+ * Hand the (potentially hours-long) recipient enqueue off the tick. With a
+ * real queue driver, dispatch runs as an advance job so a large broadcast
+ * can't starve trigger scans and sweeps — the tick worker has concurrency 1.
+ * The noop driver has no workers (hosts drive the runner synchronously), so
+ * dispatch stays inline there.
+ */
+async function startBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
+  if (ctx.config.queue.driver === 'noop') {
+    await runBroadcastDispatch(broadcast, ctx)
+    return
+  }
+  await ctx.queues.advance.add(
+    'advance',
+    { broadcastId: String(broadcast._id) },
+    {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 60_000 },
+      jobId: `broadcast-dispatch:${broadcast._id}`,
+    },
+  )
+}
+
+/** Advance-worker entry point for `{ broadcastId }` jobs. */
+export async function dispatchBroadcastById(broadcastId: ObjectId, ctx: RunnerContext): Promise<void> {
+  const broadcast = await ctx.collections.broadcasts.findOne({ _id: broadcastId, status: 'sending' })
+  if (!broadcast) return
+  await runBroadcastDispatch(broadcast, ctx)
+}
+
+/**
+ * Rescue broadcasts whose dispatcher died. Re-dispatch is idempotent: the
+ * per-recipient dedupeKey unique index skips send rows already inserted, so
+ * a resumed broadcast picks up where the dead worker left off.
+ */
+export async function resumeStalledBroadcasts(ctx: RunnerContext): Promise<void> {
+  const cutoff = new Date(Date.now() - STALLED_BROADCAST_THRESHOLD_MS)
+  const stalled = await ctx.collections.broadcasts
+    .find({ status: 'sending', updatedAt: { $lt: cutoff } })
+    .toArray()
+
+  for (const b of stalled) {
+    // Touch before re-dispatch so subsequent ticks don't stack rescues.
+    await ctx.collections.broadcasts.updateOne(
+      { _id: b._id },
+      { $set: { updatedAt: new Date() } },
+    )
+    await startBroadcastDispatch(b, ctx)
+  }
+}
+
+async function runBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
+  try {
+    await dispatchBroadcast(broadcast, ctx)
+  } catch (err) {
+    console.error('mailery: broadcast dispatch failed', { id: String(broadcast._id), err })
+    await ctx.collections.broadcasts.updateOne(
+      { _id: broadcast._id },
+      { $set: { status: 'failed', updatedAt: new Date() } },
+    )
   }
 }
 
@@ -66,6 +127,13 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
   const scheduledMs = broadcast.scheduledAt?.getTime() ?? Date.now()
 
   for (;;) {
+    // Progress heartbeat — resumeStalledBroadcasts treats a stale updatedAt
+    // as a dead dispatcher, so touch it every page (and during backpressure).
+    await ctx.collections.broadcasts.updateOne(
+      { _id: broadcast._id },
+      { $set: { updatedAt: new Date() } },
+    )
+
     const page = await ctx.adapter.query(hostFilter, { limit: batchSize, cursor })
     if (page.contacts.length === 0) break
 
@@ -75,6 +143,10 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
     if (eligible.length > 0) {
       // Backpressure: wait until the send queue's waiting set drains below cap.
       while ((await ctx.queues.send.getWaitingCount()) > maxWaiting) {
+        await ctx.collections.broadcasts.updateOne(
+          { _id: broadcast._id },
+          { $set: { updatedAt: new Date() } },
+        )
         await sleep(2000)
       }
 
@@ -256,10 +328,12 @@ async function buildSendDoc(
   const sendId = new ObjectId()
   const dedupeKey = `broadcast:${broadcast._id}:${contact.externalId}`
 
-  // Per-recipient TZ delay calculation.
+  // Per-recipient TZ delay calculation. Anchored to scheduledAt (not enqueue
+  // time) so tick lag and backpressure pauses don't drift later batches.
   let delayMs = Math.max(0, scheduledMs - Date.now())
   if (respectTimezone && contact.timezone) {
-    delayMs = Math.max(0, perRecipientDelayMs(scheduledMs, contact.timezone))
+    const offsetMs = perRecipientOffsetMs(scheduledMs, contact.timezone)
+    delayMs = Math.max(0, scheduledMs + offsetMs - Date.now())
   }
 
   const doc: SendDoc = {
@@ -302,14 +376,20 @@ async function buildSendDoc(
 }
 
 /**
- * Compute the delay so the recipient receives the email at `scheduledMs` in
- * their LOCAL timezone (rather than the configured scheduled UTC instant).
+ * Offset to add to `scheduledMs` so the email arrives at the same WALL-CLOCK
+ * time in the recipient's timezone.
  *
  * Example: broadcast `scheduledAt` is 10am UTC, contact is in PST (UTC-8).
- * Without respect: contact gets it at 2am local. With respect: contact gets it
- * at 10am their time = 6pm UTC. delayMs = 8 hours.
+ * Their 10am is 6pm UTC → offset +8h.
+ *
+ * Recipients EAST of the schedule's timezone would need a negative offset —
+ * their 10am already passed when dispatch starts. Sending "now" would land at
+ * the wrong local time, so instead the offset is normalized into [0, 24h):
+ * they get the NEXT occurrence of the wall-clock slot, i.e. same time
+ * tomorrow. (Berlin, UTC+2: raw offset −2h → +22h.)
  */
-function perRecipientDelayMs(scheduledMs: number, timezone: string): number {
+function perRecipientOffsetMs(scheduledMs: number, timezone: string): number {
+  const DAY_MS = 24 * 60 * 60 * 1000
   try {
     // Get the offset between the scheduled UTC instant interpreted as a wall
     // clock and the same wall clock in the recipient's tz.
@@ -327,9 +407,7 @@ function perRecipientDelayMs(scheduledMs: number, timezone: string): number {
     const localMs = parse(local)
     const offsetMs = utcMs - localMs
 
-    // Target = scheduledMs (as a wall-clock in tz) + (utc - local offset) so
-    // it lands at the same WALL CLOCK in tz.
-    return offsetMs
+    return ((offsetMs % DAY_MS) + DAY_MS) % DAY_MS
   } catch {
     return 0
   }

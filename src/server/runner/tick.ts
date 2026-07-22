@@ -7,7 +7,7 @@
 import { processNewlyFiredEventTriggers } from './triggers.js'
 import { processWebhookBacklog } from './webhook.js'
 import { sweepStrandedFlowRuns } from './sweep.js'
-import { processScheduledBroadcasts as dispatchScheduled } from './broadcasts.js'
+import { processScheduledBroadcasts as dispatchScheduled, resumeStalledBroadcasts } from './broadcasts.js'
 import { evaluateHealth } from './health.js'
 import { promoteSoftBounces } from './bounce-promotion.js'
 import { runDnsblChecks } from './dnsbl.js'
@@ -78,6 +78,9 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await processScheduledBroadcasts(ctx).catch((err) => {
     console.error('mailery: broadcast dispatch failed', err)
+  })
+  await resumeStalledBroadcasts(ctx).catch((err) => {
+    console.error('mailery: stalled-broadcast resume failed', err)
   })
   await evaluateHealth(ctx).catch((err) => {
     console.error('mailery: health evaluation failed', err)
@@ -175,7 +178,9 @@ async function drainOutbox(ctx: RunnerContext): Promise<void> {
 }
 
 /**
- * Dispatch broadcasts whose `scheduledAt` has passed. Streams the segment
+ * Claim broadcasts whose `scheduledAt` has passed and hand their recipient
+ * enqueue to an advance job (inline for the noop driver), so a large
+ * broadcast never blocks the tick. The dispatch itself streams the segment
  * cursor and bulk-enqueues sends, pausing when the send queue's waiting
  * count exceeds the configured cap (broadcastEnqueueMaxWaiting).
  */

@@ -39,6 +39,7 @@ export interface RunnerContext {
 }
 
 export { runTick } from './tick.js'
+export { dispatchBroadcastById, resumeStalledBroadcasts } from './broadcasts.js'
 export { processOneRunStep, exitFlowRun } from './step.js'
 export { dispatchSend } from './send.js'
 export { processNewlyFiredEventTriggers } from './triggers.js'
