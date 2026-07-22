@@ -51,7 +51,7 @@ import {
   runTick,
   type RunnerContext,
 } from './runner/index.js'
-import { applyWebhookEvent } from './runner/webhook.js'
+import { processWebhookBacklog } from './runner/webhook.js'
 
 export class Mailer {
   readonly db: Db
@@ -623,7 +623,8 @@ export class Mailer {
       ?? this.config.defaultProvider
 
     const sendId = new ObjectIdCtor()
-    await this.collections.sends.insertOne({
+    try {
+      await this.collections.sends.insertOne({
       _id: sendId,
       dedupeKey,
       externalId: parsed.externalId,
@@ -657,7 +658,14 @@ export class Mailer {
       updatedAt: new Date(),
       sentAt: null,
       deliveredAt: null,
-    })
+      })
+    } catch (err: any) {
+      // Concurrent call with the same dedupeKey won the insert — return its id.
+      if (err?.code !== 11000) throw err
+      const winner = await this.collections.sends.findOne({ dedupeKey })
+      if (winner) return { sendId: String(winner._id) }
+      throw err
+    }
 
     await this.queues.send.add(
       'send',
@@ -735,33 +743,7 @@ export class Mailer {
 
   /** Process unprocessed webhook events in mailer_webhook_events. */
   private async processWebhookBacklog(): Promise<void> {
-    const batch = await this.collections.webhookEvents
-      .find({ processed: false })
-      .limit(500)
-      .toArray()
-
-    for (const evt of batch) {
-      try {
-        // The stored `raw` wraps the normalized event we captured at ingest;
-        // pull details back out so applyWebhookEvent has the bounce reason etc.
-        const normalized = (evt.raw as any)?.normalized
-        const details = normalized?.details ?? {}
-        await applyWebhookEvent(
-          {
-            type: evt.normalizedType,
-            providerEventId: evt.providerEventId,
-            providerMessageId: evt.providerMessageId,
-            email: evt.email,
-            occurredAt: evt.occurredAt,
-            details,
-          },
-          this.runnerContext,
-        )
-        await this.collections.webhookEvents.updateOne({ _id: evt._id }, { $set: { processed: true } })
-      } catch (err) {
-        console.error('mailery: webhook apply failed', { id: String(evt._id), err })
-      }
-    }
+    await processWebhookBacklog(this.runnerContext)
   }
 
   async stop(): Promise<void> {
