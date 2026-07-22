@@ -32,6 +32,17 @@ export async function processWebhookBacklog(
   const batch = await ctx.collections.webhookEvents.find(filter).limit(500).toArray()
 
   for (const evt of batch) {
+    // At-most-once: claim the event BEFORE applying. Concurrent workers scan
+    // the same unprocessed batch; without the claim each would apply the same
+    // event, double-counting bounces/complaints into the circuit-breaker
+    // health counters. Losing an event to a crash mid-apply is the cheaper
+    // failure mode.
+    const claimed = await ctx.collections.webhookEvents.findOneAndUpdate(
+      { _id: evt._id, processed: false },
+      { $set: { processed: true } },
+    )
+    if (!claimed) continue
+
     try {
       // The stored `raw` wraps the normalized event we captured at ingest;
       // pull details back out so applyWebhookEvent has the bounce reason etc.
@@ -48,7 +59,6 @@ export async function processWebhookBacklog(
         },
         ctx,
       )
-      await ctx.collections.webhookEvents.updateOne({ _id: evt._id }, { $set: { processed: true } })
     } catch (err) {
       console.error('mailery: webhook apply failed', { id: String(evt._id), err })
     }
