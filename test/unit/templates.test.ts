@@ -67,6 +67,46 @@ describe('applyTracking', () => {
     expect(out.html).toMatch(/<img[^>]+\/m\/open\/snd_test\.png[^>]+\/>\s*<\/body>/)
   })
 
+  it('stores the decoded URL when Handlebars escaped the href', () => {
+    // `{{topicUrl}}` renders &-and-= escaped: &amp; / &#x3D;
+    const html = `<a href="https://example.com/p?a&#x3D;1&amp;b&#x3D;2">Go</a>`
+    const out = applyTracking(html, {
+      sendId: 'snd_test',
+      publicUrl: 'https://host.example',
+      trackOpens: false,
+      trackClicks: true,
+    })
+    expect(out.links).toHaveLength(1)
+    expect(out.links[0]?.url).toBe('https://example.com/p?a=1&b=2')
+  })
+
+  it('dedupes escaped and raw forms of the same URL to one linkId', () => {
+    const html =
+      `<a href="https://example.com/p?a&#x3D;1&amp;b&#x3D;2">One</a>` +
+      `<a href="https://example.com/p?a=1&b=2">Two</a>`
+    const out = applyTracking(html, {
+      sendId: 'snd_test',
+      publicUrl: 'https://host.example',
+      trackOpens: false,
+      trackClicks: true,
+    })
+    expect(out.links).toHaveLength(1)
+  })
+
+  it('preserves an escaped unsubscribe URL', () => {
+    const unsubUrl = 'https://host.example/m/unsub?t=tok&u=123'
+    const html = `<a href="https://host.example/m/unsub?t&#x3D;tok&amp;u&#x3D;123">Unsub</a>`
+    const out = applyTracking(html, {
+      sendId: 'snd_test',
+      publicUrl: 'https://host.example',
+      trackOpens: false,
+      trackClicks: true,
+      preserveUrls: [unsubUrl],
+    })
+    expect(out.links).toHaveLength(0)
+    expect(out.html).toContain('m/unsub?t&#x3D;tok')
+  })
+
   it('respects data-mailer-notrack', () => {
     const html = `<a href="https://example.com" data-mailer-notrack="true">Don't track</a>`
     const out = applyTracking(html, {

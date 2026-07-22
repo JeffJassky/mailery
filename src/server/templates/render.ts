@@ -170,7 +170,10 @@ export function applyTracking(html: string, opts: TrackingOptions): TrackingResu
   let out = html
 
   if (opts.trackClicks) {
-    out = out.replace(/<a\b([^>]*?)\bhref=(["'])([^"']+)\2([^>]*)>/gi, (full, pre, _q, url, post) => {
+    out = out.replace(/<a\b([^>]*?)\bhref=(["'])([^"']+)\2([^>]*)>/gi, (full, pre, _q, rawUrl, post) => {
+      // Handlebars `{{ }}` escapes substituted URLs (& → &amp;, = → &#x3D;). That is
+      // correct in HTML source, but the stored/redirect URL must be the decoded one.
+      const url = decodeHtmlEntities(rawUrl)
       if (shouldSkipClickRewrite(url, preserve, full)) return full
       let linkId = seen.get(url)
       if (!linkId) {
@@ -204,6 +207,39 @@ function shouldSkipClickRewrite(url: string, preserve: Set<string>, fullTag: str
   if (preserve.has(url.trim())) return true
   if (/data-mailer-notrack=["']true["']/.test(fullTag)) return true
   return false
+}
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+}
+
+/**
+ * Decode the HTML entities Handlebars' escapeExpression emits (plus numeric
+ * forms), so a captured href round-trips to the URL the browser would request.
+ * `&amp;` is decoded last-wins via a single pass so `&amp;lt;` stays `&lt;`.
+ */
+function decodeHtmlEntities(input: string): string {
+  return input.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (match, body: string) => {
+    if (body[0] === '#') {
+      const code =
+        body[1] === 'x' || body[1] === 'X'
+          ? parseInt(body.slice(2), 16)
+          : parseInt(body.slice(1), 10)
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match
+      try {
+        return String.fromCodePoint(code)
+      } catch {
+        return match
+      }
+    }
+    const named = NAMED_ENTITIES[body.toLowerCase()]
+    return named ?? match
+  })
 }
 
 function shortHash(input: string): string {
