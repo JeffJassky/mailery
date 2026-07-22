@@ -5,6 +5,7 @@
  */
 
 import { processNewlyFiredEventTriggers } from './triggers.js'
+import { processWebhookBacklog } from './webhook.js'
 import { sweepStrandedFlowRuns } from './sweep.js'
 import { processScheduledBroadcasts as dispatchScheduled } from './broadcasts.js'
 import { evaluateHealth } from './health.js'
@@ -24,6 +25,13 @@ import type { RunnerContext } from './index.js'
  * the rare case where the original call did reach the provider.
  */
 const STRANDED_SEND_THRESHOLD_MS = 5 * 60 * 1000
+
+/**
+ * Webhook events older than this and still unprocessed are assumed stranded
+ * (the ingest-time queue add failed). The tick drains them; fresher rows are
+ * left to the webhook worker to avoid racing it in the normal path.
+ */
+const STRANDED_WEBHOOK_THRESHOLD_MS = 5 * 60 * 1000
 
 export async function runTick(ctx: RunnerContext): Promise<void> {
   // Heartbeat: ensure the aggregate health doc exists with an up-to-date
@@ -76,6 +84,9 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await promoteSoftBounces(ctx).catch((err) => {
     console.error('mailery: soft-bounce promotion failed', err)
+  })
+  await processWebhookBacklog(ctx, { olderThanMs: STRANDED_WEBHOOK_THRESHOLD_MS }).catch((err) => {
+    console.error('mailery: stranded-webhook drain failed', err)
   })
 
   // Independent reputation pollers + housekeeping — run in parallel so tick

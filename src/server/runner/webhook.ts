@@ -14,6 +14,47 @@ function dimsFromSend(send: SendDoc | null | undefined): HealthDims | null {
   return { fromEmail: send.fromEmail, kind: send.kind }
 }
 
+/**
+ * Apply unprocessed rows from mailer_webhook_events. Called by the webhook
+ * worker (no age filter) and by the tick as a fallback (`olderThanMs` set) for
+ * events whose enqueue failed at ingest — those would otherwise sit unprocessed
+ * until the next webhook happened to arrive. The tick's age filter keeps it out
+ * of the webhook worker's way in the normal path.
+ */
+export async function processWebhookBacklog(
+  ctx: RunnerContext,
+  opts: { olderThanMs?: number } = {},
+): Promise<void> {
+  const filter: Record<string, unknown> = { processed: false }
+  if (opts.olderThanMs) {
+    filter.receivedAt = { $lt: new Date(Date.now() - opts.olderThanMs) }
+  }
+  const batch = await ctx.collections.webhookEvents.find(filter).limit(500).toArray()
+
+  for (const evt of batch) {
+    try {
+      // The stored `raw` wraps the normalized event we captured at ingest;
+      // pull details back out so applyWebhookEvent has the bounce reason etc.
+      const normalized = (evt.raw as any)?.normalized
+      const details = normalized?.details ?? {}
+      await applyWebhookEvent(
+        {
+          type: evt.normalizedType,
+          providerEventId: evt.providerEventId,
+          providerMessageId: evt.providerMessageId,
+          email: evt.email,
+          occurredAt: evt.occurredAt,
+          details,
+        },
+        ctx,
+      )
+      await ctx.collections.webhookEvents.updateOne({ _id: evt._id }, { $set: { processed: true } })
+    } catch (err) {
+      console.error('mailery: webhook apply failed', { id: String(evt._id), err })
+    }
+  }
+}
+
 export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerContext): Promise<void> {
   const send = await ctx.collections.sends.findOne(
     event.providerMessageId
