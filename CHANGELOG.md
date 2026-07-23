@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.2 — Heartbeat visible from the web process
+
+### Fixed
+
+- **The dead-workers banner never showed in a web/worker split.** The
+  `workers_heartbeat` setup check was skipped whenever the process was
+  `workerless` — but in a split deployment the workerless web process is the
+  one serving `/admin/mailer`, so the operator's dashboard reported a clean
+  bill of health while the tick could be hours dead. The heartbeat lives in
+  Mongo, which both processes share, so the check now runs regardless of
+  `workerless`; only the wording changes ("workers run in another process…").
+  A missing heartbeat doc stays a warn, not an error — a fresh install
+  legitimately has none yet.
+
 ## 0.10.1 — Waits hold
 
 ### Fixed
