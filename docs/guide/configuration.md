@@ -20,7 +20,7 @@ await Mailer.init({
 |---|---|
 | `db` | Native MongoDB `Db` instance. mailery creates indexes on init. |
 | `adapter` | A `ContactAdapter` that reads from your host's user collection. Usually `new MongoContactAdapter(...)`. |
-| `queue` | Queue driver selection. See [Queue drivers](./queues). One of `{ driver: 'bull', redis }`, `{ driver: 'agenda' }`, `{ driver: 'noop' }`. |
+| `queue` | Queue driver selection. See [Queue drivers](./queues). One of `{ driver: 'bull', redis, prefix? }`, `{ driver: 'agenda' }`, `{ driver: 'noop' }`. `prefix` namespaces Redis keys so multiple instances (local/dev/prod) can share one cluster. |
 | `providers` | Map of provider name → instance. Must include at least the `defaultProvider`. |
 | `defaultProvider` | Which provider key (above) handles unrouted sends. |
 | `publicUrl` | Base of the URL where you mount `createPublicRouter()`. Used for unsubscribe / open pixel / click links. |
@@ -294,6 +294,7 @@ MAILER_PUBLIC_URL           MAILER_UNSUBSCRIBE_SECRET
 MAILER_SENDER_ADDRESS       MAILER_FROM_NAME / MAILER_FROM_EMAIL
 MAILER_DEFAULT_PROVIDER     MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
 MAILER_QUEUE_DRIVER         'bull' (default) | 'agenda' | 'noop'
+MAILER_QUEUE_PREFIX         Redis key prefix namespacing this instance (bull only, optional)
 MAILER_HOST_USERS_COLLECTION (default 'users')
 MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
 MAILER_HOST_USERS_ID_FIELD (default '_id')

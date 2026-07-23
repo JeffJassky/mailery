@@ -42,7 +42,7 @@ export class BullDriver implements QueueDriver {
   private workers: { tick: Worker; advance: Worker; send: Worker; webhook: Worker } | null = null
   private bull: BullModule
 
-  static async create(redisConfig: RedisOptions | IORedis): Promise<BullDriver> {
+  static async create(redisConfig: RedisOptions | IORedis, prefix?: string): Promise<BullDriver> {
     let bull: BullModule
     try {
       bull = (await import('bullmq')) as unknown as BullModule
@@ -51,18 +51,27 @@ export class BullDriver implements QueueDriver {
         "mailery: queue driver 'bull' requires the 'bullmq' peer dependency. Run `npm install bullmq ioredis`.",
       )
     }
+    if (prefix?.includes(':')) {
+      throw new Error(
+        `mailery: queue prefix "${prefix}" must not contain ':' — BullMQ uses it as the Redis key separator.`,
+      )
+    }
     const redis = isRedisLike(redisConfig) ? (redisConfig as IORedis) : connect(redisConfig as RedisOptions)
-    return new BullDriver(bull, redis)
+    return new BullDriver(bull, redis, prefix)
   }
 
-  private constructor(bull: BullModule, redis: IORedis) {
+  private prefix?: string
+
+  private constructor(bull: BullModule, redis: IORedis, prefix?: string) {
     this.bull = bull
     this.redis = redis
+    this.prefix = prefix
     // Bounded retention: completed/failed jobs must not accumulate in Redis
     // forever. Completed jobs also need to leave promptly so jobId-based
     // idempotent re-adds aren't dropped against a stale completed job.
     const opts = {
       connection: redis,
+      prefix,
       defaultJobOptions: {
         removeOnComplete: { age: 24 * 3600, count: 1000 },
         removeOnFail: { age: 7 * 24 * 3600 },
@@ -96,7 +105,8 @@ export class BullDriver implements QueueDriver {
 
   async startWorkers(opts: WorkerStartOptions): Promise<void> {
     if (this.workers) return
-    const base = { connection: this.redis }
+    // Workers must share the queues' prefix or they'd poll different keys.
+    const base = { connection: this.redis, prefix: this.prefix }
     const { Worker } = this.bull
 
     const tick = new Worker(

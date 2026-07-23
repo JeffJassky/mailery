@@ -76,6 +76,16 @@ export interface QueueDriver {
  * lets hosts mix-and-match (e.g. Bull in prod, noop in tests).
  */
 export type QueueDriverConfig =
-  | { driver: 'bull'; redis: RedisOptions | IORedis }
+  | {
+      driver: 'bull'
+      redis: RedisOptions | IORedis
+      /**
+       * Redis key prefix for all queue keys (BullMQ default: 'bull').
+       * Namespaces multiple mailery instances on one Redis cluster — e.g.
+       * 'mailery-dev' / 'mailery-prod' to isolate environments. Must not
+       * contain ':' (BullMQ uses it as the key separator).
+       */
+      prefix?: string
+    }
   | { driver: 'agenda'; db?: Db; processEverySeconds?: number; lockLifetimeSeconds?: number; collectionName?: string }
   | { driver: 'noop' }

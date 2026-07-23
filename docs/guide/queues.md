@@ -40,6 +40,26 @@ What you get:
 - `jobId`-based dedupe for delayed advance jobs.
 - BullMQ's `limiter` enforcing the global send rate via Redis Lua script — correct across multiple worker processes.
 
+#### Namespacing multiple instances (`prefix`)
+
+All of mailery's Redis keys live under a prefix (BullMQ's default is `bull`).
+When several mailery instances share one Redis cluster — most commonly local /
+dev / staging / prod environments — give each its own prefix so their queues,
+workers, and the repeating tick can't see each other's jobs:
+
+```ts
+queue: {
+  driver: 'bull',
+  redis: { url: process.env.REDIS_URL! },
+  prefix: `mailery-${process.env.NODE_ENV}`,   // e.g. 'mailery-dev'
+}
+```
+
+The prefix must not contain `:` (BullMQ's key separator) — `Mailer.init`
+rejects it. Changing the prefix orphans any jobs under the old one; drain
+before switching, as with a [driver swap](#switching-drivers). With
+`Mailer.fromEnv`, set `MAILER_QUEUE_PREFIX`.
+
 ### Agenda
 
 ```ts

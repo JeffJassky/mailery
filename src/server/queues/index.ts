@@ -30,7 +30,7 @@ export async function createQueueDriver(
 ): Promise<QueueDriver> {
   switch (config.driver) {
     case 'bull':
-      return BullDriver.create(config.redis)
+      return BullDriver.create(config.redis, config.prefix)
     case 'agenda':
       return AgendaDriver.create({
         db: config.db ?? fallbackDb,
