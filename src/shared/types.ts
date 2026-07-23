@@ -72,6 +72,15 @@ export type Predicate =
   | { notHasTag: string }
   | { fieldEquals: { field: string; value: unknown } }
   | { fieldExists: string }
+  /**
+   * Tests a property of the event that STARTED this run, so the answer is
+   * per-run rather than per-contact. Use when the gate depends on what the run
+   * is about (which account, plan, order) instead of a durable trait of the
+   * person: a contact-level tag is shared by every concurrent run and the last
+   * writer wins, which silently changes branching in runs already in flight.
+   */
+  | { triggerPropertyEquals: { key: string; value: string | number | boolean | null } }
+  | { triggerPropertyTruthy: string }
   | { hasFiredEvent: string; sinceFlowStart?: boolean; withinDays?: number }
   | { notHasFiredEvent: string; withinDays?: number }
   | { subscriptionStatus: 'subscribed' | 'unsubscribed' | 'pending_doi' | 'bounced' | 'complained' }

@@ -82,6 +82,8 @@ function predicateSummary(p: any): string {
   if ('hasFiredEvent' in p) return `fired "${p.hasFiredEvent}"`
   if ('notHasFiredEvent' in p) return `not fired "${p.notHasFiredEvent}"`
   if ('fieldEquals' in p) return `${p.fieldEquals.field} = ${JSON.stringify(p.fieldEquals.value)}`
+  if ('triggerPropertyEquals' in p) return `trigger.${p.triggerPropertyEquals.key} = ${JSON.stringify(p.triggerPropertyEquals.value)}`
+  if ('triggerPropertyTruthy' in p) return `trigger.${p.triggerPropertyTruthy} is set`
   if ('subscriptionStatus' in p) return `subscription = ${p.subscriptionStatus}`
   if ('all' in p) return `all of ${p.all.length}`
   if ('any' in p) return `any of ${p.any.length}`
@@ -569,6 +571,20 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
 // Predicate editor (handles common cases visually; falls back to JSON)
 // ---------------------------------------------------------------------------
 
+/**
+ * "true"/"false"/"null"/numeric input becomes the typed value. Event and field
+ * values are typed (`isPremium: true`) and the evaluator compares with strict
+ * `===`, so a text input that only ever produced strings could never match
+ * them. To author the literal STRING "true", use the raw JSON editor.
+ */
+function coerceScalar(raw: string): string | number | boolean | null {
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  if (raw === 'null') return null
+  if (raw.trim() !== '' && !Number.isNaN(Number(raw))) return Number(raw)
+  return raw
+}
+
 function PredicateEditor({ predicate, onChange }: { predicate: any; onChange: (p: any) => void }) {
   const kind: PredicateKind | '__json' = predicateKind(predicate) ?? '__json'
   const setKind = (k: string) => {
@@ -597,11 +613,22 @@ function PredicateEditor({ predicate, onChange }: { predicate: any; onChange: (p
       {kind === 'fieldEquals' && (
         <div className="hstack" style={{ gap: 8 }}>
           <input className="input" placeholder="field" style={{ flex: 1 }} value={predicate.fieldEquals?.field ?? ''} onChange={(e) => onChange({ fieldEquals: { field: e.target.value, value: predicate.fieldEquals?.value } })} />
-          <input className="input" placeholder="value" style={{ flex: 1 }} value={String(predicate.fieldEquals?.value ?? '')} onChange={(e) => onChange({ fieldEquals: { field: predicate.fieldEquals?.field, value: e.target.value } })} />
+          {/* Uncontrolled: coercing the displayed text would eat "1." mid-typing. */}
+          <input className="input" placeholder="value" style={{ flex: 1 }} defaultValue={String(predicate.fieldEquals?.value ?? '')} onChange={(e) => onChange({ fieldEquals: { field: predicate.fieldEquals?.field, value: coerceScalar(e.target.value) } })} />
         </div>
       )}
       {kind === 'fieldExists' && (
         <input className="input" placeholder="customerType" value={predicate.fieldExists ?? ''} onChange={(e) => onChange({ fieldExists: e.target.value })} />
+      )}
+      {kind === 'triggerPropertyEquals' && (
+        <div className="hstack" style={{ gap: 8 }}>
+          <input className="input" placeholder="property" style={{ flex: 1 }} value={predicate.triggerPropertyEquals?.key ?? ''} onChange={(e) => onChange({ triggerPropertyEquals: { key: e.target.value, value: predicate.triggerPropertyEquals?.value ?? '' } })} />
+          {/* Uncontrolled: coercing the displayed text would eat "1." mid-typing. */}
+          <input className="input" placeholder="value" style={{ flex: 1 }} defaultValue={String(predicate.triggerPropertyEquals?.value ?? '')} onChange={(e) => onChange({ triggerPropertyEquals: { key: predicate.triggerPropertyEquals?.key ?? '', value: coerceScalar(e.target.value) } })} />
+        </div>
+      )}
+      {kind === 'triggerPropertyTruthy' && (
+        <input className="input" placeholder="wasReferred" value={predicate.triggerPropertyTruthy ?? ''} onChange={(e) => onChange({ triggerPropertyTruthy: e.target.value })} />
       )}
       {(kind === 'hasFiredEvent' || kind === 'notHasFiredEvent') && (
         <input

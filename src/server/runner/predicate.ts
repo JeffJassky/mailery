@@ -35,6 +35,18 @@ export async function evaluatePredicate(
     return ctx.contact.fields[p.fieldExists] !== undefined
   }
 
+  // Read from the run's own trigger event, NOT the contact — two concurrent
+  // runs for the same person can legitimately disagree here.
+  if ('triggerPropertyEquals' in p) {
+    return (
+      (ctx.run.triggerEvent?.properties ?? {})[p.triggerPropertyEquals.key] ===
+      p.triggerPropertyEquals.value
+    )
+  }
+  if ('triggerPropertyTruthy' in p) {
+    return Boolean((ctx.run.triggerEvent?.properties ?? {})[p.triggerPropertyTruthy])
+  }
+
   if ('subscriptionStatus' in p) {
     const sub = await ctx.collections.subscriptions.findOne({ externalId: ctx.contact.externalId })
     return sub?.status === p.subscriptionStatus

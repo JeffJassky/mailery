@@ -211,7 +211,14 @@ async function handleFireEvent(
     await ctx.collections.events.insertOne({
       externalId: run.externalId,
       name: step.eventName,
-      properties: step.properties ?? {},
+      // Inherit the triggering event's properties so a handoff carries the
+      // context that identifies what the run is ABOUT (which account, order,
+      // subscription, ...). A step's `properties` are static — authored once in
+      // the flow definition — so without this a fired event can only ever say
+      // "this contact", losing the scope the originating event supplied, and
+      // the receiving flow has nothing to resolve variables against. Explicit
+      // step.properties win on conflict.
+      properties: { ...(run.triggerEvent?.properties ?? {}), ...(step.properties ?? {}) },
       dedupeKey,
       occurredAt: new Date(),
       createdAt: new Date(),

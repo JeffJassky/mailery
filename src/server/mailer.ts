@@ -464,17 +464,31 @@ export class Mailer {
   async abortFlow(
     flowSlug: string,
     externalId: string,
-    opts: { reason?: string } = {},
+    opts: { reason?: string; matchTriggerProperties?: Record<string, unknown> } = {},
   ): Promise<{ abortedRuns: number; cancelledSends: number }> {
-    const parsed = abortFlowInputSchema.parse({ flowSlug, externalId, reason: opts.reason })
+    const parsed = abortFlowInputSchema.parse({
+      flowSlug,
+      externalId,
+      reason: opts.reason,
+      matchTriggerProperties: opts.matchTriggerProperties,
+    })
     const flow = await this.collections.flows.findOne(
       { slug: parsed.flowSlug },
       { projection: { _id: 1 } },
     )
     if (!flow) throw new Error(`abortFlow: unknown flow slug "${parsed.flowSlug}"`)
 
+    // Dotted paths so the match is against individual trigger properties; a
+    // nested-object equality would demand the whole properties bag match.
+    const triggerMatch = Object.fromEntries(
+      Object.entries(parsed.matchTriggerProperties ?? {}).map(([k, v]) => [
+        `triggerEvent.properties.${k}`,
+        v,
+      ]),
+    )
+
     const result = await this.abortActiveRuns(
-      { externalId: parsed.externalId, flowId: flow._id! },
+      { externalId: parsed.externalId, flowId: flow._id!, ...triggerMatch },
       parsed.reason ? `aborted_by_host:${parsed.reason}` : 'aborted_by_host',
     )
     if (result.abortedRuns > 0 || result.cancelledSends > 0) {
@@ -482,7 +496,11 @@ export class Mailer {
         actor: 'host',
         action: 'flow.abort',
         resource: { collection: 'mailer_flow_runs', slug: parsed.flowSlug },
-        diffSummary: `abortFlow slug=${parsed.flowSlug} externalId=${parsed.externalId} runs=${result.abortedRuns} sends=${result.cancelledSends}${parsed.reason ? ` reason=${parsed.reason}` : ''}`,
+        // Record the scope: without it a one-account abort and an abort-every-
+        // run-for-this-contact are indistinguishable in the audit trail.
+        diffSummary: `abortFlow slug=${parsed.flowSlug} externalId=${parsed.externalId} scope=${
+          parsed.matchTriggerProperties ? JSON.stringify(parsed.matchTriggerProperties) : 'all'
+        } runs=${result.abortedRuns} sends=${result.cancelledSends}${parsed.reason ? ` reason=${parsed.reason}` : ''}`,
       })
     }
     return result
@@ -514,7 +532,9 @@ export class Mailer {
   }
 
   private async abortActiveRuns(
-    filter: { externalId: string; flowId?: ObjectId },
+    // Open-ended extra keys carry caller-supplied dotted paths (e.g.
+    // 'triggerEvent.properties.accountId') straight into the run query.
+    filter: { externalId: string; flowId?: ObjectId } & Record<string, unknown>,
     exitReason: string,
   ): Promise<{ abortedRuns: number; cancelledSends: number }> {
     const runs = await this.collections.flowRuns

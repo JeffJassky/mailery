@@ -56,6 +56,8 @@ export type PredicateKind =
   | 'notHasTag'
   | 'fieldEquals'
   | 'fieldExists'
+  | 'triggerPropertyEquals'
+  | 'triggerPropertyTruthy'
   | 'hasFiredEvent'
   | 'notHasFiredEvent'
   | 'subscriptionStatus'
@@ -78,6 +80,8 @@ export const PREDICATE_KINDS: readonly PredicateKindOption[] = [
   { value: 'notHasTag', label: 'does NOT have tag' },
   { value: 'fieldEquals', label: 'field equals' },
   { value: 'fieldExists', label: 'field exists' },
+  { value: 'triggerPropertyEquals', label: 'trigger property equals' },
+  { value: 'triggerPropertyTruthy', label: 'trigger property is set' },
   { value: 'hasFiredEvent', label: 'fired event' },
   { value: 'notHasFiredEvent', label: 'has NOT fired event' },
   { value: 'subscriptionStatus', label: 'subscription status' },
@@ -104,6 +108,8 @@ export function defaultPredicate(kind: PredicateKind): Predicate {
     case 'notHasTag': return { notHasTag: 'cold' }
     case 'fieldEquals': return { fieldEquals: { field: 'tier', value: 'Pro' } }
     case 'fieldExists': return { fieldExists: 'tier' }
+    case 'triggerPropertyEquals': return { triggerPropertyEquals: { key: 'plan', value: 'pro' } }
+    case 'triggerPropertyTruthy': return { triggerPropertyTruthy: 'wasReferred' }
     case 'hasFiredEvent': return { hasFiredEvent: 'Activated app' }
     case 'notHasFiredEvent': return { notHasFiredEvent: 'Cancelled' }
     case 'subscriptionStatus': return { subscriptionStatus: 'subscribed' }

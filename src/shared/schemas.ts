@@ -88,6 +88,26 @@ export const abortFlowInputSchema = z.object({
   flowSlug: slugSchema,
   externalId: externalIdSchema,
   reason: z.string().min(1).max(200).optional(),
+  /**
+   * Restrict the abort to runs whose trigger event carried these properties —
+   * e.g. `{ accountId }` to cancel one account's series while the same
+   * contact's other accounts keep running. Omit to abort every active run for
+   * the contact on this flow.
+   *
+   * Keys and values are both constrained because these go straight into a
+   * Mongo query. Values are primitives only: an object value like
+   * `{ $ne: null }` would reach the query as an OPERATOR and match every
+   * scoped run, turning a one-account abort into abort-everything. Hosts
+   * typically pass an id from a request body, so treat it as untrusted. The
+   * key regex likewise blocks `$`-prefixed keys and dots (a dot would silently
+   * extend the path and change match semantics).
+   */
+  matchTriggerProperties: z
+    .record(
+      z.string().regex(/^[A-Za-z0-9_]+$/),
+      z.union([z.string(), z.number(), z.boolean(), z.null()]),
+    )
+    .optional(),
 })
 export type AbortFlowInput = z.infer<typeof abortFlowInputSchema>
 
@@ -169,6 +189,13 @@ export const predicateSchema: z.ZodType<unknown> = z.lazy(() =>
     z.object({ notHasTag: z.string() }),
     z.object({ fieldEquals: z.object({ field: z.string(), value: z.unknown() }) }),
     z.object({ fieldExists: z.string() }),
+    z.object({
+      triggerPropertyEquals: z.object({
+        key: z.string().min(1),
+        value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+      }),
+    }),
+    z.object({ triggerPropertyTruthy: z.string().min(1) }),
     z.object({
       hasFiredEvent: z.string(),
       sinceFlowStart: z.boolean().optional(),
