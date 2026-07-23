@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.0 — Redis queue prefix
+
+### Added
+
+- **`queue.prefix` for the Bull driver.** All mailery Redis keys (queues,
+  workers, the repeating tick scheduler) are namespaced under the prefix, so
+  multiple mailery instances can share one Redis cluster without seeing each
+  other's jobs — typically one prefix per environment
+  (`mailery-dev` / `mailery-prod`):
+
+  ```ts
+  queue: { driver: 'bull', redis: { url }, prefix: 'mailery-prod' }
+  ```
+
+  `Mailer.fromEnv` reads it from `MAILER_QUEUE_PREFIX`. Prefixes containing
+  `:` (BullMQ's key separator) are rejected at init. Changing an instance's
+  prefix orphans jobs under the old one — drain first, as with a driver swap.
+
 ## 0.8.1 — Queue and scheduling correctness
 
 A full review of the queue drivers and runner turned up a set of scheduling and
