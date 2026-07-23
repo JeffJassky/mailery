@@ -15,6 +15,7 @@ import type {
   SubscriptionStatus,
   SendStatus,
   TemplateKind,
+  TemplateBodyFormat,
   SuppressionScope,
   SuppressionReason,
   FlowRunStatus,
@@ -219,6 +220,8 @@ export interface TemplateDoc {
   >
   draft: TemplateDraft | null
   tags: string[]
+  /** Wire format for the body. Absent on documents written before 0.11. */
+  bodyFormat?: TemplateBodyFormat
   trackOpens: boolean
   trackClicks: boolean
   stats: {

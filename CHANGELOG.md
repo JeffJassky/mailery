@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.0 — Plain-text-only templates
+
+### Added
+
+- **`bodyFormat` on templates: `'multipart'` (default) or `'text_only'`.**
+  A text_only template sends its plain-text part alone — no HTML part at all —
+  for mail that should read as if a person typed it rather than as a designed
+  message. Settable per template in the editor (Body format), or via the
+  template update API.
+
+  The trade is deliberate and total: **a text_only send records no opens and
+  no clicks.** The open pixel needs an HTML part to live in, and click
+  rewriting is skipped on purpose — swapping readable URLs for opaque
+  `/m/click/...` redirects in text a recipient reads literally would undo the
+  reason to choose this format. Engagement-driven features (open-based
+  sunsetting, click predicates) therefore see nothing from these sends; use
+  multipart where that data matters.
+
+  Existing templates are unaffected — the field is optional and absent
+  documents behave exactly as before. `SendArgs.html` is now optional, and the
+  SendGrid provider omits the key entirely rather than sending an empty part.
+  Test sends and Mail-Tester checks from the editor match the real wire shape.
+
 ## 0.10.2 — Heartbeat visible from the web process
 
 ### Fixed

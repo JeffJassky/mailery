@@ -194,20 +194,30 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   }
 
   // 4. Apply tracking using the now-known send id.
-  const tracking = applyTracking(rendered.html, {
-    sendId: String(send._id),
-    publicUrl: ctx.config.publicUrl,
-    trackOpens: template.trackOpens ?? ctx.config.trackOpens,
-    trackClicks: template.trackClicks ?? ctx.config.trackClicks,
-    preserveUrls: [renderCtx.unsubscribeUrl],
-  })
+  //
+  // text_only skips this entirely: the open pixel needs an HTML part to live
+  // in, and click rewriting would replace readable URLs with opaque redirects
+  // in text a recipient reads literally — the opposite of what the format is
+  // for. Such a send reports no opens and no clicks by design.
+  const textOnly = template.bodyFormat === 'text_only'
+  const tracking = textOnly
+    ? { html: '', links: [] as Array<{ linkId: string; url: string }> }
+    : applyTracking(rendered.html, {
+        sendId: String(send._id),
+        publicUrl: ctx.config.publicUrl,
+        trackOpens: template.trackOpens ?? ctx.config.trackOpens,
+        trackClicks: template.trackClicks ?? ctx.config.trackClicks,
+        preserveUrls: [renderCtx.unsubscribeUrl],
+      })
 
   await ctx.collections.sends.updateOne(
     { _id: send._id },
     {
       $set: {
         links: tracking.links,
-        bodyHash: sha256(tracking.html),
+        // Hash what actually goes out, so a text_only send's fingerprint
+        // tracks the text body rather than an HTML part it never had.
+        bodyHash: sha256(textOnly ? rendered.plainText : tracking.html),
         status: 'sending',
         fromName: rendered.fromName,
         fromEmail: rendered.fromEmail,
@@ -243,7 +253,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       fromEmail: rendered.fromEmail,
       replyTo: rendered.replyTo ?? undefined,
       subject: rendered.subject,
-      html: tracking.html,
+      ...(textOnly ? {} : { html: tracking.html }),
       text: rendered.plainText,
       headers,
       messageMeta: { sendId: String(send._id) },

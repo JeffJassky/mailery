@@ -124,7 +124,8 @@ export interface SendArgs {
   fromEmail: string
   replyTo?: string
   subject: string
-  html: string
+  /** Omitted for `text_only` templates — send the text part alone. */
+  html?: string
   text: string
   headers?: Record<string, string>
   messageMeta?: Record<string, string>

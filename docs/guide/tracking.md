@@ -86,6 +86,11 @@ await Mailer.init({
 })
 ```
 
+Templates with `bodyFormat: 'text_only'` track nothing regardless of these
+flags — no HTML part means nowhere for the open pixel, and click rewriting is
+skipped so the text keeps readable URLs. See
+[Plain-text-only templates](./templates.md#plain-text-only-templates).
+
 ## IPs
 
 Mailery does **not** store recipient IPs by default. Only User-Agent and timestamp. To opt in (for compliance investigations):

@@ -44,6 +44,7 @@ export interface TemplateSpec {
   plainText?: string
   variablesSchema?: TemplateDoc['variablesSchema']
   tags?: string[]
+  bodyFormat?: TemplateDoc['bodyFormat']
   trackOpens?: boolean
   trackClicks?: boolean
   published?: boolean
@@ -80,6 +81,7 @@ export async function buildTemplate(spec: TemplateSpec): Promise<TemplateDoc> {
     variablesSchema: spec.variablesSchema ?? {},
     draft: null,
     tags: spec.tags ?? [],
+    bodyFormat: spec.bodyFormat ?? 'multipart',
     trackOpens: spec.trackOpens ?? false,
     trackClicks: spec.trackClicks ?? false,
     stats: {

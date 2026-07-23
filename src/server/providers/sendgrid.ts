@@ -49,7 +49,10 @@ export class SendGridProvider implements MailProvider {
       replyTo: args.replyTo,
       subject: args.subject,
       text: args.text,
-      html: args.html,
+      // Omit the key entirely rather than sending `html: undefined` — a
+      // text_only template must produce a single-part text/plain message, and
+      // an explicit undefined can still serialize into an empty HTML part.
+      ...(args.html ? { html: args.html } : {}),
       headers: args.headers,
       customArgs: args.messageMeta,
       trackingSettings: {

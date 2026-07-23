@@ -39,6 +39,9 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const [fromName, setFromName] = React.useState<string>(tpl.draft?.fromName ?? tpl.fromName ?? '')
   const [fromEmail, setFromEmail] = React.useState<string>(tpl.draft?.fromEmail ?? tpl.fromEmail ?? '')
   const [replyTo, setReplyTo] = React.useState<string>(tpl.draft?.replyTo ?? tpl.replyTo ?? '')
+  // Wire format lives on the template, not the draft — it describes how the
+  // body is transmitted, not what the body says.
+  const [bodyFormat, setBodyFormat] = React.useState<string>(tpl.bodyFormat ?? 'multipart')
   const [dirty, setDirty] = React.useState(false)
   const [status, setStatus] = React.useState<string>('')
   const [busy, setBusy] = React.useState(false)
@@ -202,6 +205,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       fromName: fromName || undefined,
       fromEmail: fromEmail || undefined,
       replyTo: replyTo || undefined,
+      bodyFormat,
     })
   }
 
@@ -332,7 +336,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
                   onChange={(e) => { setFromEmail(e.target.value); setDirty(true) }}
                 />
               </div>
-              <div className="field" style={{ marginBottom: 0 }}>
+              <div className="field">
                 <label className="field-label">Reply-to</label>
                 <input
                   className="input"
@@ -340,6 +344,22 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
                   placeholder="(same as From)"
                   onChange={(e) => { setReplyTo(e.target.value); setDirty(true) }}
                 />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label className="field-label">Body format</label>
+                <select
+                  className="select"
+                  value={bodyFormat}
+                  onChange={(e) => { setBodyFormat(e.target.value); setDirty(true) }}
+                >
+                  <option value="multipart">HTML + plain text</option>
+                  <option value="text_only">Plain text only</option>
+                </select>
+                <div className="text-xs subtle" style={{ marginTop: 4 }}>
+                  {bodyFormat === 'text_only'
+                    ? 'Sends the text part alone, so it reads as if typed by a person. No opens or clicks can be recorded.'
+                    : 'Standard: HTML with a plain-text alternative. Opens and clicks are tracked.'}
+                </div>
               </div>
             </div>
           </div>

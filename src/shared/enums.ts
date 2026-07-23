@@ -19,6 +19,21 @@ export type SendStatus =
 
 export type TemplateKind = 'transactional' | 'marketing'
 
+/**
+ * How a template's body goes on the wire.
+ *
+ *   multipart — HTML + plain-text alternative (the default, and what almost
+ *               every template wants).
+ *   text_only — plain text alone, no HTML part at all. For mail that should
+ *               read as if it were typed by a person. Open tracking is
+ *               impossible without an HTML part to carry the pixel, and click
+ *               tracking is skipped too (rewriting bare URLs in text produces
+ *               the opaque redirect links this format exists to avoid), so a
+ *               text_only send reports no opens and no clicks — by design.
+ */
+export type TemplateBodyFormat = 'multipart' | 'text_only'
+export const TEMPLATE_BODY_FORMATS: readonly TemplateBodyFormat[] = ['multipart', 'text_only'] as const
+
 export type SuppressionScope = 'all' | 'marketing' | 'transactional'
 
 export type SuppressionReason =

@@ -25,6 +25,7 @@ import { validateSenderDomain } from '../templates/sender-domain.js'
 import { lintTemplate } from '../templates/linter.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
 import type { Contact } from '../../shared/types.js'
+import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
 import { runSetupChecks } from './setup-status.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -1119,6 +1120,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
             lastModifiedAt: now,
           },
           tags: [],
+          bodyFormat: 'multipart',
           trackOpens: kind === 'marketing',
           trackClicks: kind === 'marketing',
           stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
@@ -1146,7 +1148,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
       const tpl = await c.templates.findOne({ slug: req.params.slug })
       if (!tpl) return res.status(404).json({ error: 'not_found' })
 
-      const { subject, preheader, mjml, editorJson, notes, name, fromName, fromEmail, replyTo, kind, trackOpens, trackClicks } = req.body ?? {}
+      const { subject, preheader, mjml, editorJson, notes, name, fromName, fromEmail, replyTo, kind, bodyFormat, trackOpens, trackClicks } = req.body ?? {}
 
       const set: Record<string, unknown> = {
         'draft.lastModifiedBy': (req as any).actor,
@@ -1178,6 +1180,7 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
           })
         }
       }
+      if (TEMPLATE_BODY_FORMATS.includes(bodyFormat)) set.bodyFormat = bodyFormat
       if (typeof trackOpens === 'boolean') set.trackOpens = trackOpens
       if (typeof trackClicks === 'boolean') set.trackClicks = trackClicks
 
@@ -1287,7 +1290,9 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
           fromEmail: tpl.fromEmail,
           replyTo: tpl.replyTo ?? undefined,
           subject: draft.subject,
-          html: compiled.html,
+          // Match the real send shape — a text_only template's deliverability
+          // should be scored on the single-part message it actually sends.
+          ...(tpl.bodyFormat === 'text_only' ? {} : { html: compiled.html }),
           text: compiled.plainText,
           headers: {},
           messageMeta: { mailTesterCheckId: checkId },
@@ -1712,7 +1717,9 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         fromName: rendered.fromName,
         fromEmail: rendered.fromEmail,
         subject: `[TEST] ${rendered.subject}`,
-        html: tracking.html,
+        // Match the real send shape, or a test of a text_only template would
+        // arrive as HTML and hide exactly what the author is checking.
+        ...(tpl.bodyFormat === 'text_only' ? {} : { html: tracking.html }),
         text: rendered.plainText,
       })
       await mailer.audit({

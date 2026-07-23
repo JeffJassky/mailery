@@ -204,6 +204,30 @@ Auto-derived from compiled HTML on publish. To override:
 }
 ```
 
+## Plain-text-only templates
+
+By default every send is multipart: HTML plus a plain-text alternative. Set
+`bodyFormat: 'text_only'` to send the plain-text part alone — no HTML part at
+all — for mail that should read as if a person typed it:
+
+```ts
+{
+  bodyFormat: 'text_only',   // default: 'multipart'
+}
+```
+
+Also settable in the editor under **Body format**.
+
+The trade is deliberate and total: a `text_only` send records **no opens and no
+clicks**. The open pixel needs an HTML part to live in, and click rewriting is
+skipped on purpose — swapping readable URLs for opaque `/m/click/...` redirects
+in text a recipient reads literally would undo the reason to choose this
+format. Engagement-driven features (open-based sunsetting, click predicates)
+see nothing from these sends; use `multipart` where that data matters.
+
+Test sends and Mail-Tester checks match the real wire shape, so what you check
+is what recipients get.
+
 ## Tracking per template
 
 ```ts
@@ -214,3 +238,7 @@ Auto-derived from compiled HTML on publish. To override:
 ```
 
 For transactional receipts you usually want both `false` — no need to track opens on a password reset.
+
+Note `bodyFormat: 'text_only'` overrides both: with no HTML part there is
+nowhere for the pixel or rewritten links to go, so such sends track nothing
+regardless of these flags.
