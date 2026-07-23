@@ -135,4 +135,50 @@ describe('runSetupChecks', () => {
       expect(Date.now() - new Date(doc!.updatedAt).getTime()).toBeLessThan(5000)
     })
   })
+
+  /**
+   * Web/worker split: the workerless web process serves the admin UI, so it is
+   * exactly where an operator looks for "are the workers alive". The check
+   * must run there — the heartbeat lives in shared Mongo — with wording that
+   * points at the worker process instead of accusing this one.
+   */
+  describe('workers heartbeat in a workerless process', () => {
+    let H: TestMailerHarness
+    beforeAll(async () => {
+      H = await createTestMailer({})
+      // Simulate the prod shape: real queue driver, workers elsewhere. The
+      // harness runs the noop driver; only the config fields the checks read
+      // are overridden, and noop getWaitingCount() satisfies the queue check.
+      ;(H.mailer.config as any).queue = { ...H.mailer.config.queue, driver: 'agenda' }
+      ;(H.mailer.config as any).workerless = true
+    }, 60_000)
+    afterAll(async () => { await H?.stop() })
+    beforeEach(async () => {
+      await H.mailer.collections.health.deleteMany({})
+    })
+
+    it('errors on a stale heartbeat and points at the worker process', async () => {
+      await H.mailer.collections.health.insertOne({
+        _id: 'agg',
+        updatedAt: new Date(Date.now() - 14 * 3_600_000),
+      } as any)
+      const check = (await runSetupChecks(H.mailer)).checks.find((c) => c.name === 'workers_heartbeat')
+      expect(check?.severity).toBe('error')
+      expect(check?.message).toContain('14h ago')
+      expect(check?.hint).toContain('another process')
+    })
+
+    it('warns (not errors) when no heartbeat exists yet — fresh install', async () => {
+      const check = (await runSetupChecks(H.mailer)).checks.find((c) => c.name === 'workers_heartbeat')
+      expect(check?.severity).toBe('warn')
+      expect(check?.message).toContain('another process')
+    })
+
+    it('reports ok on a fresh heartbeat', async () => {
+      await H.mailer.collections.health.insertOne({ _id: 'agg', updatedAt: new Date() } as any)
+      const check = (await runSetupChecks(H.mailer)).checks.find((c) => c.name === 'workers_heartbeat')
+      expect(check?.severity).toBe('ok')
+      expect(check?.message).toContain('worker process')
+    })
+  })
 })

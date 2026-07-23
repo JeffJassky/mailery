@@ -36,7 +36,12 @@ export async function runSetupChecks(mailer: Mailer): Promise<SetupStatus> {
 
   checks.push(await checkMongo(mailer))
   checks.push(await checkQueue(mailer))
-  if (mailer.config.queue.driver !== 'noop' && !mailer.config.workerless) {
+  // Run the heartbeat check even in a workerless process: in a web/worker
+  // split the workerless web process is the one WITH the admin UI, so it is
+  // exactly where an operator will look for "are the workers alive". The
+  // heartbeat lives in Mongo, which both processes share, so the check works
+  // from either side — only the remediation wording differs.
+  if (mailer.config.queue.driver !== 'noop') {
     checks.push(await checkWorkersHeartbeat(mailer))
   }
   checks.push(await checkCircuitBreaker(mailer))
@@ -116,13 +121,19 @@ async function checkWorkersHeartbeat(mailer: Mailer): Promise<SetupCheck> {
   const tickIntervalMs = mailer.config.tickIntervalSeconds * 1000
   const staleAfterMs = Math.max(tickIntervalMs * 3, 30_000) // tolerate a couple missed ticks
 
+  // This process may not run the workers itself (web/worker split) — keep the
+  // verdicts identical either way, but point the operator at the right place.
+  const workerless = mailer.config.workerless
+
   if (!h) {
     return {
       name: 'workers_heartbeat',
       label: 'Background workers',
       severity: 'warn',
-      message: 'no tick has run yet',
-      hint: 'If your separate worker process is started, the heartbeat will appear within one tick interval. If you forgot to run `mailer.startWorkers()`, sends will sit queued indefinitely.',
+      message: workerless ? 'no tick has run yet (workers run in another process)' : 'no tick has run yet',
+      hint: workerless
+        ? 'This process is workerless; the heartbeat comes from your separate worker process. If that process is started, the heartbeat will appear within one tick interval — a fresh install legitimately has none yet.'
+        : 'If your separate worker process is started, the heartbeat will appear within one tick interval. If you forgot to run `mailer.startWorkers()`, sends will sit queued indefinitely.',
     }
   }
 
@@ -133,14 +144,16 @@ async function checkWorkersHeartbeat(mailer: Mailer): Promise<SetupCheck> {
       label: 'Background workers',
       severity: 'error',
       message: `last tick ${humanDuration(ageMs)} ago (expected within ${humanDuration(tickIntervalMs)})`,
-      hint: 'Workers appear to be down. Sends and flow advancement are halted. Restart your worker process (`mailer.startWorkers()`).',
+      hint: workerless
+        ? 'Workers run in another process, and that process appears to be down. Sends and flow advancement are halted. Restart the process that calls `mailer.startWorkers()`.'
+        : 'Workers appear to be down. Sends and flow advancement are halted. Restart your worker process (`mailer.startWorkers()`).',
     }
   }
   return {
     name: 'workers_heartbeat',
     label: 'Background workers',
     severity: 'ok',
-    message: `last tick ${humanDuration(ageMs)} ago`,
+    message: `last tick ${humanDuration(ageMs)} ago${workerless ? ' (worker process)' : ''}`,
   }
 }
 
