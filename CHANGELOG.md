@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.10.0 — Per-scope flow runs
+
+One contact, several of the same thing (accounts, workspaces, orders), one
+series each. Fire the trigger with a scope-qualified `dedupeKey` and
+`once: false`, and each scope gets its own run; the additions below let those
+runs be cancelled independently and branch on their own context.
+
+### Changed
+
+- **`fire_event` steps now inherit the triggering event's properties.** A
+  step's `properties` are authored once in the flow definition, so a fired
+  event could previously only say "this contact" — it lost whatever scope the
+  originating event carried, leaving the receiving flow with nothing to
+  resolve variables against. The run's `triggerEvent.properties` are now
+  merged in underneath; explicit `step.properties` still win on conflict.
+
+  This applies to **every** flow, not only scoped ones. Downstream flows and
+  any host matching on fired-event properties will see additional keys. If a
+  host depends on fired events carrying exactly the authored properties,
+  review those handlers before upgrading.
+
+### Added
+
+- **`abortFlow(..., { matchTriggerProperties })`.** Restricts an abort to runs
+  whose trigger event carried the given properties, so a host whose subject is
+  an account but whose contact is a user can end one account's series while
+  that person's other accounts keep running:
+
+  ```ts
+  await mailer.abortFlow('trial-onboarding', userId, {
+    reason: 'upgraded',
+    matchTriggerProperties: { accountId },
+  })
+  ```
+
+  Omitting it keeps the previous behaviour (abort every active run for the
+  contact on that flow). Keys must match `^[A-Za-z0-9_]+$` and values must be
+  primitives — these go into a Mongo query, and an object value such as
+  `{ $ne: null }` would otherwise reach it as an operator and match every
+  scoped run. The scope is recorded in the audit log so a scoped abort is
+  distinguishable from an abort-all.
+
+- **`triggerPropertyEquals` / `triggerPropertyTruthy` predicates.** Gate a
+  condition or branch on a property of the event that started the run rather
+  than on contact state:
+
+  ```ts
+  { type: 'condition', test: { triggerPropertyTruthy: 'wasReferred' }, ifFalse: 'continue' }
+  ```
+
+  Use these when the gate depends on what the run is *about* instead of a
+  durable trait of the person. A tag is shared by every concurrent run for
+  that contact, so the last writer wins and branching silently changes in runs
+  already in flight; a trigger property is fixed per run.
+
+  The flow editor's value inputs for `triggerPropertyEquals` and `fieldEquals`
+  now coerce `true`/`false`/`null`/numeric text to typed values — the
+  evaluator compares with strict `===`, so a string-only input could never
+  match a typed property like `isPremium: true`. The literal string `"true"`
+  is still authorable via the raw JSON editor.
+
 ## 0.9.0 — Redis queue prefix
 
 ### Added
