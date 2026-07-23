@@ -13,9 +13,27 @@ import type { RunnerContext } from './index.js'
 import { computeDeliveryTime } from './delivery-window.js'
 import { handleSend } from './send.js'
 
+/**
+ * Tolerance on the not-yet-due check below. A delayed job may fire a few
+ * milliseconds early, and clocks between app servers drift; without slack
+ * those runs would bounce to the sweep and stall for a whole tick.
+ */
+const DUE_SKEW_MS = 1_000
+
 export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Promise<void> {
   const run = await ctx.collections.flowRuns.findOne({ _id: runId })
   if (!run || run.status !== 'active') return
+
+  // Don't touch a run that is parked in the future. The schedule used to be
+  // enforced only by the callers — the sweep's `nextActionAt <= now` filter and
+  // the advance job's delay — which is a time-of-check/time-of-use race: the
+  // sweep selects a run that is due, the run's own advance job parks it on a
+  // wait in the meantime, and the sweep then processes the step AFTER the wait,
+  // skipping it entirely. That is reachable on every tick, because a freshly
+  // triggered run is inserted with `nextActionAt = now` and `runTick` runs the
+  // trigger scan and the sweep back to back — so a flow whose first step is a
+  // wait could lose it. The invariant belongs with the state, not the caller.
+  if (run.nextActionAt && run.nextActionAt.getTime() > Date.now() + DUE_SKEW_MS) return
 
   const flow = await ctx.collections.flows.findOne({ _id: run.flowId })
   if (!flow) {
