@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.1 — Waits hold
+
+### Fixed
+
+- **A flow whose first step is a `wait` could skip it.** The schedule was
+  enforced only by the callers — the sweep's `nextActionAt <= now` filter and
+  the advance job's delay — so the sweep could select a run while it was due,
+  have the run's own advance job park it on a wait in the meantime, and then
+  process the step AFTER the wait. This was reachable on every tick: a freshly
+  triggered run is inserted with `nextActionAt = now`, and `runTick` runs the
+  trigger scan and the sweep back to back. A win-back flow opening with
+  "wait 4 days" would send its first mail immediately on entry.
+  `processOneRunStep` now refuses to act on a run parked in the future
+  (1s skew tolerance), so the schedule holds regardless of caller.
+
 ## 0.10.0 — Per-scope flow runs
 
 One contact, several of the same thing (accounts, workspaces, orders), one
