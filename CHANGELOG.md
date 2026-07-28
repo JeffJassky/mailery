@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.13.0 — Per-webhook SendGrid event webhook setup
+
+### Fixed
+
+- **`mailery setup-sendgrid` configured the event webhook through SendGrid's
+  legacy single-webhook API, so it could not share an account with anything
+  else.** `GET`/`PATCH /v3/user/webhooks/event/settings` present the account as
+  if it held exactly one event webhook; a PATCH there repoints whichever webhook
+  is oldest by `created_date`. One SendGrid account serving two mailery
+  instances — separate products, or staging beside production — is an ordinary
+  setup, and under that view the instances were invisible to each other. Without
+  `--force` the CLI threw on any account that already had a webhook, after
+  domain authentication had already run, leaving setup half-finished. With
+  `--force` it repointed the other instance's webhook, and that failure is
+  silent on the far side: nothing errors, the old endpoint simply stops being
+  called, so bounces, spam reports and unsubscribes stop ingesting there and the
+  suppression list quietly freezes while that app keeps mailing addresses which
+  already hard-bounced or complained.
+
+  Setup now reads `/settings/all`, matches on the URL you passed, and either
+  updates that webhook by `id` or creates a new one alongside the existing
+  entries — every other webhook on the account is left untouched. The
+  verification key comes from `/settings/signed/{id}`, so each instance gets its
+  own key rather than an account-wide one. Accounts that don't expose the
+  multi-webhook endpoint fall back to the previous singleton behaviour.
+
+  Nothing changes at runtime: `SendGridProvider({ webhookVerificationKey })`
+  already took a single key per instance, and each instance verifies only its
+  own webhook. **Existing installs:** re-running the CLI adopts the webhook
+  matching `--webhook-url` and rewrites nothing else. Keys are per-webhook and
+  not interchangeable, so set `SENDGRID_WEBHOOK_VERIFICATION_KEY` per
+  environment from that run's output.
+
+- **`--force` no longer means "repoint whatever is there, whoever owns it."** On
+  accounts with the multi-webhook API it is unnecessary — a webhook for a
+  different URL is never rewritten — and the CLI says so. On legacy
+  single-webhook accounts it keeps its old meaning, and both the refusal message
+  and the `--force` warning now spell out that the previous consumer stops
+  receiving events.
+
+### Added
+
+- **`--webhook-name`** sets `friendly_name` on a webhook mailery creates
+  (default `mailery <host>`), so a human looking at the SendGrid dashboard can
+  tell which app owns which webhook.
+- `setupSendgrid()` returns `webhookId` — SendGrid's id for the webhook it
+  configured, absent on legacy single-webhook accounts.
+
 ## 0.12.1 — Agenda queue retention and namespacing
 
 ### Fixed
