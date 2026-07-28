@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.0 — Link and image lint rules
+
+### Added
+
+- **Four new content-linter rules, all warnings — none block publish.**
+  `offdomain_links` fires when more than half a body's resolvable links
+  point away from the `fromEmail` domain; link domains that match the
+  sending domain are what build reputation, and a body pointing mostly
+  elsewhere reads like a forwarded template. Hostname matching is loose on
+  purpose (exact, subdomain either direction, or a shared last-two-label
+  suffix), so `mail.example.com` and `www.example.com` count as one site —
+  a false off-domain warning costs the operator more than a missed one.
+  Merge-tag hrefs, `mailto:`, and relative URLs are skipped.
+
+  `insecure_link` flags `http://` hrefs. This is a scheme check only —
+  liveness (200 vs 404) needs network I/O and stays out of the pure lint
+  pass. `image_missing_alt` and `image_only_link` cover the images-blocked
+  case: most clients hide images on first open, so an image with no alt
+  text is invisible and an image-only call-to-action is unclickable.
+
 ## 0.11.0 — Plain-text-only templates
 
 ### Added
