@@ -73,6 +73,7 @@ async function main() {
             domains: argDomains,
             subdomain: opts.subdomain ? String(opts.subdomain) : undefined,
             webhookUrl: argWebhook,
+            webhookName: opts['webhook-name'] ? String(opts['webhook-name']) : undefined,
             cloudflare: Boolean(opts.cloudflare),
             cloudflareZone: opts['cloudflare-zone'] ? String(opts['cloudflare-zone']) : undefined,
             force: Boolean(opts.force),
@@ -217,15 +218,22 @@ Usage:
 Options:
   --domain <d>            Domain to authenticate. Repeat (or comma-separate)
                           to authenticate multiple in one run, e.g. when
-                          isolating marketing from transactional. The event
-                          webhook itself is account-level and only gets set up
-                          once.
+                          isolating marketing from transactional. One event
+                          webhook is set up per run, regardless of domain count.
   --subdomain <s>         Sub-label for the link branding CNAME (default: em)
-  --webhook-url <u>       Public URL for the SendGrid event webhook
+  --webhook-url <u>       Public URL for the SendGrid event webhook. Matched
+                          against the account's existing webhooks: the one with
+                          this URL is updated, otherwise a new one is created
+                          alongside them. Other apps' webhooks are left alone.
+  --webhook-name <n>      friendly_name for a newly created webhook, shown in
+                          the SendGrid dashboard (default: "mailery <host>")
   --cloudflare            Publish DNS records via the Cloudflare API
   --cloudflare-zone <z>   Override the inferred zone (e.g. for multi-label
                           public suffixes like .co.uk)
-  --force                 Replace an existing event webhook URL if one is set
+  --force                 Legacy single-webhook accounts only: repoint the
+                          account's one event webhook at --webhook-url. This
+                          stops event delivery to whatever consumed the old URL.
+                          Ignored on accounts with the multi-webhook API.
   --interactive           Force interactive mode even when args are supplied
   --no-interactive        Disable interactive mode even when args are missing
                           (the script exits with usage instead of prompting —

@@ -213,15 +213,16 @@ The Cloudflare token needs **Zone:Read** + **DNS:Edit** for the zone you're publ
 
 Both the SendGrid and Cloudflare halves are fully idempotent. The script:
 
-- **Reads before it writes.** Domain auth: fetched first; only created when missing. Signed webhook: only PATCHes if signing is off. Event webhook: only PATCHes if URL or toggle values differ. Cloudflare records: only POSTs if no matching record exists, only PUTs if content drifted.
-- **Errors before it overwrites destructive state.** If a different webhook URL is already configured, the script refuses to clobber it without `--force`.
+- **Reads before it writes.** Domain auth: fetched first; only created when missing. Signed webhook: only PATCHes if signing is off. Event webhook: matched by URL against the account's existing webhooks, then only PATCHed if toggle values differ. Cloudflare records: only POSTs if no matching record exists, only PUTs if content drifted.
+- **Touches only its own webhook.** Other webhooks on the account — a second mailery install, a staging environment, an unrelated app — are listed but never modified. If none match `--webhook-url`, a new webhook is created alongside them.
+- **Errors before it overwrites destructive state.** On older accounts that only expose SendGrid's single-webhook API, repointing the one webhook slot away from another consumer requires `--force`.
 - **Is safe to re-run.** A second invocation against a fully-configured install issues only GET requests and exits 0.
 
 Use the same command in a deploy script, a Makefile, or just whenever DNS / SendGrid setup feels off — re-running converges to the desired state without surprises.
 
 ### Multiple sender domains in one run
 
-If you isolate marketing from transactional (recommended — see [Reputation isolation](#reputation-isolation-separate-domains-for-marketing-vs-transactional)), pass `--domain` more than once and the script handles all of them in a single invocation. Domain auth + DNS publish runs per-domain; the Event Webhook itself is an account-level setting and is only configured once at the end.
+If you isolate marketing from transactional (recommended — see [Reputation isolation](#reputation-isolation-separate-domains-for-marketing-vs-transactional)), pass `--domain` more than once and the script handles all of them in a single invocation. Domain auth + DNS publish runs per-domain; one Event Webhook — the one matching `--webhook-url` — is configured once at the end.
 
 ```bash
 npx mailery setup-sendgrid \
@@ -239,10 +240,15 @@ You can also comma-separate: `--domain news.example.com,mail.example.com`.
 |---|---|---|
 | `--domain` | required | The domain to authenticate (e.g. `news.example.com`). Repeat or comma-separate to authenticate multiple. |
 | `--subdomain` | `em` | The sub-label SendGrid uses for the link branding CNAME. |
-| `--webhook-url` | required | Public URL where SendGrid POSTs event webhooks. Account-level, configured once. |
+| `--webhook-url` | required | Public URL where SendGrid POSTs event webhooks. Updated in place if the account already has a webhook with this URL, otherwise created alongside the existing ones. |
+| `--webhook-name` | `mailery <host>` | `friendly_name` for a newly created webhook, so the SendGrid dashboard shows which app owns it. |
 | `--cloudflare` | off | Publish DNS records via the Cloudflare API. Requires `CLOUDFLARE_API_TOKEN`. |
 | `--cloudflare-zone` | inferred per domain | Override the parent zone (for multi-label public suffixes like `.co.uk`). |
-| `--force` | off | Allow overwriting an existing event webhook URL. |
+| `--force` | off | Legacy single-webhook accounts only: repoint the account's one webhook at `--webhook-url`, stopping event delivery to whatever consumed the old URL. Ignored on accounts with the multi-webhook API. |
+
+::: tip One SendGrid account, several apps
+Running mailery for two products, or staging next to production, works without `--force`: each install matches its own `--webhook-url` and gets its own signing key from SendGrid's per-webhook endpoint. Set `SENDGRID_WEBHOOK_VERIFICATION_KEY` per environment from that run's output — keys are not interchangeable between webhooks.
+:::
 
 ### Without Cloudflare
 

@@ -112,7 +112,8 @@ export async function runInteractive(
   // ---- Force --------------------------------------------------------------
   log('')
   const forceRaw = await prompter(
-    'If a different webhook URL is already configured on this SendGrid account, overwrite it? (y/N)',
+    'If this account only supports one event webhook and it points elsewhere, repoint it? ' +
+      '(y/N — stops event delivery to the old URL; ignored on multi-webhook accounts)',
     { defaultValue: 'n' },
   )
   const force = /^y/i.test(forceRaw)

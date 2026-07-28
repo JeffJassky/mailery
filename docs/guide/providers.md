@@ -44,9 +44,11 @@ SendGrid dashboard → **Settings → Mail Settings → Event Webhook**:
 - Toggle **Event Webhook Status** to **Enabled**.
 - Save.
 
+One SendGrid account can hold several event webhooks. If the account already serves another app (or a staging install), **create a new webhook** rather than editing the existing one — editing repoints it, and the old consumer stops receiving events without any error. Give yours a friendly name so the dashboard shows who owns it. `mailery setup-sendgrid` does exactly this, matching on the URL you pass.
+
 #### 3. Generate the Signed Event Webhook key
 
-Same settings page, scroll to **Signed Event Webhook**:
+Same settings page, on **your** webhook (keys are per-webhook — another webhook's key will fail verification), scroll to **Signed Event Webhook**:
 
 - Click **Enable Signing** if not already on.
 - SendGrid generates an **ECDSA public verification key** (PEM format).

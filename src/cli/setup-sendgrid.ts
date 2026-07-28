@@ -1,9 +1,10 @@
 /**
  * `mailery setup-sendgrid` — one-shot wiring of SendGrid for a domain.
  *
- * Idempotent. Re-running converges: existing domain auths are reused, existing
- * webhook config is preserved unless `--force` is passed, existing Cloudflare
- * DNS records with the correct values are left alone.
+ * Idempotent. Re-running converges: existing domain auths are reused, the event
+ * webhook matching `--webhook-url` is updated in place (others on the account
+ * are never touched), existing Cloudflare DNS records with the correct values
+ * are left alone.
  *
  *   npx mailery setup-sendgrid \
  *     --domain news.example.com \
@@ -22,13 +23,19 @@ export interface SetupSendgridOpts {
   domains: string[]
   /** Sub-label SendGrid uses for the link branding CNAME (default 'em'). */
   subdomain?: string
-  /** Where SendGrid should POST event webhooks. Account-level — only configured once regardless of domain count. */
+  /** Where SendGrid should POST event webhooks. One webhook per install, regardless of domain count. */
   webhookUrl: string
+  /** `friendly_name` for a newly created webhook, so the SendGrid dashboard shows which app owns it. */
+  webhookName?: string
   /** Publish DNS records via Cloudflare API. Requires CLOUDFLARE_API_TOKEN. */
   cloudflare?: boolean
   /** Override the parent zone if any domain isn't a subdomain of its eTLD+1. */
   cloudflareZone?: string
-  /** Replace an existing webhook URL if one is already set. */
+  /**
+   * Legacy single-webhook accounts only: repoint the account's one event webhook
+   * at `webhookUrl`. Ignored on accounts exposing the multi-webhook API, where a
+   * new webhook is created alongside the existing ones instead.
+   */
   force?: boolean
   /** Logger; defaults to console. Pass {} to silence. */
   logger?: { log?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void }
@@ -50,6 +57,8 @@ export interface SetupSendgridResult {
   domains: DomainSetupResult[]
   webhookKey: string
   webhookUrl: string
+  /** SendGrid's id for this install's webhook. Absent on legacy single-webhook accounts. */
+  webhookId?: string
   envSnippet: string
 }
 
@@ -169,28 +178,19 @@ export async function setupSendgrid(opts: SetupSendgridOpts): Promise<SetupSendg
   }
 
   info('')
-  info('=== Event webhook (account-level) ===')
+  info('=== Event webhook ===')
 
-  // ---- Account-level: Enable Signed Event Webhook + fetch public key -----
-  info('SendGrid → checking Signed Event Webhook…')
-  // SendGrid's GET /user/webhooks/event/settings/signed only returns
-  // `{ public_key }`. A non-empty key implies signing is already enabled —
-  // re-PATCHing `enabled: true` rotates the keypair, silently breaking
-  // signature verification everywhere the old key was deployed.
-  const signed = await sg.getSignedWebhookSettings()
-  let webhookKey: string
-  if (signed.public_key) {
-    info('  = signing already enabled; reusing existing public key')
-    webhookKey = signed.public_key
-  } else {
-    info('  → enabling signing')
-    webhookKey = await sg.enableSignedWebhook()
-    info('  ✓ verification key fetched')
-  }
-
-  // ---- Step 4: Configure Event Webhook URL + event toggles ----------------
+  // ---- Resolve this install's event webhook -------------------------------
+  // SendGrid's legacy endpoints (`/user/webhooks/event/settings`, `/settings/signed`)
+  // present the account as if it had exactly one event webhook: a PATCH there
+  // repoints whichever webhook is oldest by created_date. On an account shared
+  // with another mailery install (or staging alongside prod) that silently
+  // steals its events — no error anywhere, the other endpoint just stops being
+  // called, so its suppression list quietly freezes. Prefer the multi-webhook
+  // endpoints, which address webhooks by id, and match on url so each install
+  // only ever touches its own. Fall back to the legacy singleton only when the
+  // account/key can't see `/settings/all`.
   info('SendGrid → checking Event Webhook…')
-  const currentEvents = await sg.getEventWebhookSettings()
   const desiredEvents = {
     url: opts.webhookUrl,
     enabled: true,
@@ -206,17 +206,76 @@ export async function setupSendgrid(opts: SetupSendgridOpts): Promise<SetupSendg
     group_resubscribe: false,
     group_unsubscribe: false,
   }
-  if (currentEvents.url && currentEvents.url !== opts.webhookUrl && !opts.force) {
+
+  const listed = await sg.listEventWebhooks()
+  const existing = listed.webhooks.find((w) => sameWebhookUrl(w.url, opts.webhookUrl))
+  let webhookId: string | undefined
+
+  if (listed.mode === 'multi' && existing && !existing.id) {
+    // Without an id the only way to write is the account-wide endpoint, which
+    // repoints the oldest webhook — possibly someone else's. Stop instead.
     throw new Error(
-      `Event webhook is already configured for ${currentEvents.url}. ` +
-        `Pass --force to overwrite (this will redirect all future events to ${opts.webhookUrl}).`,
+      `SendGrid listed an event webhook for ${opts.webhookUrl} but did not return an id for it, so it can't be ` +
+        `updated without risking another webhook on the account. Update it from the SendGrid dashboard instead.`,
     )
   }
-  if (eventSettingsMatch(currentEvents, desiredEvents)) {
-    info(`  = webhook already configured for ${opts.webhookUrl}; nothing to change`)
+
+  if (listed.mode === 'multi' && existing) {
+    webhookId = existing.id
+    const label = ` #${existing.id}`
+    if (eventSettingsMatch(existing, desiredEvents)) {
+      info(`  = webhook${label} already configured for ${opts.webhookUrl}; nothing to change`)
+    } else {
+      await sg.updateEventWebhook(existing.id!, desiredEvents)
+      info(`  ✓ webhook${label} updated for ${opts.webhookUrl}`)
+    }
+  } else if (listed.mode === 'multi') {
+    const friendlyName = (opts.webhookName ?? defaultWebhookName(opts.webhookUrl, opts.domains)).slice(0, 64)
+    const created = await sg.createEventWebhook({ ...desiredEvents, friendly_name: friendlyName })
+    webhookId = created.id
+    info(`  + created event webhook${created.id ? ` #${created.id}` : ''} → ${opts.webhookUrl} ("${friendlyName}")`)
+    if (listed.webhooks.length > 0) {
+      info(`  = ${listed.webhooks.length} other event webhook(s) on this account left untouched`)
+      if (opts.force) info('    (--force had no effect: other webhooks are never repointed on this account)')
+    }
   } else {
-    await sg.setEventWebhookSettings(desiredEvents)
-    info(`  ✓ webhook URL set to ${opts.webhookUrl}`)
+    // Legacy singleton account: there is only one webhook slot, so pointing it
+    // at our URL takes it away from whoever had it. Refuse unless --force.
+    const current = listed.webhooks[0] ?? {}
+    if (current.url && !sameWebhookUrl(current.url, opts.webhookUrl)) {
+      if (!opts.force) {
+        throw new Error(
+          `This SendGrid account only exposes the legacy single-webhook API, and its event webhook is already ` +
+            `pointed at ${current.url}. Repointing it would silently stop event delivery to whatever consumes ` +
+            `that URL (bounces, spam reports and unsubscribes would stop ingesting there). Pass --force to ` +
+            `repoint it to ${opts.webhookUrl} anyway.`,
+        )
+      }
+      warn(`  ! repointing the account's only event webhook away from ${current.url} (--force)`)
+    }
+    if (eventSettingsMatch(current, desiredEvents)) {
+      info(`  = webhook already configured for ${opts.webhookUrl}; nothing to change`)
+    } else {
+      await sg.setEventWebhookSettings(desiredEvents)
+      info(`  ✓ webhook URL set to ${opts.webhookUrl}`)
+    }
+  }
+
+  // ---- Enable Signed Event Webhook + fetch this webhook's public key ------
+  info('SendGrid → checking Signed Event Webhook…')
+  // GET /user/webhooks/event/settings/signed[/{id}] returns `{ public_key }`
+  // (plus `id` on the multi form). A non-empty key implies signing is already
+  // enabled — re-PATCHing `enabled: true` rotates the keypair, silently
+  // breaking signature verification everywhere the old key was deployed.
+  const signed = await sg.getSignedWebhookSettings(webhookId)
+  let webhookKey: string
+  if (signed.public_key) {
+    info('  = signing already enabled; reusing existing public key')
+    webhookKey = signed.public_key
+  } else {
+    info('  → enabling signing')
+    webhookKey = await sg.enableSignedWebhook(webhookId)
+    info('  ✓ verification key fetched')
   }
 
   const envSnippet = [
@@ -232,6 +291,7 @@ export async function setupSendgrid(opts: SetupSendgridOpts): Promise<SetupSendg
     domains: domainResults,
     webhookKey,
     webhookUrl: opts.webhookUrl,
+    webhookId,
     envSnippet,
   }
 }
@@ -240,13 +300,31 @@ export async function setupSendgrid(opts: SetupSendgridOpts): Promise<SetupSendg
 // SendGrid API client
 // ---------------------------------------------------------------------------
 
+interface SgEventWebhook {
+  id?: string
+  url?: string
+  friendly_name?: string
+  enabled?: boolean
+  public_key?: string | null
+  [k: string]: unknown
+}
+
+interface SgEventWebhookList {
+  /** 'multi' when `/settings/all` answered; 'legacy' when only the singleton endpoint is available. */
+  mode: 'multi' | 'legacy'
+  webhooks: SgEventWebhook[]
+}
+
 interface SendGridClient {
   findDomainAuth(domain: string): Promise<SgDomainAuth | null>
   createDomainAuth(input: { domain: string; subdomain: string }): Promise<SgDomainAuth>
   validateDomainAuth(id: number): Promise<boolean>
-  getSignedWebhookSettings(): Promise<{ enabled?: boolean; public_key?: string }>
-  enableSignedWebhook(): Promise<string>
-  getEventWebhookSettings(): Promise<{ url?: string; enabled?: boolean; [k: string]: unknown }>
+  getSignedWebhookSettings(id?: string): Promise<{ id?: string; public_key?: string }>
+  enableSignedWebhook(id?: string): Promise<string>
+  listEventWebhooks(): Promise<SgEventWebhookList>
+  createEventWebhook(payload: Record<string, unknown>): Promise<SgEventWebhook>
+  updateEventWebhook(id: string, payload: Record<string, unknown>): Promise<void>
+  /** Legacy singleton PATCH — repoints the account's oldest webhook. Fallback only. */
   setEventWebhookSettings(payload: Record<string, unknown>): Promise<void>
 }
 
@@ -254,10 +332,11 @@ function sendgridClient(apiKey: string, fetchFn: typeof fetch): SendGridClient {
   const base = 'https://api.sendgrid.com/v3'
   const headers = { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }
 
-  async function call(path: string, init: RequestInit = {}): Promise<any> {
+  async function call(path: string, init: RequestInit = {}, o: { soft404?: boolean } = {}): Promise<any> {
     const res = await fetchFn(`${base}${path}`, { ...init, headers: { ...headers, ...(init.headers as any) } })
     const text = await res.text()
     const body = text ? safeJson(text) : null
+    if (o.soft404 && res.status === 404) return null
     if (res.status === 401 || res.status === 403) {
       throw new Error(
         `SendGrid rejected the request (HTTP ${res.status}). Your SENDGRID_API_KEY is missing the required permissions ` +
@@ -271,6 +350,10 @@ function sendgridClient(apiKey: string, fetchFn: typeof fetch): SendGridClient {
     }
     return body
   }
+
+  /** Per-webhook signing key when we know the id; account-oldest fallback when we don't. */
+  const signedPath = (id?: string) =>
+    `/user/webhooks/event/settings/signed${id ? `/${encodeURIComponent(id)}` : ''}`
 
   return {
     async findDomainAuth(domain: string) {
@@ -287,20 +370,38 @@ function sendgridClient(apiKey: string, fetchFn: typeof fetch): SendGridClient {
       const r = await call(`/whitelabel/domains/${id}/validate`, { method: 'POST' })
       return Boolean(r?.valid)
     },
-    async getSignedWebhookSettings() {
-      return call(`/user/webhooks/event/settings/signed`)
+    async getSignedWebhookSettings(id?: string) {
+      return call(signedPath(id))
     },
-    async enableSignedWebhook() {
-      await call(`/user/webhooks/event/settings/signed`, {
+    async enableSignedWebhook(id?: string) {
+      // PATCH returns `{ id, public_key }`; re-GET only if some proxy strips it.
+      const patched = await call(signedPath(id), {
         method: 'PATCH',
         body: JSON.stringify({ enabled: true }),
       })
-      const r = await call(`/user/webhooks/event/settings/signed`)
+      if (patched?.public_key) return patched.public_key as string
+      const r = await call(signedPath(id))
       if (!r?.public_key) throw new Error('SendGrid did not return a public_key for the signed event webhook')
       return r.public_key as string
     },
-    async getEventWebhookSettings() {
-      return call(`/user/webhooks/event/settings`)
+    async listEventWebhooks(): Promise<SgEventWebhookList> {
+      const all = await call(`/user/webhooks/event/settings/all`, {}, { soft404: true })
+      const multi = Array.isArray(all) ? all : all?.webhooks
+      if (Array.isArray(multi)) return { mode: 'multi', webhooks: multi as SgEventWebhook[] }
+      const legacy = await call(`/user/webhooks/event/settings`)
+      return { mode: 'legacy', webhooks: legacy ? [legacy as SgEventWebhook] : [] }
+    },
+    async createEventWebhook(payload) {
+      return call(`/user/webhooks/event/settings`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }) as Promise<SgEventWebhook>
+    },
+    async updateEventWebhook(id, payload) {
+      await call(`/user/webhooks/event/settings/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      })
     },
     async setEventWebhookSettings(payload) {
       await call(`/user/webhooks/event/settings`, {
@@ -317,6 +418,26 @@ function sendgridClient(apiKey: string, fetchFn: typeof fetch): SendGridClient {
 
 function safeJson(s: string): any {
   try { return JSON.parse(s) } catch { return null }
+}
+
+/** Match a SendGrid-reported webhook URL against the one we were asked to configure.
+ * Exact compare apart from a trailing slash — anything looser risks adopting (and
+ * then rewriting) a webhook that belongs to a different app. */
+function sameWebhookUrl(a: string | undefined | null, b: string): boolean {
+  if (!a) return false
+  const norm = (u: string) => u.trim().replace(/\/+$/, '')
+  return norm(a) === norm(b)
+}
+
+/** `friendly_name` for a webhook we create, so the SendGrid dashboard shows its owner. */
+function defaultWebhookName(webhookUrl: string, domains: string[]): string {
+  let host = ''
+  try {
+    host = new URL(webhookUrl).host
+  } catch {
+    // Non-absolute URL — fall back to the first domain being authenticated.
+  }
+  return `mailery ${host || domains[0] || 'events'}`
 }
 
 /** Compare current SendGrid event webhook settings to the desired payload.
