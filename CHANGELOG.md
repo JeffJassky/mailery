@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.12.1 — Agenda queue retention and namespacing
+
+### Fixed
+
+- **The Agenda driver retained every job document forever.** Agenda defaults to
+  `removeOnComplete: false` and mailery never overrode it, so `_mailerJobs` grew
+  by one document per send, advance, and webhook indefinitely — in the same
+  database as your operational data. Succeeded one-shot jobs are now removed on
+  completion, and failed ones (which Agenda's auto-remove never touches) are
+  swept hourly on a 7-day window, matching the Bull driver's `removeOnFail`.
+  `failedJobRetentionDays: 0` disables the sweep. Jobs awaiting a retry, jobs
+  under an active lock, and repeating jobs are all spared — the tick is a single
+  document whose `nextRunAt` is recomputed in place and was never a source of
+  growth.
+
+  This is the Agenda counterpart to the Bull retention fix in 0.11.0. The other
+  half of that fix does not apply here: the driver's pending-job lookup already
+  excluded finished jobs, so a completed document never suppressed a
+  `jobId`-based re-add.
+
+  **Existing deployments:** already-stored completed jobs are not removed
+  retroactively. See the [queues guide](https://jeffjassky.github.io/mailery/guide/queues)
+  for the one-time `deleteMany` to reclaim that space.
+
+### Added
+
+- **`MAILER_QUEUE_PREFIX` now applies to the Agenda driver**, suffixing the jobs
+  collection (`_mailerJobs_prod`) the way it prefixes Redis keys under Bull, so
+  several mailery instances can share one Mongo database. With no prefix the
+  collection name is unchanged, so upgrading strands nothing. Prefixes are
+  restricted to letters, digits, `_` and `-`; `collectionName` still sets the
+  name outright.
+
 ## 0.12.0 — Link and image lint rules
 
 ### Added
