@@ -212,6 +212,53 @@ export function lintTemplate(rawInput: LintInput, config: LintConfig = {}): Lint
     }
   }
 
+  // 12. Off-domain links — warning.
+  // Mailbox providers weigh whether link domains line up with the From
+  // domain. A stray off-domain link is normal (docs, social); a body whose
+  // links mostly point elsewhere reads like a forwarded/spoofed template.
+  const offDomain = findOffDomainLinkHosts(input.html, input.fromEmail)
+  if (offDomain.majority && offDomain.hosts.length > 0) {
+    issues.push({
+      rule: 'offdomain_links',
+      severity: 'warning',
+      message: `Most links point away from the From domain: ${offDomain.hosts.join(', ')}.`,
+      hint: 'Link domains that match the sending domain build reputation. Route links through your own domain (or a tracking subdomain of it) where you can.',
+    })
+  }
+
+  // 13. Insecure links — warning.
+  // Note: this is a scheme check only. Liveness (200 vs 404) needs network
+  // I/O and does not belong in a pure lint pass.
+  const insecure = findInsecureLinkHosts(input.html)
+  if (insecure.length > 0) {
+    issues.push({
+      rule: 'insecure_link',
+      severity: 'warning',
+      message: `Link uses plain http://: ${insecure.join(', ')}.`,
+      hint: 'Mixed-content links get rewritten or warned about by some clients, and http:// correlates with stale spam templates. Use https://.',
+    })
+  }
+
+  // 14. Images missing alt text — warning.
+  if (countImagesMissingAlt(input.html) > 0) {
+    issues.push({
+      rule: 'image_missing_alt',
+      severity: 'warning',
+      message: 'One or more images have no alt text.',
+      hint: 'Most clients block images by default on first open. Alt text is what the recipient actually sees, and screen readers need it.',
+    })
+  }
+
+  // 15. Image-only link — warning.
+  if (hasImageOnlyLink(input.html)) {
+    issues.push({
+      rule: 'image_only_link',
+      severity: 'warning',
+      message: 'A link wraps an image with no accompanying text.',
+      hint: 'With images blocked, an image-only call-to-action is invisible and unclickable. Add a text label inside the link.',
+    })
+  }
+
   // 11. Too many links — warning
   // Match href= with or without surrounding quotes — same shape as
   // extractHrefs above.
@@ -291,6 +338,86 @@ function hasBareUrlInVisibleText(html: string): boolean {
     .replace(/<script\b[^>]*>.*?<\/script>/gis, ' ')
     .replace(/<head\b[^>]*>.*?<\/head>/gis, ' ')
   return /https?:\/\/[^\s<>"']+/i.test(stripped)
+}
+
+/**
+ * Hosts linked in the body that don't belong to the From domain, plus whether
+ * they're the majority of resolvable links. Unresolved merge-tag hrefs
+ * (`{{unsubscribeUrl}}`), mailto:/tel:, anchors, and relative URLs are
+ * ignored — none of them carry a domain to compare.
+ */
+function findOffDomainLinkHosts(html: string, fromEmail: string): { hosts: string[]; majority: boolean } {
+  const fromDomain = fromEmail.split('@')[1]?.toLowerCase()
+  if (!fromDomain) return { hosts: [], majority: false }
+
+  const hosts = new Set<string>()
+  let total = 0
+  let off = 0
+  for (const href of extractHrefs(html)) {
+    if (href.includes('{{')) continue
+    const host = hostnameOf(href)
+    if (!host) continue
+    total++
+    if (sameSite(host, fromDomain)) continue
+    off++
+    hosts.add(host)
+  }
+  return { hosts: Array.from(hosts), majority: total > 0 && off * 2 > total }
+}
+
+/**
+ * Approximate same-site test: exact match, either side a subdomain of the
+ * other, or a shared last-two-label suffix (so `mail.example.com` and
+ * `www.example.com` match). Deliberately loose — a false "off-domain"
+ * warning is worse than a missed one, and we don't ship a PSL.
+ */
+function sameSite(a: string, b: string): boolean {
+  if (a === b) return true
+  if (a.endsWith(`.${b}`) || b.endsWith(`.${a}`)) return true
+  return lastLabels(a) === lastLabels(b)
+}
+
+function lastLabels(host: string): string {
+  return host.split('.').slice(-2).join('.')
+}
+
+function findInsecureLinkHosts(html: string): string[] {
+  const hits = new Set<string>()
+  for (const href of extractHrefs(html)) {
+    if (!/^http:\/\//i.test(href)) continue
+    const host = hostnameOf(href)
+    if (host) hits.add(host)
+  }
+  return Array.from(hits)
+}
+
+function countImagesMissingAlt(html: string): number {
+  let missing = 0
+  const re = /<img\b[^>]*>/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const tag = m[0]
+    const alt = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag)
+    const value = alt ? (alt[1] ?? alt[2] ?? alt[3] ?? '') : ''
+    if (value.trim().length === 0) missing++
+  }
+  return missing
+}
+
+/** An anchor whose entire content is one or more images and no visible text. */
+function hasImageOnlyLink(html: string): boolean {
+  const re = /<a\b[^>]*>(.*?)<\/a>/gis
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const inner = m[1]!
+    if (!/<img\b/i.test(inner)) continue
+    const text = inner
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .trim()
+    if (text.length === 0) return true
+  }
+  return false
 }
 
 function findSpamSignals(text: string): string[] {

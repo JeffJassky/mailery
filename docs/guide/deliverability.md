@@ -467,7 +467,13 @@ Every template is run through a content linter at publish time. Errors block pub
 | `all_caps_subject` | warning | Subject >50% uppercase |
 | `subject_too_long` | warning | Subject >60 chars (mobile truncation) |
 | `too_many_links` | warning | >10 links in body |
+| `offdomain_links` | warning | More than half the resolvable links point away from the `fromEmail` domain |
+| `insecure_link` | warning | A link uses `http://` rather than `https://` |
+| `image_missing_alt` | warning | An `<img>` has no alt text (or `alt=""`) |
+| `image_only_link` | warning | A link wraps an image with no text label |
 | `empty_preheader` | info | No preheader set |
+
+`offdomain_links` compares hostnames loosely — exact match, subdomain either way, or a shared last-two-label suffix — so `mail.example.com` and `www.example.com` count as the same site. Merge-tag hrefs (`{{unsubscribeUrl}}`), `mailto:`, and relative URLs are skipped since they carry no domain to compare. `insecure_link` is a scheme check only; link liveness (200 vs 404) needs network I/O and stays out of the pure lint pass.
 
 The template editor sidebar shows live results as you type. Saved drafts are debounced (500ms after last keystroke) and the Publish button is disabled while errors are present.
 

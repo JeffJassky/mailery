@@ -127,6 +127,53 @@ describe('lintTemplate — warning rules', () => {
     )
     expect(r.warnings.some((w) => w.rule === 'too_many_links')).toBe(true)
   })
+
+  it('offdomain_links when most links leave the From domain', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="https://partner.io/a">a</a><a href="https://other.net/b">b</a><a href="https://example.com/c">c</a><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    const w = r.warnings.find((x) => x.rule === 'offdomain_links')
+    expect(w?.message).toContain('partner.io')
+    expect(w?.message).toContain('other.net')
+  })
+
+  it('insecure_link', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="http://example.com/start">start</a><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'insecure_link')).toBe(true)
+  })
+
+  it('image_missing_alt', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><img src="hero.png" /><p>Plenty of body text here for the reader.</p><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'image_missing_alt')).toBe(true)
+  })
+
+  it('image_missing_alt flags alt=""', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><img src="hero.png" alt="" /><p>Plenty of body text here.</p><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'image_missing_alt')).toBe(true)
+  })
+
+  it('image_only_link', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="https://example.com/buy"><img src="cta.png" alt="Buy now" /></a><p>Plenty of body text here.</p><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'image_only_link')).toBe(true)
+  })
 })
 
 describe('lintTemplate — info rules', () => {
@@ -194,5 +241,42 @@ describe('lintTemplate — no false positives', () => {
       }),
     )
     expect(r.errors.some((e) => e.rule === 'image_only_body')).toBe(false)
+  })
+
+  it('subdomain and sibling-subdomain links count as same-site', () => {
+    const r = lintTemplate(
+      baseInput({
+        fromEmail: 'hello@mail.example.com',
+        html: '<html><body><a href="https://www.example.com/a">a</a><a href="https://example.com/b">b</a><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'offdomain_links')).toBe(false)
+  })
+
+  it('a single off-domain link among many on-domain links is not flagged', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="https://example.com/a">a</a><a href="https://example.com/b">b</a><a href="https://twitter.com/x">x</a><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'offdomain_links')).toBe(false)
+  })
+
+  it('merge-tag hrefs are not treated as off-domain', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="{{viewInBrowserUrl}}">view</a><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'offdomain_links')).toBe(false)
+  })
+
+  it('a link with both an image and text does not trigger image_only_link', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><a href="https://example.com/buy"><img src="cta.png" alt="icon" /> Buy now</a><p>Plenty of body text here.</p><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'image_only_link')).toBe(false)
   })
 })
