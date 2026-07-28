@@ -87,5 +87,25 @@ export type QueueDriverConfig =
        */
       prefix?: string
     }
-  | { driver: 'agenda'; db?: Db; processEverySeconds?: number; lockLifetimeSeconds?: number; collectionName?: string }
+  | {
+      driver: 'agenda'
+      db?: Db
+      processEverySeconds?: number
+      lockLifetimeSeconds?: number
+      collectionName?: string
+      /**
+       * Namespaces the jobs collection (`_mailerJobs_<prefix>`) so multiple
+       * mailery instances can share one Mongo database — the counterpart to
+       * the Bull driver's Redis key prefix, and read from the same
+       * `MAILER_QUEUE_PREFIX` env var. Ignored when `collectionName` is set.
+       * Letters, digits, '_' and '-' only.
+       */
+      prefix?: string
+      /**
+       * Days to retain failed job documents before the driver sweeps them
+       * (default 7, matching the Bull driver's `removeOnFail` age). 0 disables
+       * the sweep. Succeeded jobs are removed on completion regardless.
+       */
+      failedJobRetentionDays?: number
+    }
   | { driver: 'noop' }

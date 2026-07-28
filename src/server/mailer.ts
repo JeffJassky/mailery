@@ -104,7 +104,8 @@ export class Mailer {
    *   MAILER_MONGODB_URI                — Mongo connection string (required)
    *   MAILER_MONGODB_DB                 — database name (optional; defaults to the URI default)
    *   MAILER_REDIS_URL                  — Redis connection URL (required)
-   *   MAILER_QUEUE_PREFIX               — Redis key prefix to namespace this instance (optional)
+   *   MAILER_QUEUE_PREFIX               — namespaces this instance (optional). Bull: Redis key
+   *                                       prefix. Agenda: jobs collection suffix.
    *   MAILER_PUBLIC_URL                 — base for tracking/unsub URLs (required)
    *   MAILER_UNSUBSCRIBE_SECRET         — HMAC key (required)
    *   MAILER_SENDER_ADDRESS             — postal address for CAN-SPAM (optional)
@@ -161,7 +162,7 @@ export class Mailer {
     const driverEnv = env.MAILER_QUEUE_DRIVER ?? 'bull'
     const queue =
       driverEnv === 'agenda'
-        ? ({ driver: 'agenda' as const })
+        ? ({ driver: 'agenda' as const, prefix: env.MAILER_QUEUE_PREFIX })
         : driverEnv === 'noop'
         ? ({ driver: 'noop' as const })
         : ({

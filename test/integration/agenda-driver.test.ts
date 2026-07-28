@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { MongoClient, ObjectId, type Db } from 'mongodb'
 import { MongoMemoryServer } from 'mongodb-memory-server'
 
-import { AgendaDriver } from '../../src/server/queues/agenda.js'
+import { AgendaDriver, collectionFor } from '../../src/server/queues/agenda.js'
 
 let mongo: MongoMemoryServer
 let client: MongoClient
@@ -66,10 +66,71 @@ describe('AgendaDriver smoke', () => {
   }, 30_000)
 })
 
-async function waitFor(pred: () => boolean, timeoutMs: number): Promise<void> {
+describe('AgendaDriver retention', () => {
+  it('removes succeeded one-shot jobs instead of retaining them', async () => {
+    const sendId = new ObjectId().toHexString()
+    await driver.queues.send.add('send', { sendId })
+    await waitFor(() => seenSends.includes(sendId), 8000)
+
+    const jobs = db.collection('_mailerJobs')
+    await waitFor(async () => (await jobs.countDocuments({ 'data.sendId': sendId })) === 0, 8000)
+    expect(await jobs.countDocuments({ 'data.sendId': sendId })).toBe(0)
+  }, 30_000)
+
+  it('keeps the repeating tick document', async () => {
+    await driver.scheduleRepeatingTick(60)
+    const jobs = db.collection('_mailerJobs')
+    expect(await jobs.countDocuments({ name: 'mailer-tick' })).toBe(1)
+
+    // A sweep with a wide-open window must not delete it.
+    await driver.sweepFailedJobs()
+    expect(await jobs.countDocuments({ name: 'mailer-tick' })).toBe(1)
+  }, 30_000)
+
+  it('sweepFailedJobs deletes retired failures past the window but spares fresh and retrying ones', async () => {
+    const jobs = db.collection('_mailerJobs')
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000)
+    await jobs.insertMany([
+      { name: 'mailer-send', failedAt: old, lastFinishedAt: old, nextRunAt: null, data: { tag: 'stale' } },
+      { name: 'mailer-send', failedAt: new Date(), nextRunAt: null, data: { tag: 'fresh' } },
+      // Failed long ago but still scheduled for a retry — must survive.
+      {
+        name: 'mailer-send',
+        failedAt: old,
+        nextRunAt: new Date(Date.now() + 60_000),
+        data: { tag: 'retrying' },
+      },
+    ])
+
+    const deleted = await driver.sweepFailedJobs()
+    expect(deleted).toBe(1)
+    expect(await jobs.countDocuments({ 'data.tag': 'stale' })).toBe(0)
+    expect(await jobs.countDocuments({ 'data.tag': 'fresh' })).toBe(1)
+    expect(await jobs.countDocuments({ 'data.tag': 'retrying' })).toBe(1)
+  }, 30_000)
+})
+
+describe('collectionFor', () => {
+  it('keeps the historical default when no prefix is set', () => {
+    expect(collectionFor()).toBe('_mailerJobs')
+    expect(collectionFor('')).toBe('_mailerJobs')
+  })
+
+  it('suffixes the collection with the prefix', () => {
+    expect(collectionFor('prod')).toBe('_mailerJobs_prod')
+  })
+
+  it('rejects prefixes that are illegal or confusing in a collection name', () => {
+    expect(() => collectionFor('has.dot')).toThrow(/letters, digits/)
+    expect(() => collectionFor('has space')).toThrow(/letters, digits/)
+    expect(() => collectionFor('has$dollar')).toThrow(/letters, digits/)
+  })
+})
+
+async function waitFor(pred: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    if (pred()) return
+    if (await pred()) return
     await sleep(100)
   }
   throw new Error(`waitFor timed out after ${timeoutMs}ms`)

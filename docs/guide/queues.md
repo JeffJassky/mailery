@@ -82,6 +82,43 @@ What you get:
 - Built-in retry + exponential backoff (Agenda 6.x).
 - Job dedupe via a synthetic `__jobId` key.
 - Send rate limit enforced **in-process** via [Bottleneck](https://www.npmjs.com/package/bottleneck).
+- Bounded retention — see below.
+
+#### Retention
+
+Agenda keeps every job document forever by default, which for a mailer means one
+document per send, advance, and webhook accumulating in Mongo without bound. The
+driver bounds it from both sides:
+
+- **Succeeded** one-shot jobs are removed as they complete.
+- **Failed** jobs are swept on an interval — Agenda's own auto-remove fires only
+  on success. Default retention is 7 days, matching the Bull driver's
+  `removeOnFail` age. Set `failedJobRetentionDays: 0` to disable the sweep and
+  keep failures indefinitely.
+
+The repeating tick is a single document whose `nextRunAt` is recomputed in place,
+so it never accumulates, and the sweep skips repeating jobs regardless.
+
+If you are upgrading an existing Agenda deployment, the backlog of already-stored
+completed jobs is not removed retroactively — drop it yourself once workers are on
+the new version:
+
+```js
+db._mailerJobs.deleteMany({ lastFinishedAt: { $ne: null }, repeatInterval: null })
+```
+
+#### Sharing one Mongo across instances
+
+`MAILER_QUEUE_PREFIX` namespaces the jobs collection the same way it namespaces
+Redis keys under Bull — `prefix: 'prod'` stores jobs in `_mailerJobs_prod`. With
+no prefix the collection stays `_mailerJobs`, so upgrading changes nothing. The
+prefix is limited to letters, digits, `_` and `-` since it becomes part of a
+collection name; pass `collectionName` to set the name outright instead.
+
+::: warning Changing the prefix strands jobs
+Queued jobs live in the old collection. Drain before switching, as with a
+[driver swap](#switching-drivers).
+:::
 
 ::: warning Single-process only
 The Agenda driver's rate limiter is in-memory. If you run multiple worker processes against the same Mongo, each enforces the limit independently — actual provider rate will be `N × sendRatePerSecond`. Run a single worker process when using this driver, or switch to Bull, which uses Redis to coordinate globally.

@@ -294,7 +294,8 @@ MAILER_PUBLIC_URL           MAILER_UNSUBSCRIBE_SECRET
 MAILER_SENDER_ADDRESS       MAILER_FROM_NAME / MAILER_FROM_EMAIL
 MAILER_DEFAULT_PROVIDER     MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
 MAILER_QUEUE_DRIVER         'bull' (default) | 'agenda' | 'noop'
-MAILER_QUEUE_PREFIX         Redis key prefix namespacing this instance (bull only, optional)
+MAILER_QUEUE_PREFIX         Namespaces this instance (optional). bull: Redis key prefix.
+                            agenda: jobs collection suffix (_mailerJobs_<prefix>).
 MAILER_HOST_USERS_COLLECTION (default 'users')
 MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
 MAILER_HOST_USERS_ID_FIELD (default '_id')

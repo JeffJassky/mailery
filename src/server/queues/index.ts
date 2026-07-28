@@ -37,6 +37,8 @@ export async function createQueueDriver(
         processEverySeconds: config.processEverySeconds,
         lockLifetimeSeconds: config.lockLifetimeSeconds,
         collectionName: config.collectionName,
+        prefix: config.prefix,
+        failedJobRetentionDays: config.failedJobRetentionDays,
       })
     case 'noop':
       return new NoopDriver()

@@ -12,6 +12,14 @@
  *
  * Idempotency: per-call `jobId` is stored as `data.__jobId`. Before scheduling
  * we look for a pending (not-yet-run, not-finished) job with the same key.
+ *
+ * Retention: Agenda keeps every job document forever by default, which for a
+ * mailer means one doc per send/advance/webhook accumulating in Mongo without
+ * bound. Succeeded one-shot jobs are removed on completion (`removeOnComplete`);
+ * failed ones are swept on an interval, since Agenda's auto-remove only fires
+ * on success. The repeating tick is a single document whose `nextRunAt` is
+ * recomputed in place, so it is never a source of growth — and the sweep
+ * explicitly skips repeating jobs so it can't delete it.
  */
 
 import type { Db } from 'mongodb'
@@ -46,11 +54,28 @@ const QUEUE_NAMES = {
   webhook: 'mailer-webhook',
 } as const
 
+/** Default jobs collection. Kept as-is when no prefix is configured. */
+const DEFAULT_COLLECTION = '_mailerJobs'
+
+/** How long a failed job document is kept before the sweep deletes it. */
+const DEFAULT_FAILED_RETENTION_DAYS = 7
+
+/** How often the failed-job sweep runs. */
+const FAILED_SWEEP_INTERVAL_MS = 60 * 60 * 1000
+
 export interface AgendaDriverOptions {
   db: Db
   processEverySeconds?: number
   lockLifetimeSeconds?: number
   collectionName?: string
+  /**
+   * Namespaces the jobs collection so multiple mailery instances can share one
+   * Mongo database — the Agenda counterpart to the Bull driver's Redis key
+   * prefix. Ignored when `collectionName` is given explicitly.
+   */
+  prefix?: string
+  /** Days to keep failed job documents. 0 disables the sweep. */
+  failedJobRetentionDays?: number
 }
 
 export class AgendaDriver implements QueueDriver {
@@ -72,7 +97,7 @@ export class AgendaDriver implements QueueDriver {
       )
     }
 
-    const collectionName = opts.collectionName ?? '_mailerJobs'
+    const collectionName = opts.collectionName ?? collectionFor(opts.prefix)
     const backend = new backendMod.MongoBackend({
       mongo: opts.db,
       collection: collectionName,
@@ -84,19 +109,41 @@ export class AgendaDriver implements QueueDriver {
       defaultLockLifetime: (opts.lockLifetimeSeconds ?? 10 * 60) * 1000,
       maxConcurrency: 50,
       defaultConcurrency: 5,
+      // Drop succeeded one-shot jobs instead of retaining them forever.
+      // Agenda guards this on `!nextRunAt`, so repeating jobs survive.
+      removeOnComplete: true,
     } as any)
 
-    return new AgendaDriver(agenda, agendaMod, opts.db, collectionName)
+    const retentionDays = opts.failedJobRetentionDays ?? DEFAULT_FAILED_RETENTION_DAYS
+
+    // The sweep filters on failedAt; without an index it's a collection scan
+    // every hour. Non-fatal — a driver that can't index still works.
+    try {
+      await opts.db.collection(collectionName).createIndex({ failedAt: 1 }, { sparse: true })
+    } catch (err) {
+      console.error('mailery: could not index the Agenda jobs collection on failedAt', err)
+    }
+
+    return new AgendaDriver(agenda, agendaMod, opts.db, collectionName, retentionDays)
   }
 
   private db: Db
   private collName: string
+  private failedRetentionDays: number
+  private sweepTimer: ReturnType<typeof setInterval> | null = null
 
-  private constructor(agenda: Agenda, agendaMod: AgendaModule, db: Db, collectionName: string) {
+  private constructor(
+    agenda: Agenda,
+    agendaMod: AgendaModule,
+    db: Db,
+    collectionName: string,
+    failedRetentionDays: number,
+  ) {
     this.agenda = agenda
     this.agendaMod = agendaMod
     this.db = db
     this.collName = collectionName
+    this.failedRetentionDays = failedRetentionDays
     this.queues = {
       tick: this.makeQueueAPI(QUEUE_NAMES.tick),
       advance: this.makeQueueAPI(QUEUE_NAMES.advance),
@@ -193,10 +240,49 @@ export class AgendaDriver implements QueueDriver {
     if (!this.started) {
       await this.agenda.start()
       this.started = true
+      this.startFailedJobSweep()
+    }
+  }
+
+  /**
+   * Agenda's auto-remove only fires on success, so failed documents would
+   * otherwise be retained forever. Runs once on worker start, then hourly.
+   */
+  private startFailedJobSweep(): void {
+    if (this.failedRetentionDays <= 0 || this.sweepTimer) return
+    void this.sweepFailedJobs()
+    this.sweepTimer = setInterval(() => void this.sweepFailedJobs(), FAILED_SWEEP_INTERVAL_MS)
+    // Don't hold the event loop open on an otherwise-idle process.
+    this.sweepTimer.unref?.()
+  }
+
+  /** Delete failed, fully-retired job documents older than the retention window. */
+  async sweepFailedJobs(): Promise<number> {
+    const cutoff = new Date(Date.now() - this.failedRetentionDays * 24 * 3600 * 1000)
+    try {
+      const res = await this.jobsCollection().deleteMany({
+        failedAt: { $lt: cutoff },
+        // Never touch the repeating tick.
+        repeatInterval: { $in: [null, undefined] },
+        // Leave anything still scheduled for a retry, and anything a worker
+        // currently holds a lock on.
+        $and: [
+          { $or: [{ nextRunAt: null }, { nextRunAt: { $exists: false } }, { nextRunAt: { $lt: cutoff } }] },
+          { $or: [{ lockedAt: null }, { lockedAt: { $exists: false } }, { lockedAt: { $lt: cutoff } }] },
+        ],
+      })
+      return res.deletedCount ?? 0
+    } catch (err) {
+      console.error('mailery: failed-job sweep failed', err)
+      return 0
     }
   }
 
   async stopWorkers(): Promise<void> {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer)
+      this.sweepTimer = null
+    }
     if (!this.started) return
     await this.agenda.stop()
     this.started = false
@@ -209,4 +295,19 @@ export class AgendaDriver implements QueueDriver {
   async close(): Promise<void> {
     await this.stopWorkers()
   }
+}
+
+/**
+ * Resolve the jobs collection from an optional prefix. No prefix keeps the
+ * historical `_mailerJobs` name — changing that default would strand queued
+ * jobs in the old collection on upgrade.
+ */
+export function collectionFor(prefix?: string): string {
+  if (!prefix) return DEFAULT_COLLECTION
+  if (!/^[A-Za-z0-9_-]+$/.test(prefix)) {
+    throw new Error(
+      `mailery: queue prefix "${prefix}" must contain only letters, digits, '_' or '-' — it becomes part of a MongoDB collection name.`,
+    )
+  }
+  return `${DEFAULT_COLLECTION}_${prefix}`
 }
