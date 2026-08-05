@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.14.0 — Stop HTML-escaping the text/plain part
+
+### Fixed
+
+- **The text/plain alternative was compiled with HTML escaping on, so any
+  substituted URL arrived at the recipient with its query string in pieces.**
+  `renderTemplate` ran `template.body.plainText` through the same Handlebars
+  instance as the HTML body. In the HTML body that escaping is correct — the
+  browser decodes `&amp;` and `&#x3D;` back out of an `href`. Nothing decodes
+  the text part: mail clients render it literally. A template line as ordinary
+  as `Read it here: [{{topicUrl}}]` shipped as
+  `...?u&#x3D;123&amp;token&#x3D;abc`, and following that link splits the query
+  on every `&` inside the entities, so the first parameter comes through empty
+  and every parameter after it is lost to a junk key (`amp;token`, `#x3D;abc`).
+
+  Any URL parameter in a text part was affected, but signed links are where it
+  does real damage. A passwordless sign-in URL reached the app carrying no
+  credential at all, which does not read as a broken link — it reads as no link.
+  A host that no-ops when the credential is absent then serves the page under
+  whatever session the browser already had, so the recipient lands on the right
+  deep link signed in as the wrong user, with no error anywhere and nothing in
+  the logs. Click tracking hid it in the common case: tracked HTML links are
+  rewritten to `/m/click/...` and redirect from the decoded URL stored on the
+  send, so only the text part — and untracked sends — carried the damage.
+
+  The text part now compiles with `noEscape`. Subject and preheader keep their
+  escaping: the preheader is injected into the HTML body, and subjects reach
+  HTML surfaces that render them.
+
+  **Existing installs:** already-delivered mail is not repaired by upgrading.
+  Links in the HTML part were always fine; links a recipient follows from the
+  text part of mail sent before this release stay broken. Hosts that resolve a
+  credential from the query string should refuse a damaged one rather than
+  ignoring it, so a mangled link fails visibly instead of quietly resolving to
+  the live session.
+
 ## 0.13.0 — Per-webhook SendGrid event webhook setup
 
 ### Fixed

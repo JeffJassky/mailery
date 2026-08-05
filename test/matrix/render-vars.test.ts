@@ -154,6 +154,27 @@ describe('contact variables', () => {
     // Subject is compiled through the same escaping Handlebars instance.
     expect(sent.subject).not.toContain('<script>')
   })
+
+  /**
+   * Regression: the text/plain part was compiled with escaping on, so `&`
+   * became `&amp;` and `=` became `&#x3D;`. Mail clients render that part
+   * literally, so a substituted URL arrived with its query string in pieces —
+   * everything after the first param silently lost. For an auto-sign-in link
+   * that meant the recipient reached the app carrying no credential and stayed
+   * signed in as whoever was already in the browser, with no error shown.
+   */
+  it('leaves a substituted URL intact in an explicit plain-text part', async () => {
+    const url = 'https://app.test/app/aeo/topics/t1?u=user-1&token=tok-2#what-ai-knows'
+    const sent = await render({
+      body: 'Read it here.',
+      plainText: 'Read it here: [{{contact.fields.topicUrl}}]',
+      fields: { topicUrl: url },
+    })
+
+    expect(sent.text).toContain(url)
+    expect(sent.text).not.toContain('&amp;')
+    expect(sent.text).not.toContain('&#x3D;')
+  })
 })
 
 describe('event properties', () => {

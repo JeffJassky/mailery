@@ -100,6 +100,17 @@ export interface RenderOptions {
 }
 
 /**
+ * Compile options for the text/plain alternative, which is not HTML and has
+ * nothing downstream to decode entities. Handlebars' default escaping is
+ * corruption there rather than safety: a substituted URL ships as
+ * `https://host/p?u&#x3D;123&amp;token&#x3D;abc`, which mail clients render
+ * literally, so the recipient follows a link whose query string has fallen
+ * apart — every param after the first silently lost. `{{ }}` still
+ * interpolates; it just stops escaping what it substitutes.
+ */
+const PLAIN_TEXT: CompileOptions = { noEscape: true }
+
+/**
  * Render a published template against a contact + vars context. Returns the
  * substituted subject/preheader/html/plainText. Tracking is NOT applied here —
  * that step needs the send id and runs separately via `applyTracking`.
@@ -111,6 +122,8 @@ export async function renderTemplate(
 ): Promise<RenderedTemplate> {
   const hb = makeHandlebars(opts.helpers)
 
+  // Both stay escaped: the preheader is injected into the HTML body, and the
+  // subject reaches HTML surfaces (admin lists, previews) that render it.
   const subject = hb.compile(template.subject)(ctx)
   const preheader = hb.compile(template.preheader)(ctx)
 
@@ -124,7 +137,7 @@ export async function renderTemplate(
   }
 
   const plainText = template.body.plainText
-    ? hb.compile(template.body.plainText)(ctx)
+    ? hb.compile(template.body.plainText, PLAIN_TEXT)(ctx)
     : derivePlaintext(html)
 
   return {
