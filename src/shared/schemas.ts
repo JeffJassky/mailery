@@ -171,6 +171,10 @@ export const flowStepSchema: z.ZodType<unknown> = z.lazy(() =>
     }),
     z.object({
       type: z.literal('webhook'),
+      // `url` is validated for shape only and is deliberately never templated —
+      // see the comment on handleWebhookStep in src/server/runner/step.ts, and
+      // INVARIANT 16. Rendering contact/event data into this field would turn an
+      // admin-authored flow into a server-side request forgery primitive.
       url: z.string().url(),
       method: z.enum(['POST', 'PUT']).optional(),
       payload: z.record(z.string(), z.unknown()).optional(),

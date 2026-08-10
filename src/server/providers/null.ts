@@ -21,8 +21,20 @@ export class NullProvider implements MailProvider {
     }
   }
 
+  /**
+   * Fails closed. This provider has no signing key, so it can never establish
+   * that an inbound payload is authentic — and a method whose entire job is to
+   * reject unauthenticated input must not answer "yes" by default. Returning
+   * `true` here would mean any unsigned body posted to the webhook route is
+   * accepted as genuine whenever the null provider is registered, which is
+   * exactly the dev/staging configuration where that is easiest to miss.
+   *
+   * Nothing is lost: `parseWebhookEvents()` returns `[]`, so there was never
+   * any inbound behaviour to preserve. To exercise the inbound half locally,
+   * use a provider that actually signs (see `test/README.md`).
+   */
   async verifyWebhook(): Promise<boolean> {
-    return true
+    return false
   }
 
   parseWebhookEvents(): NormalizedEvent[] {

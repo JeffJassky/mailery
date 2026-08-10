@@ -136,3 +136,21 @@ Single source of truth, no sync.
 Editing a flow doesn't affect contacts already in it. Each `flow_run` pins `flowVersion` on entry. The runner uses `mailer_flow_versions` to look up the steps at that version.
 
 If you want to forcibly re-route in-flight runs to the new definition, that's a manual operation: exit the existing runs and re-enter contacts. The library will never do it implicitly.
+
+## 16. Webhook step URLs are never templated
+
+`step.url` on a `webhook` flow step is passed to `fetch` verbatim (`src/server/runner/step.ts`). It is never rendered through Handlebars, and it must stay that way.
+
+The URL is authored only through the admin flow routes, so the reachable destinations are fixed by a privileged system admin. Under that constraint "the server can POST to an arbitrary URL" is an intended admin capability, not a hole.
+
+Templating it would invert that. `POST to {{contact.callbackUrl}}` is a natural request, but it hands the destination of a server-side fetch — originating inside the deployment's network, past the perimeter — to whoever controls the template data (contact fields, event properties, adapter vars). That is SSRF: cloud metadata endpoints, internal admin services, localhost. If templated webhook URLs are ever genuinely needed they require a destination allowlist plus DNS/redirect-aware egress filtering, not a render call.
+
+The zod schema (`url: z.string().url()`, `src/shared/schemas.ts`) validates shape only and grants no protection here.
+
+Every call is attributable: the `webhook_called` audit entry records the resolved URL and the response status (or the error, on the exhausted-retry path).
+
+## 17. Providers fail closed on webhook verification
+
+`verifyWebhook` returns `false` for anything it cannot positively authenticate — malformed input, missing headers, no signing key configured — and never throws (the public router treats a thrown error as a 500).
+
+This binds every provider including the no-op ones. `NullProvider.verifyWebhook()` returns `false`: it holds no signing key, so it can never establish authenticity, and answering "yes" would mean unsigned payloads are accepted as genuine in exactly the dev/staging configurations where that is easiest to miss.

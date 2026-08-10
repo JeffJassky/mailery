@@ -258,7 +258,7 @@ export class NullProvider implements MailProvider {
     this.sent.push(args)
     return { providerId: `null-${Date.now()}`, status: 'accepted' }
   }
-  async verifyWebhook(): Promise<boolean> { return true }
+  async verifyWebhook(): Promise<boolean> { return false }
   parseWebhookEvents(): NormalizedEvent[] { return [] }
 }
 ```
