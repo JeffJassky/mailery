@@ -68,28 +68,47 @@ Our endpoint handles both GET (browser visit) and POST (one-click). POST never s
 
 The endpoint must succeed even if mailer's Mongo is degraded. Implementation:
 
+The endpoint never returns 200 for an unsubscribe it has not durably
+recorded somewhere. Three outcomes, in order of preference:
+
 ```ts
 app.post('/m/unsub/:token', async (req, res) => {
   const decoded = verifyToken(req.params.token)
   if (!decoded) return res.status(400).end()
 
-  // Always 200 fast — providers retry aggressively on 5xx
-  res.status(200).end()
-
+  // Bounded so a hung Mongo cannot hold the client open past the
+  // provider's patience. Not unbounded, and not fire-and-forget.
   try {
-    await applyUnsubscribe(decoded.email, decoded.scope)
-  } catch (err) {
-    // Fallback: write to local disk for later drain
-    fs.appendFileSync(
-      pendingUnsubsPath,
-      JSON.stringify({ email: decoded.email, scope: decoded.scope, at: Date.now() }) + '\n',
-    )
-    metrics.increment('unsub.fallback_to_disk')
+    await withTimeout(applyUnsubscribe(collections, decoded), unsubscribeWriteTimeoutMs)
+    return res.status(200).end()
+  } catch {
+    // Fallback: append to the journal for the tick drain to replay.
+    if (await journal.append(decoded)) return res.status(200).end()
+    // Nothing durable happened. Say so.
+    res.setHeader('Retry-After', '300')
+    return res.status(503).end()
   }
 })
 ```
 
-On the next tick, the drain reads `pendingUnsubsPath`, replays each unsub through the normal path, and truncates the file on success. Disk-write failure is the last line of defense — at that point we've returned 200 to the client, and SendGrid (or the provider) still has the unsubscribe in their own queue as redundancy.
+The tension with "return 200 instantly" is real — providers do retry on
+5xx, and Gmail does penalise a slow or failing unsubscribe. It is
+resolved with a bounded wait rather than by answering before doing the
+work: a 200 that precedes the write is not fast, it is wrong, and it made
+the 503 branch unreachable.
+
+On the next tick the drain claims the journal by renaming it, replays
+each entry through the same `applyUnsubscribe` the live route uses, and
+appends anything undrained back to the live journal *before* unlinking
+the claim — so a crash mid-drain duplicates rather than drops, and replay
+is idempotent.
+
+If the journal write also fails there is no further fallback, which is
+why the answer is 503. An earlier version of this document claimed the
+provider still holds the unsubscribe in its own queue as redundancy. It
+does not: the `List-Unsubscribe` URL points at us, and the one-click POST
+comes from the recipient's mail client, so the sending provider never
+sees the request. The journal is the only fallback there is.
 
 ### Programmatic unsubscribe
 
