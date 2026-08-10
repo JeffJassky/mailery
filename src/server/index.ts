@@ -32,6 +32,7 @@ export { createAdminRouter } from './api/admin.js'
 export type { AdminRouterOptions } from './api/admin.js'
 export { createPublicRouter } from './api/public.js'
 export type { PublicRouterOptions } from './api/public.js'
+export type { RouteLogger } from './api/wrap.js'
 
 // Templates (host apps may want compile + render directly for previews)
 export {

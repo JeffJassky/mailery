@@ -112,6 +112,10 @@ export class Mailer {
    *   MAILER_FROM_NAME / MAILER_FROM_EMAIL
    *   MAILER_DEFAULT_PROVIDER           — defaults to 'sendgrid' if SENDGRID_API_KEY is set
    *   MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
+   *   MAILER_SENDGRID_WEBHOOK_TOLERANCE — signed-webhook replay window, seconds
+   *                                       (default 300; '0' disables the check).
+   *                                       Unparseable values fall back to the
+   *                                       default rather than disabling it.
    *   MAILER_HOST_USERS_COLLECTION (default 'users')
    *   MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
    *   MAILER_HOST_USERS_ID_FIELD (default '_id')
@@ -150,6 +154,12 @@ export class Mailer {
       providers.sendgrid = new SendGridProvider({
         apiKey: env.MAILER_SENDGRID_API_KEY,
         webhookVerificationKey: env.MAILER_SENDGRID_WEBHOOK_KEY,
+        // Left undefined when unset/blank so the provider default (300s) applies.
+        // resolveWebhookToleranceSeconds() rejects NaN back to the default, so a
+        // typo here can never silently switch the replay check off.
+        webhookToleranceSeconds: env.MAILER_SENDGRID_WEBHOOK_TOLERANCE
+          ? Number(env.MAILER_SENDGRID_WEBHOOK_TOLERANCE)
+          : undefined,
         sandbox: env.NODE_ENV !== 'production',
       })
     }

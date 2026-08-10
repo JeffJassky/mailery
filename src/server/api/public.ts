@@ -19,6 +19,8 @@ import { ObjectId } from 'mongodb'
 
 import { sha256Hex, verifyUnsubscribeToken, verifyDoiToken } from '../tokens.js'
 import type { Mailer } from '../mailer.js'
+import type { MailProvider } from '../../shared/types.js'
+import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
 
 export interface PublicRouterOptions {
   /**
@@ -26,6 +28,14 @@ export interface PublicRouterOptions {
    * Defaults to /tmp/mailery-pending-unsubs.jsonl.
    */
   pendingUnsubsPath?: string
+  /**
+   * Structured logger for public-route failures, pino-style
+   * (`logger.error(fields, message)`).
+   *
+   * Defaults to a `console`-backed logger that reproduces the output this
+   * package emitted before the option existed. Pass `{}` to silence.
+   */
+  logger?: RouteLogger
 }
 
 // 1×1 transparent PNG (43 bytes)
@@ -37,6 +47,7 @@ const PIXEL = Buffer.from(
 export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {}): Router {
   const router = Router()
   const pendingUnsubsPath = opts.pendingUnsubsPath ?? '/tmp/mailery-pending-unsubs.jsonl'
+  const logger = opts.logger ?? consoleRouteLogger
 
   // Parse JSON for webhooks — capture raw body for signature verification.
   router.use(
@@ -56,7 +67,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // -------------------------------------------------------------------------
   // GET /open/:sendId.png
   // -------------------------------------------------------------------------
-  router.get('/open/:sendId.png', async (req: Request, res: Response) => {
+  router.get('/open/:sendId.png', wrap(logger, async (req: Request, res: Response) => {
     res.setHeader('Content-Type', 'image/png')
     res.setHeader('Content-Length', String(PIXEL.length))
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
@@ -80,14 +91,14 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         },
       )
     } catch (err) {
-      console.error('mailery: open pixel update failed', err)
+      logger.error?.({ err, sendId: id }, 'mailery: open pixel update failed')
     }
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // GET /click/:sendId/:linkId
   // -------------------------------------------------------------------------
-  router.get('/click/:sendId/:linkId', async (req: Request, res: Response) => {
+  router.get('/click/:sendId/:linkId', wrap(logger, async (req: Request, res: Response) => {
     const { sendId: sendIdStr, linkId } = req.params as { sendId: string; linkId: string }
     if (!ObjectId.isValid(sendIdStr)) return res.status(400).end()
     const sendId = new ObjectId(sendIdStr)
@@ -100,6 +111,20 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
 
     const link = (send.links ?? []).find((l) => l.linkId === linkId)
     if (!link) return res.status(404).end()
+
+    // Never redirect to a scheme we didn't sanction. The rejected URL is logged
+    // but deliberately kept out of the response body — echoing it back would
+    // reflect attacker-controlled content from the sending domain's origin.
+    if (!isSafeRedirectTarget(link.url)) {
+      logger.warn?.(
+        { sendId: sendIdStr, linkId, url: link.url },
+        'mailery: click redirect blocked — disallowed URL scheme',
+      )
+      return res
+        .status(400)
+        .type('html')
+        .send('<!doctype html><html><body><p>This link cannot be opened.</p></body></html>')
+    }
 
     res.redirect(302, link.url)
 
@@ -119,14 +144,14 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         },
       )
     } catch (err) {
-      console.error('mailery: click recording failed', err)
+      logger.error?.({ err, sendId: sendIdStr, linkId }, 'mailery: click recording failed')
     }
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // GET + POST /unsub/:token
   // -------------------------------------------------------------------------
-  router.get('/unsub/:token', (req: Request, res: Response) => {
+  router.get('/unsub/:token', wrap(logger, (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) return sendUnsubError(res, 'Invalid or expired link.')
 
@@ -142,9 +167,9 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     <button type="submit">Unsubscribe</button>
   </form>
 </body></html>`)
-  })
+  }))
 
-  router.post('/unsub/:token', async (req: Request, res: Response) => {
+  router.post('/unsub/:token', wrap(logger, async (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) {
       res.status(200).end() // never 5xx; let provider stop retrying
@@ -167,15 +192,15 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           JSON.stringify({ email: decoded.email, scope: decoded.scope, at: Date.now() }) + '\n',
         )
       } catch (diskErr) {
-        console.error('mailery: unsub disk fallback failed', { err, diskErr })
+        logger.error?.({ err, diskErr, path: pendingUnsubsPath }, 'mailery: unsub disk fallback failed')
       }
     }
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // GET /confirm-doi/:token
   // -------------------------------------------------------------------------
-  router.get('/confirm-doi/:token', async (req: Request, res: Response) => {
+  router.get('/confirm-doi/:token', wrap(logger, async (req: Request, res: Response) => {
     const token = (req.params as any).token as string
     const decoded = verifyDoiToken(token, mailer.config.unsubscribeSecret)
     if (!decoded) {
@@ -204,14 +229,14 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       /* swallow — subscription is confirmed regardless */
     }
     return res.status(200).type('html').send('<!doctype html><html><body><p>Thanks — you\'re subscribed.</p></body></html>')
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // POST /webhooks/:provider
   // -------------------------------------------------------------------------
-  router.post('/webhooks/:provider', async (req: Request, res: Response) => {
+  router.post('/webhooks/:provider', wrap(logger, async (req: Request, res: Response) => {
     const providerName = (req.params as any).provider as string
-    const provider = mailer.providers[providerName]
+    const provider = resolveProvider(mailer.providers, providerName)
     if (!provider) return res.status(404).end()
 
     const rawBody = (req as any).rawBody as Buffer | undefined
@@ -251,7 +276,10 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           { upsert: true },
         )
       } catch (err) {
-        console.error('mailery: webhook dedupe insert failed', err)
+        logger.error?.(
+          { err, provider: providerName, providerEventId: evt.providerEventId },
+          'mailery: webhook dedupe insert failed',
+        )
       }
     }
 
@@ -265,7 +293,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
 
     // Bypass linting — `path` import retained for any future on-disk fallback.
     void path
-  })
+  }))
 
   return router
 }
@@ -281,6 +309,63 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+/**
+ * Resolve a provider by the name in the request path.
+ *
+ * `mailer.providers` is a plain object literal, so a bare `providers[name]`
+ * lookup also resolves inherited `Object.prototype` members: `constructor`,
+ * `toString`, `valueOf` and friends all return something truthy, pass the
+ * `if (!provider)` guard, and reach `provider.verifyWebhook(...)` as a
+ * non-provider. `__proto__` resolves to the prototype object itself.
+ *
+ * Two gates, because either alone is incomplete: `Object.hasOwn` rejects
+ * inherited keys, and the shape check rejects an own key whose value was never
+ * a provider (a host building the map from untyped JSON, say).
+ */
+function resolveProvider(
+  providers: Record<string, MailProvider>,
+  name: string,
+): MailProvider | null {
+  if (typeof name !== 'string' || !Object.hasOwn(providers, name)) return null
+  const candidate = providers[name] as unknown
+  if (!candidate || typeof candidate !== 'object') return null
+  const p = candidate as Partial<MailProvider>
+  if (typeof p.verifyWebhook !== 'function') return null
+  if (typeof p.parseWebhookEvents !== 'function') return null
+  return p as MailProvider
+}
+
+/** Schemes we are willing to bounce a click through. */
+const ALLOWED_REDIRECT_PROTOCOLS = new Set(['http:', 'https:'])
+
+/**
+ * Guard for the click-tracking redirect target.
+ *
+ * Stored link URLs come out of `applyTracking`, which harvests `href` values
+ * from *rendered* HTML — i.e. after Handlebars substitution — so a template
+ * that interpolates a variable into an href position can put an arbitrary
+ * scheme into the stored URL. Redirecting to it would launch `javascript:` or
+ * `data:` from the sending domain's own origin, with the sender's reputation
+ * behind it.
+ *
+ * Parsed with `new URL()` rather than string matching: the URL parser strips
+ * tab/newline and lowercases the scheme, so `java\tscript:` and `JavaScript:`
+ * normalize to the same rejected protocol. A protocol-relative `//evil.com`
+ * has no scheme and no base here, so parsing throws and it is rejected too.
+ */
+function isSafeRedirectTarget(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false
+  const trimmed = raw.trim()
+  if (trimmed === '') return false
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return false
+  }
+  return ALLOWED_REDIRECT_PROTOCOLS.has(parsed.protocol)
 }
 
 function lowercaseHeaders(h: any): Record<string, string> {
