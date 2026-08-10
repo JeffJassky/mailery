@@ -35,7 +35,7 @@ import {
 } from '../tokens.js'
 import type { Mailer } from '../mailer.js'
 import type { SendDoc } from '../models/index.js'
-import type { MailProvider } from '../../shared/types.js'
+import { resolveProvider } from '../provider-lookup.js'
 import { appendPendingUnsub } from '../unsub-journal.js'
 import { mountDmarcInbound, type DmarcInboundOptions } from './dmarc-inbound.js'
 import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
@@ -625,32 +625,6 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
-}
-
-/**
- * Resolve a provider by the name in the request path.
- *
- * `mailer.providers` is a plain object literal, so a bare `providers[name]`
- * lookup also resolves inherited `Object.prototype` members: `constructor`,
- * `toString`, `valueOf` and friends all return something truthy, pass the
- * `if (!provider)` guard, and reach `provider.verifyWebhook(...)` as a
- * non-provider. `__proto__` resolves to the prototype object itself.
- *
- * Two gates, because either alone is incomplete: `Object.hasOwn` rejects
- * inherited keys, and the shape check rejects an own key whose value was never
- * a provider (a host building the map from untyped JSON, say).
- */
-function resolveProvider(
-  providers: Record<string, MailProvider>,
-  name: string,
-): MailProvider | null {
-  if (typeof name !== 'string' || !Object.hasOwn(providers, name)) return null
-  const candidate = providers[name] as unknown
-  if (!candidate || typeof candidate !== 'object') return null
-  const p = candidate as Partial<MailProvider>
-  if (typeof p.verifyWebhook !== 'function') return null
-  if (typeof p.parseWebhookEvents !== 'function') return null
-  return p as MailProvider
 }
 
 /** Schemes we are willing to bounce a click through. */

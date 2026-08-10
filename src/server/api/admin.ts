@@ -28,6 +28,7 @@ import type { Contact } from '../../shared/types.js'
 import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
 import { runSetupChecks } from './setup-status.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
+import { registeredProviderNames, resolveProvider } from '../provider-lookup.js'
 import { effectiveOverallStatus } from '../runner/health.js'
 import { runDnsblChecks } from '../runner/dnsbl.js'
 import { runPostmasterPull } from '../runner/postmaster.js'
@@ -1276,12 +1277,16 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         return res.json({ cached: true, status: 'ready', score: cached })
       }
 
+      // Resolve the provider *before* provisioning: provisionCheck burns a
+      // Mail-Tester credit, and a template pointing at a provider that isn't
+      // registered can never get past the send below.
+      const provider = resolveProvider(mailer.providers, tpl.providerOverride ?? mailer.config.defaultProvider)
+      if (!provider) {
+        return res.status(400).json(unknownProviderError(mailer, tpl))
+      }
+
       // Provision a new test address and send the rendered draft to it.
       const { checkId, emailAddress } = await client.provisionCheck()
-      const provider = mailer.providers[tpl.providerOverride ?? mailer.config.defaultProvider]
-      if (!provider) {
-        return res.status(500).json({ error: 'provider_unknown', message: `default provider ${mailer.config.defaultProvider} is not registered` })
-      }
 
       try {
         await provider.send({
@@ -1711,7 +1716,10 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         trackClicks: false,
       })
 
-      const provider = mailer.providers[tpl.providerOverride ?? mailer.config.defaultProvider]!
+      const provider = resolveProvider(mailer.providers, tpl.providerOverride ?? mailer.config.defaultProvider)
+      if (!provider) {
+        return res.status(400).json(unknownProviderError(mailer, tpl))
+      }
       const result = await provider.send({
         to,
         fromName: rendered.fromName,
@@ -1884,6 +1892,38 @@ type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise
 function asyncHandler(fn: AsyncHandler) {
   return (req: Request, res: Response, next: NextFunction) => {
     fn(req, res, next).catch(next)
+  }
+}
+
+/**
+ * Body for the 4xx a route returns when a template's effective provider name
+ * doesn't resolve (see `resolveProvider`).
+ *
+ * These routes are behind the host's admin gate, and the name comes from
+ * `providerOverride` on a stored template or from `defaultProvider` in config —
+ * never from the request. So this is a misconfiguration report, not a security
+ * boundary: 400 rather than 500 because the server is fine and the *stored*
+ * input is what's wrong, and it names both the unresolved provider and the
+ * registered alternatives, which is the whole difference between an operator
+ * fixing the template and an operator reading a stack trace.
+ */
+function unknownProviderError(
+  mailer: Mailer,
+  tpl: { slug?: string; providerOverride?: string | null },
+): { error: string; message: string; provider: string; registeredProviders: string[] } {
+  const override = tpl.providerOverride ?? null
+  const name = override ?? mailer.config.defaultProvider
+  const known = registeredProviderNames(mailer.providers)
+  const source = override
+    ? `template "${tpl.slug ?? '?'}" overrides the provider to "${name}"`
+    : `the configured defaultProvider is "${name}"`
+  return {
+    error: 'provider_unknown',
+    message:
+      `${source}, but no such provider is registered. ` +
+      `Registered providers: ${known.length ? known.join(', ') : '(none)'}.`,
+    provider: name,
+    registeredProviders: known,
   }
 }
 

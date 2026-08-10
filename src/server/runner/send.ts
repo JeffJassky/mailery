@@ -16,6 +16,7 @@ import {
   type RenderContext,
 } from '../templates/render.js'
 import { signUnsubscribeToken } from '../tokens.js'
+import { registeredProviderNames, resolveProvider } from '../provider-lookup.js'
 import { resolveVars } from '../adapters/vars.js'
 import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
@@ -229,9 +230,32 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   )
 
   // 5. Provider dispatch.
-  const provider = ctx.providers[send.provider] ?? ctx.providers[ctx.config.defaultProvider]
+  //
+  // Guarded lookup (see provider-lookup.ts): a bare `ctx.providers[name]` also
+  // resolves inherited Object.prototype keys, so a send row whose `provider` is
+  // `constructor` or `toString` used to yield a truthy non-provider that blew up
+  // on `.send(...)` further down — inside the try/catch below, so it surfaced as
+  // a failed send reading "provider.send is not a function" and then burned the
+  // full retry budget on a config error no retry can fix.
+  //
+  // No fallback to the default provider. `send.provider` is written by
+  // pickProviderName, which has *already* applied the default; if the name on
+  // the row still doesn't resolve it is stale, renamed or mistyped, and quietly
+  // routing the mail through a different provider than the row records would
+  // send it from the wrong reputation and hide the misconfiguration. Fail this
+  // one send with a reason an operator can act on, exactly like the
+  // template_missing / contact_missing paths above: no throw, so the send's
+  // queue job settles instead of retrying, and nothing else in flight is
+  // affected.
+  const provider = resolveProvider(ctx.providers, send.provider)
   if (!provider) {
-    await markFailed(send._id!, `provider_unknown: ${send.provider}`, ctx)
+    const known = registeredProviderNames(ctx.providers)
+    await markFailed(
+      send._id!,
+      `provider_unknown: no provider is registered as "${send.provider}". ` +
+        `Registered providers: ${known.length ? known.join(', ') : '(none)'}.`,
+      ctx,
+    )
     return
   }
 
