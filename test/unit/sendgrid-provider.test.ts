@@ -35,39 +35,49 @@ function sign(timestamp: string, body: Buffer): string {
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature'
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp'
 
+/**
+ * Unix-seconds timestamp `offsetSeconds` away from now. Signature verification
+ * now also enforces a replay window, so these tests have to sign against the
+ * real clock rather than a frozen constant.
+ */
+function ts(offsetSeconds = 0): string {
+  return String(Math.floor(Date.now() / 1000) + offsetSeconds)
+}
+
 describe('verifyWebhook', () => {
   it('accepts a correctly signed payload', async () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
     const body = Buffer.from(JSON.stringify([{ event: 'delivered' }]))
-    const ts = '1772000000'
+    const t = ts()
 
-    expect(await provider.verifyWebhook(body, { [TS_HEADER]: ts, [SIG_HEADER]: sign(ts, body) })).toBe(true)
+    expect(await provider.verifyWebhook(body, { [TS_HEADER]: t, [SIG_HEADER]: sign(t, body) })).toBe(true)
   })
 
   it('rejects a tampered body', async () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
     const body = Buffer.from(JSON.stringify([{ event: 'delivered' }]))
-    const ts = '1772000000'
-    const signature = sign(ts, body)
+    const t = ts()
+    const signature = sign(t, body)
 
     const tampered = Buffer.from(JSON.stringify([{ event: 'bounce' }]))
-    expect(await provider.verifyWebhook(tampered, { [TS_HEADER]: ts, [SIG_HEADER]: signature })).toBe(false)
+    expect(await provider.verifyWebhook(tampered, { [TS_HEADER]: t, [SIG_HEADER]: signature })).toBe(false)
   })
 
   it('rejects a replayed signature under a different timestamp', async () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
     const body = Buffer.from('[]')
-    const signature = sign('1772000000', body)
+    const signature = sign(ts(), body)
 
-    expect(await provider.verifyWebhook(body, { [TS_HEADER]: '1772000001', [SIG_HEADER]: signature })).toBe(false)
+    expect(await provider.verifyWebhook(body, { [TS_HEADER]: ts(1), [SIG_HEADER]: signature })).toBe(false)
   })
 
   it('rejects when the signature or timestamp header is missing', async () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
     const body = Buffer.from('[]')
-    const signature = sign('1772000000', body)
+    const t = ts()
+    const signature = sign(t, body)
 
-    expect(await provider.verifyWebhook(body, { [TS_HEADER]: '1772000000' })).toBe(false)
+    expect(await provider.verifyWebhook(body, { [TS_HEADER]: t })).toBe(false)
     expect(await provider.verifyWebhook(body, { [SIG_HEADER]: signature })).toBe(false)
   })
 
@@ -75,11 +85,12 @@ describe('verifyWebhook', () => {
     // Fail closed: an unconfigured key must never mean "trust the caller".
     const provider = new SendGridProvider({ apiKey: API_KEY })
     const body = Buffer.from('[]')
+    const t = ts()
 
     expect(
       await provider.verifyWebhook(body, {
-        [TS_HEADER]: '1772000000',
-        [SIG_HEADER]: sign('1772000000', body),
+        [TS_HEADER]: t,
+        [SIG_HEADER]: sign(t, body),
       }),
     ).toBe(false)
   })
@@ -88,10 +99,104 @@ describe('verifyWebhook', () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
     expect(
       await provider.verifyWebhook(Buffer.from('[]'), {
-        [TS_HEADER]: '1772000000',
+        [TS_HEADER]: ts(),
         [SIG_HEADER]: 'not-base64-!!!',
       }),
     ).toBe(false)
+  })
+})
+
+describe('verifyWebhook replay window', () => {
+  const body = Buffer.from(JSON.stringify([{ event: 'delivered' }]))
+
+  function signedHeaders(offsetSeconds: number): Record<string, string> {
+    const t = ts(offsetSeconds)
+    return { [TS_HEADER]: t, [SIG_HEADER]: sign(t, body) }
+  }
+
+  it('accepts a valid signature inside the default window', async () => {
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
+
+    expect(await provider.verifyWebhook(body, signedHeaders(0))).toBe(true)
+    // Still fresh at four minutes — the default window is five.
+    expect(await provider.verifyWebhook(body, signedHeaders(-240))).toBe(true)
+  })
+
+  it('rejects a valid signature whose timestamp is stale', async () => {
+    // The replay case: signature is genuine, the request is an hour old.
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
+
+    expect(await provider.verifyWebhook(body, signedHeaders(-3600))).toBe(false)
+    // Just past the 300s default.
+    expect(await provider.verifyWebhook(body, signedHeaders(-301))).toBe(false)
+  })
+
+  it('rejects a valid signature dated implausibly far in the future', async () => {
+    // Skew cuts both ways; a far-future timestamp would otherwise buy an
+    // attacker an arbitrarily long replay window.
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
+
+    expect(await provider.verifyWebhook(body, signedHeaders(3600))).toBe(false)
+    expect(await provider.verifyWebhook(body, signedHeaders(301))).toBe(false)
+  })
+
+  it('honours a widened tolerance', async () => {
+    const provider = new SendGridProvider({
+      apiKey: API_KEY,
+      webhookVerificationKey: publicKeyPem,
+      webhookToleranceSeconds: 7200,
+    })
+
+    expect(await provider.verifyWebhook(body, signedHeaders(-3600))).toBe(true)
+    expect(await provider.verifyWebhook(body, signedHeaders(-7201))).toBe(false)
+  })
+
+  it('accepts a stale payload when the tolerance is disabled', async () => {
+    // Escape hatch for hosts whose proxy delays delivery past the window.
+    for (const disabled of [0, false] as const) {
+      const provider = new SendGridProvider({
+        apiKey: API_KEY,
+        webhookVerificationKey: publicKeyPem,
+        webhookToleranceSeconds: disabled,
+      })
+
+      expect(await provider.verifyWebhook(body, signedHeaders(-86_400))).toBe(true)
+      expect(await provider.verifyWebhook(body, signedHeaders(86_400))).toBe(true)
+    }
+  })
+
+  it('still requires a valid signature when the tolerance is disabled', async () => {
+    const provider = new SendGridProvider({
+      apiKey: API_KEY,
+      webhookVerificationKey: publicKeyPem,
+      webhookToleranceSeconds: false,
+    })
+    const headers = signedHeaders(-86_400)
+
+    expect(
+      await provider.verifyWebhook(Buffer.from(JSON.stringify([{ event: 'bounce' }])), headers),
+    ).toBe(false)
+  })
+
+  it('rejects when the timestamp header is missing entirely', async () => {
+    // Nothing to bound the window with, and nothing signed — fail closed.
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
+    const t = ts()
+
+    expect(await provider.verifyWebhook(body, { [SIG_HEADER]: sign(t, body) })).toBe(false)
+  })
+
+  it('rejects a non-numeric timestamp rather than coercing it', async () => {
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })
+
+    for (const bogus of ['not-a-number', '', '1e12', ` ${ts()} `]) {
+      expect(
+        await provider.verifyWebhook(body, {
+          [TS_HEADER]: bogus,
+          [SIG_HEADER]: sign(bogus, body),
+        }),
+      ).toBe(false)
+    }
   })
 })
 
@@ -198,6 +303,16 @@ describe('provider configuration', () => {
   it('defaults the send rate and honours an override', () => {
     expect(new SendGridProvider({ apiKey: API_KEY }).sendRatePerSecond).toBe(10)
     expect(new SendGridProvider({ apiKey: API_KEY, sendRatePerSecond: 50 }).sendRatePerSecond).toBe(50)
+  })
+
+  it('defaults the webhook replay window to five minutes and honours overrides', () => {
+    expect(new SendGridProvider({ apiKey: API_KEY }).webhookToleranceSeconds).toBe(300)
+    expect(
+      new SendGridProvider({ apiKey: API_KEY, webhookToleranceSeconds: 60 }).webhookToleranceSeconds,
+    ).toBe(60)
+    expect(
+      new SendGridProvider({ apiKey: API_KEY, webhookToleranceSeconds: false }).webhookToleranceSeconds,
+    ).toBe(0)
   })
 
   it('identifies itself as sendgrid', () => {

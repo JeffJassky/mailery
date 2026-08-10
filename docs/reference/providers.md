@@ -12,6 +12,7 @@ import { SendGridProvider, NullProvider } from 'mailery'
 new SendGridProvider({
   apiKey: string                            // required — SendGrid API key
   webhookVerificationKey?: string           // ECDSA public key (PEM) for event webhook signature verification
+  webhookToleranceSeconds?: number | false  // default 300; replay window for the signed timestamp. 0 or false disables
   sendRatePerSecond?: number                // default 10 (shared IP); raise for dedicated IPs
   sandbox?: boolean                         // default false; true validates without delivering
 })
@@ -23,6 +24,7 @@ new SendGridProvider({
 - Disables SendGrid's own click + open tracking (mailery does its own).
 - Adds `customArgs: { sendId: ... }` for webhook event correlation.
 - `verifyWebhook` uses HMAC-SHA256 over `${timestamp}${rawBody}` against the ECDSA public key.
+- `verifyWebhook` then enforces a replay window on that (signed) timestamp: a request more than `webhookToleranceSeconds` old — or that far in the future — is rejected, so a captured payload can't be replayed indefinitely. Missing, malformed, or unsigned timestamps fail closed. Set `webhookToleranceSeconds: 0` (or `false`) to skip the window when a proxy legitimately delays delivery.
 - `parseWebhookEvents` normalizes SendGrid's event array into `NormalizedEvent[]`:
   - `delivered` → `delivered`
   - `open` → `open`
@@ -39,6 +41,7 @@ new SendGridProvider({
 |---|---|
 | `name` | `'sendgrid'` |
 | `sendRatePerSecond` | as configured (default 10) |
+| `webhookToleranceSeconds` | resolved replay window in seconds (default `300`; `0` when disabled) |
 
 ### Setup checklist (SendGrid dashboard)
 
@@ -66,7 +69,7 @@ new NullProvider()
 ### Methods
 
 - `send(args)` — pushes `args` onto `sent`, returns `{ providerId: 'null-<timestamp>-<counter>', status: 'accepted' }`.
-- `verifyWebhook()` — always `true`.
+- `verifyWebhook()` — always `false`. The null provider holds no signing key, so it can never establish that a payload is authentic; it fails closed rather than vouching for unsigned input. See INVARIANT 17.
 - `parseWebhookEvents()` — always `[]`.
 - `reset()` — clears `sent`.
 

@@ -10,6 +10,7 @@ import { SendGridProvider } from 'mailery'
 new SendGridProvider({
   apiKey: process.env.SENDGRID_API_KEY!,
   webhookVerificationKey: process.env.SENDGRID_WEBHOOK_KEY!,
+  webhookToleranceSeconds: 300,    // replay window for signed webhooks; 0 or false disables
   sendRatePerSecond: 10,           // shared IP default; raise on dedicated IP
   sandbox: process.env.NODE_ENV !== 'production',
 })
@@ -58,7 +59,26 @@ Same settings page, on **your** webhook (keys are per-webhook — another webhoo
 
 mailery verifies every inbound webhook signature against this key. Unsigned or invalid-signature requests are rejected with `401`. Don't skip this — without verification, anyone who finds your webhook URL can fake bounce events and poison your suppression list.
 
-#### 4. (Optional) IP allowlist
+#### 4. (Optional) Tune the replay window
+
+A signature proves a payload came from SendGrid. It doesn't prove it's *current* — anyone who captures one valid request could otherwise resend it forever. SendGrid signs `timestamp + body`, so mailery also checks that the signed timestamp is recent:
+
+```ts
+new SendGridProvider({
+  apiKey: SG_KEY,
+  webhookVerificationKey: SG_WEBHOOK_KEY,
+  webhookToleranceSeconds: 300,  // the default — 5 minutes either side of now
+})
+```
+
+- **Default `300`** (5 minutes), matching the conventional tolerance used by other signed-webhook SDKs. Comfortably wider than NTP-grade clock drift or provider retry jitter.
+- **Rejected in both directions** — too old *and* implausibly far in the future, since clock skew cuts both ways.
+- **Widen it** if your host's ingress genuinely queues webhooks (`webhookToleranceSeconds: 900`).
+- **Disable it** with `webhookToleranceSeconds: 0` or `false` if delivery delays are unbounded. The signature check still applies; you're only giving up replay protection.
+
+Rejections look identical to a bad signature: a bare `401`, no detail about why.
+
+#### 5. (Optional) IP allowlist
 
 If your edge / CDN supports it, allowlist SendGrid's webhook source IPs (SendGrid publishes them at `https://api.sendgrid.com/v3/access_settings/whitelist`). Defense-in-depth over the signature check.
 

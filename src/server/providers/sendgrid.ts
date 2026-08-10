@@ -19,11 +19,26 @@ import type {
   SendArgs,
   SendResult,
 } from '../../shared/types.js'
+import {
+  isWebhookTimestampFresh,
+  resolveWebhookToleranceSeconds,
+  type WebhookToleranceOption,
+} from './webhook-tolerance.js'
 
 export interface SendGridProviderOptions {
   apiKey: string
   /** ECDSA public key (PEM) from SendGrid → Settings → Mail Settings → Signed Event Webhook. */
   webhookVerificationKey?: string
+  /**
+   * Replay window for the signed webhook timestamp, in seconds.
+   * Defaults to 300 (5 minutes). A signed payload older — or more than this
+   * far in the future — than the window is rejected, so a captured request
+   * can't be replayed indefinitely.
+   *
+   * Set `0` or `false` to disable the check, for hosts whose proxy or queue
+   * legitimately delays webhook delivery past the window.
+   */
+  webhookToleranceSeconds?: WebhookToleranceOption
   /** Send-rate cap per second (BullMQ group limiter consults this). */
   sendRatePerSecond?: number
   /** Sandbox mode bypasses actual delivery — useful in dev/test. */
@@ -36,10 +51,13 @@ const SG_TS_HEADER = 'x-twilio-email-event-webhook-timestamp'
 export class SendGridProvider implements MailProvider {
   readonly name = 'sendgrid'
   readonly sendRatePerSecond: number
+  /** Resolved replay window in seconds; `0` means the check is disabled. */
+  readonly webhookToleranceSeconds: number
 
   constructor(private readonly opts: SendGridProviderOptions) {
     sgMail.setApiKey(opts.apiKey)
     this.sendRatePerSecond = opts.sendRatePerSecond ?? 10
+    this.webhookToleranceSeconds = resolveWebhookToleranceSeconds(opts.webhookToleranceSeconds)
   }
 
   async send(args: SendArgs): Promise<SendResult> {
@@ -85,10 +103,17 @@ export class SendGridProvider implements MailProvider {
     try {
       const verifier = crypto.createVerify('sha256')
       verifier.update(payload)
-      return verifier.verify(this.opts.webhookVerificationKey, sig, 'base64')
+      if (!verifier.verify(this.opts.webhookVerificationKey, sig, 'base64')) return false
     } catch {
       return false
     }
+
+    // Signature checks out, so the timestamp is authentic — but authentic is
+    // not the same as current. Reject outside the replay window (both stale
+    // and implausibly future) so a captured request has a five-minute life,
+    // not an unbounded one. Signature first, freshness second, mirroring the
+    // verify-then-expiry order in ../tokens.ts.
+    return isWebhookTimestampFresh(ts, this.webhookToleranceSeconds)
   }
 
   parseWebhookEvents(payload: unknown): NormalizedEvent[] {
