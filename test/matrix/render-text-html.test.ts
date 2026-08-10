@@ -131,7 +131,12 @@ describe('tracking', () => {
   it('adds the open pixel to html only', async () => {
     const r = await renderCase({ body: 'Hi there', trackOpens: true })
 
-    expect(r.sent!.html).toContain(`/m/open/${String(r.send._id)}.png`)
+    // The pixel URL carries a signature between the send id and the extension
+    // when a signing secret is configured (`/m/open/<sendId>.<sig>.png`), so
+    // match the id and the extension rather than the unsigned literal.
+    expect(r.sent!.html).toMatch(
+      new RegExp(`/m/open/${String(r.send._id)}(\\.[\\w-]+)?\\.png`),
+    )
     expect(r.sent!.text).not.toContain('/m/open/')
     expect(r.sent!.text).not.toContain('.png')
   })

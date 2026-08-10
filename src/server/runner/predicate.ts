@@ -8,6 +8,7 @@
  */
 
 import type { Contact, Predicate } from '../../shared/types.js'
+import type { BotFilterConfig } from '../config.js'
 import type { Collections, FlowRunDoc, SendDoc } from '../models/index.js'
 
 export interface PredicateContext {
@@ -15,9 +16,20 @@ export interface PredicateContext {
   run: FlowRunDoc
   collections: Collections
   now?: Date
+  /**
+   * Tuning for the `…ExcludingBots` / `…AtLeastN` predicates. Omit for the
+   * defaults (`DEFAULT_BOT_UA_RE`, no timing filter).
+   */
+  botFilter?: BotFilterConfig
 }
 
-const BOT_UA_RE = /Mimecast|SafeLinks|proofpoint|HeadlessChrome|Googlebot|bingbot/i
+/**
+ * User agents treated as automated unless the host overrides
+ * `botFilter.userAgentPattern`. Deliberately short: these are the scanners that
+ * announce themselves. Anything that impersonates a browser is not catchable
+ * from the UA string and is out of scope here — see INVARIANT 7.
+ */
+export const DEFAULT_BOT_UA_RE = /Mimecast|SafeLinks|proofpoint|HeadlessChrome|Googlebot|bingbot/i
 
 export async function evaluatePredicate(
   predicate: Predicate,
@@ -114,18 +126,82 @@ async function openOrClickCount(
     return await ctx.collections.sends.countDocuments(filter)
   }
 
-  // Bot filter is best-effort: we only know UA for clicks (open pixel hits don't reliably carry one)
+  // Bot filtering is best-effort by construction — see INVARIANT 7. A send
+  // counts when at least one of its recorded opens (or clicks) looks human;
+  // one scanner hit does not disqualify a send the recipient also read.
   const docs = await ctx.collections.sends.find(filter).limit(1000).toArray()
+  const botRe = ctx.botFilter?.userAgentPattern ?? DEFAULT_BOT_UA_RE
+  const minOpenDelayMs = ctx.botFilter?.minOpenDelayMs ?? 0
   let n = 0
   for (const s of docs) {
-    if (kind === 'opened') {
-      n++
-      continue
-    }
-    const hasHumanClick = (s as SendDoc).clickedLinks?.some((c: any) => !c.userAgent || !BOT_UA_RE.test(c.userAgent))
-    if (hasHumanClick) n++
+    const doc = s as SendDoc
+    const human =
+      kind === 'opened'
+        ? hasHumanOpen(doc, botRe, minOpenDelayMs)
+        : (doc.clickedLinks ?? []).some((c) => !isBotUserAgent(c.userAgent, botRe))
+    if (human) n++
   }
   return n
+}
+
+/**
+ * A user agent is "bot" only when it is present *and* matches the pattern.
+ *
+ * Unknown counts as human. That is the deliberate choice, and it is the same
+ * one the click path has always made:
+ *
+ *   - Image fetches frequently carry no `User-Agent` at all, and Apple Mail
+ *     Privacy Protection proxies strip identifying headers. Scoring unknown as
+ *     bot would drop a large share of genuine opens on the floor, silently.
+ *   - It preserves today's counts for sends recorded before user agents were
+ *     stored, so enabling this fix cannot retroactively empty a running flow.
+ *
+ * The cost is that a scanner which sends no UA still counts. Treating unknown
+ * as bot would be the safer posture against forgery, but forgery is what the
+ * URL signature is for; this filter's job is only to be honest about scanners
+ * that identify themselves.
+ */
+function isBotUserAgent(ua: string | null | undefined, botRe: RegExp): boolean {
+  if (typeof ua !== 'string' || ua.trim() === '') return false
+  return botRe.test(ua)
+}
+
+/**
+ * Does this send have at least one open that looks like a person?
+ *
+ * Sends recorded before `opens[]` existed fall back to the single `openedAt`
+ * timestamp with an unknown user agent — which, per the rule above, counts as
+ * human. Legacy data therefore behaves exactly as it does today.
+ */
+function hasHumanOpen(send: SendDoc, botRe: RegExp, minOpenDelayMs: number): boolean {
+  const opens =
+    send.opens && send.opens.length > 0
+      ? send.opens
+      : send.openedAt
+        ? [{ openedAt: send.openedAt, userAgent: null }]
+        : []
+  return opens.some((o) => {
+    if (isBotUserAgent(o.userAgent, botRe)) return false
+    if (isPrefetchOpen(o.openedAt, send.queuedAt, minOpenDelayMs)) return false
+    return true
+  })
+}
+
+/**
+ * Optional second signal (`botFilter.minOpenDelayMs`, default 0 = off): an open
+ * that lands within a few seconds of the send being queued is a gateway
+ * prefetch or a security scanner, not a reader.
+ *
+ * Off by default — a recipient who happens to be looking at their inbox when
+ * the mail arrives is a real false positive, and turning it on silently changes
+ * the numbers every existing flow branches on.
+ */
+function isPrefetchOpen(openedAt: unknown, queuedAt: unknown, minOpenDelayMs: number): boolean {
+  if (!minOpenDelayMs || minOpenDelayMs <= 0) return false
+  if (!(openedAt instanceof Date) || !(queuedAt instanceof Date)) return false
+  const delta = openedAt.getTime() - queuedAt.getTime()
+  if (!Number.isFinite(delta) || delta < 0) return false
+  return delta < minOpenDelayMs
 }
 
 function effectiveLowerBound(ctx: PredicateContext, opts: { sinceFlowStart?: boolean; withinDays?: number }): Date | null {

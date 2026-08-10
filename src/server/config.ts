@@ -150,6 +150,31 @@ export interface CircuitBreakerThresholds {
   minSendsBeforeEval: number
 }
 
+export interface BotFilterConfig {
+  /**
+   * User agents matching this pattern are treated as automated. Applied to
+   * recorded open and click user agents alike.
+   *
+   * Default: `/Mimecast|SafeLinks|proofpoint|HeadlessChrome|Googlebot|bingbot/i`
+   * (`DEFAULT_BOT_UA_RE`). Replace it to cover your own corporate scanners;
+   * extend rather than replace if you want to keep the built-ins.
+   */
+  userAgentPattern?: RegExp
+  /**
+   * Opens recorded within this many milliseconds of the send being queued are
+   * treated as automated regardless of user agent — corporate scanners and
+   * gateway prefetchers fetch the pixel within seconds of delivery, and a
+   * human cannot.
+   *
+   * Default `0` — disabled. It is off by default because it is a heuristic
+   * with a real false-positive tail (a recipient already reading their inbox
+   * when the mail lands) and because enabling it silently changes the counts
+   * every existing flow branches on. `10000` (10s) is the value worth trying
+   * first if your open counts look implausible.
+   */
+  minOpenDelayMs?: number
+}
+
 export interface MailerConfig {
   // ---- Storage --------------------------------------------------------------
   db: Db
@@ -271,6 +296,35 @@ export interface MailerConfig {
   trackClicks?: boolean
   storeTrackingIp?: boolean
   storeRenderedBody?: boolean
+  /**
+   * Reject `/m/open` and `/m/click` hits that carry no signature.
+   *
+   * Default `false` — grace mode. Newly rendered mail is always signed; this
+   * flag only decides what happens to the *unsigned* URLs sitting in mail that
+   * was already delivered. In grace mode they are still counted and each one is
+   * logged (`mailery: unsigned tracking URL accepted`) so the operator can watch
+   * the legacy rate fall to zero and then flip this to `true`.
+   *
+   * A signature that is *present but wrong* is always rejected, in both modes.
+   */
+  requireSignedTrackingUrls?: boolean
+  /**
+   * How long a tracking URL stays valid, in days, measured from the send's
+   * `queuedAt`. Default `0` — never expires.
+   *
+   * Never-expire is the right default: an email sits in an inbox for years and
+   * a legitimate open six months later is real data, not an attack. The
+   * signature already proves the caller was handed the URL. Operators with a
+   * data-retention policy can set a window; because the deadline is derived
+   * from the send row rather than baked into the token, changing this value
+   * takes effect immediately for already-delivered mail and costs no URL bytes.
+   */
+  trackingUrlLifetimeDays?: number
+  /**
+   * Tuning for `hasOpenedExcludingBots` / `hasClickedExcludingBots` /
+   * `openedAtLeastN` / `clickedAtLeastN`. See `BotFilterConfig`.
+   */
+  botFilter?: BotFilterConfig
 
   // ---- Hooks ----------------------------------------------------------------
   getAdminActor?: (req: any) => string
@@ -303,6 +357,8 @@ export type ResolvedConfig = Required<
     | 'trackClicks'
     | 'storeTrackingIp'
     | 'storeRenderedBody'
+    | 'requireSignedTrackingUrls'
+    | 'trackingUrlLifetimeDays'
   >
 > & {
   circuitBreaker: CircuitBreakerThresholds
@@ -330,6 +386,8 @@ export const DEFAULTS = {
   trackClicks: true,
   storeTrackingIp: false,
   storeRenderedBody: false,
+  requireSignedTrackingUrls: false,
+  trackingUrlLifetimeDays: 0,
 } as const
 
 export const CIRCUIT_BREAKER_DEFAULTS: CircuitBreakerThresholds = {
@@ -365,6 +423,8 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     trackClicks: c.trackClicks ?? DEFAULTS.trackClicks,
     storeTrackingIp: c.storeTrackingIp ?? DEFAULTS.storeTrackingIp,
     storeRenderedBody: c.storeRenderedBody ?? DEFAULTS.storeRenderedBody,
+    requireSignedTrackingUrls: c.requireSignedTrackingUrls ?? DEFAULTS.requireSignedTrackingUrls,
+    trackingUrlLifetimeDays: c.trackingUrlLifetimeDays ?? DEFAULTS.trackingUrlLifetimeDays,
     circuitBreaker: { ...CIRCUIT_BREAKER_DEFAULTS, ...(c.circuitBreaker ?? {}) },
   }
 }

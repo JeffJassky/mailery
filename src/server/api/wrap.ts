@@ -32,6 +32,13 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express'
 export interface RouteLogger {
   error?: (fields: Record<string, unknown>, msg?: string) => void
   warn?: (fields: Record<string, unknown>, msg?: string) => void
+  /**
+   * Routine, high-volume telemetry — currently only "an unsigned (pre-signing)
+   * tracking URL was accepted in grace mode", which is one line per legacy open
+   * and is not a fault. Kept off `warn` deliberately so it can be routed or
+   * dropped separately from things that are.
+   */
+  info?: (fields: Record<string, unknown>, msg?: string) => void
 }
 
 /**
@@ -45,6 +52,9 @@ export const consoleRouteLogger: RouteLogger = {
   },
   warn(fields, msg) {
     console.warn(msg ?? 'mailery: request warning', fields)
+  },
+  info(fields, msg) {
+    console.info(msg ?? 'mailery: request', fields)
   },
 }
 

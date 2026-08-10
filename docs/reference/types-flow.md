@@ -155,6 +155,15 @@ Predicates are evaluated when the runner processes a `condition` or `branch` ste
 
 Prefer `hasOpenedExcludingBots` / `hasClickedExcludingBots` (which filter known bot User-Agents) or, better, real product events (`Used Feature X`) for engagement-based branching.
 
+Know what the filtered variants promise before you branch on them:
+
+- They compare the User-Agent recorded at open/click time against [`botFilter.userAgentPattern`](/guide/configuration#bot-filtering).
+- A send counts if **any** of its opens or clicks looks human.
+- An open or click with **no** User-Agent counts as human. Many mail clients send none, so the alternative would discard real engagement — but it also means a scanner that sends no UA still counts.
+- Sends recorded before v0.15.0 have no stored User-Agent and therefore all count as human. The filter only sharpens going forward; it does not reclassify history.
+
+Prior to v0.15.0, `hasOpenedExcludingBots` and `openedAtLeastN` did no filtering at all and were identical to `hasOpened`. If a flow was tuned against those numbers, expect its open-based branches to fire less often now.
+
 ## Examples
 
 ### Activation rescue

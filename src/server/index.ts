@@ -12,7 +12,7 @@ export const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : '
 
 // Core
 export { Mailer } from './mailer.js'
-export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, SenderDomainConfig, SenderDomainRegistry } from './config.js'
+export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, BotFilterConfig, SenderDomainConfig, SenderDomainRegistry } from './config.js'
 export { validateSenderDomain } from './templates/sender-domain.js'
 export type { SenderDomainValidation } from './templates/sender-domain.js'
 
@@ -78,6 +78,14 @@ export type {
 
 // Token helpers (rarely needed by hosts, useful for tests)
 export { signUnsubscribeToken, verifyUnsubscribeToken, sha256Hex } from './tokens.js'
+export {
+  signTrackingToken,
+  verifyTrackingToken,
+  TRACKING_SIG_LENGTH,
+  type TrackingScope,
+  type TrackingTokenParams,
+} from './tokens.js'
+export { DEFAULT_BOT_UA_RE } from './runner/predicate.js'
 
 // Shared types
 export { computeDeliveryTime } from './runner/delivery-window.js'

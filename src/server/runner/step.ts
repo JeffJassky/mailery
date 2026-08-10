@@ -139,7 +139,7 @@ async function handleCondition(
   ctx: RunnerContext,
 ): Promise<void> {
   if (!contact) return
-  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections })
+  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections, botFilter: ctx.config.botFilter })
 
   if (result) {
     await advanceStep(run, ctx, { action: 'condition_evaluated', details: { result: true } })
@@ -159,7 +159,7 @@ async function handleBranch(
   ctx: RunnerContext,
 ): Promise<void> {
   if (!contact) return
-  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections })
+  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections, botFilter: ctx.config.botFilter })
   const newPath = [...run.currentBranchPath, run.currentStepIndex, result ? 'true' : 'false', 0] as Array<number | 'true' | 'false'>
 
   const updated = await ctx.collections.flowRuns.findOneAndUpdate(

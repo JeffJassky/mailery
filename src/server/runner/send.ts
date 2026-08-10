@@ -208,6 +208,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
         trackOpens: template.trackOpens ?? ctx.config.trackOpens,
         trackClicks: template.trackClicks ?? ctx.config.trackClicks,
         preserveUrls: [renderCtx.unsubscribeUrl],
+        signingSecret: ctx.config.unsubscribeSecret,
       })
 
   await ctx.collections.sends.updateOne(

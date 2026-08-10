@@ -67,6 +67,94 @@ export function verifyUnsubscribeToken(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tracking-URL signatures
+// ---------------------------------------------------------------------------
+
+/**
+ * Scopes a tracking signature can be issued for. An allowlist, mirroring the
+ * `k: 'doi'` discriminator on the DOI token: the scope is part of the signed
+ * message, so an `/m/open` signature cannot be replayed as an `/m/click` one
+ * even for the same send.
+ */
+export type TrackingScope = 'open' | 'click'
+
+const TRACKING_SCOPES: readonly string[] = ['open', 'click']
+
+/**
+ * Signature length in base64url characters. 12 chars = 72 bits of the
+ * HMAC-SHA256 digest.
+ *
+ * Truncation is deliberate. These signatures are embedded in every link of
+ * every email, and the pixel URL in particular is parsed by mail clients with
+ * their own length quirks, so bytes are not free. 72 bits is far beyond what an
+ * online forgery attack can reach: an attacker gets no oracle beyond "the open
+ * was counted", each guess is a live HTTP request, and there is no offline
+ * verification step. Nothing here is a bearer credential for anything except
+ * "this recipient was sent this mail".
+ */
+export const TRACKING_SIG_LENGTH = 12
+
+export interface TrackingTokenParams {
+  sendId: string
+  /** Present for `click` scope, absent for `open`. */
+  linkId?: string
+}
+
+/**
+ * The signed message. Versioned so a future format change (longer signature,
+ * different digest) can be distinguished rather than silently mis-verified.
+ * Components are joined with `:`, a character that appears in neither an
+ * ObjectId hex string nor a `shortHash` linkId, so the encoding is unambiguous.
+ */
+function trackingMessage(scope: TrackingScope, params: TrackingTokenParams): string {
+  const tail = params.linkId === undefined ? '' : `:${params.linkId}`
+  return `mailery.track.v1:${scope}:${params.sendId}${tail}`
+}
+
+/**
+ * Sign a tracking URL. Returns `TRACKING_SIG_LENGTH` base64url characters.
+ *
+ * Keyed with `unsubscribeSecret` — the same secret the unsubscribe and DOI
+ * tokens use, so there is exactly one secret to provision
+ * (`MAILER_UNSUBSCRIBE_SECRET`) and one to rotate. The scope prefix keeps the
+ * key domains separate.
+ */
+export function signTrackingToken(
+  scope: TrackingScope,
+  params: TrackingTokenParams,
+  secret: string,
+): string {
+  if (!TRACKING_SCOPES.includes(scope)) {
+    throw new Error(`signTrackingToken: unknown scope ${String(scope)}`)
+  }
+  const mac = crypto.createHmac('sha256', secret).update(trackingMessage(scope, params)).digest()
+  return b64url(mac).slice(0, TRACKING_SIG_LENGTH)
+}
+
+/**
+ * Verify a tracking-URL signature in constant time.
+ *
+ * The length pre-check before `timingSafeEqual` is required, not defensive:
+ * `crypto.timingSafeEqual` throws on mismatched lengths, and a thrown
+ * verification is a rejection that leaks length through a different channel.
+ * Same shape as `verifyUnsubscribeToken`.
+ */
+export function verifyTrackingToken(
+  token: unknown,
+  scope: TrackingScope,
+  params: TrackingTokenParams,
+  secret: string,
+): boolean {
+  if (typeof token !== 'string') return false
+  if (!TRACKING_SCOPES.includes(scope)) return false
+  if (token.length !== TRACKING_SIG_LENGTH) return false
+  const expected = Buffer.from(signTrackingToken(scope, params, secret), 'utf8')
+  const actual = Buffer.from(token, 'utf8')
+  if (expected.length !== actual.length) return false
+  return crypto.timingSafeEqual(expected, actual)
+}
+
 function b64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }

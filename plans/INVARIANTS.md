@@ -64,6 +64,25 @@ Only a human (admin UI) can clear the trip. The library never auto-resumes.
 - A bot-filtered variant is available: `hasOpenedExcludingBots`, `hasClickedExcludingBots`, which exclude events whose User-Agent matched the bot list (`Mimecast`, `proofpoint`, `SafeLinks`, common headless browsers).
 - Aggregated predicates (`openedAtLeastN`, `clickedAtLeastN` over a window) are preferred for engagement segmentation.
 
+The filter must actually filter. Through v0.14 it did not: the `opened` branch of `openOrClickCount` incremented unconditionally, so `hasOpenedExcludingBots` was identical to `hasOpened`, and nothing ever wrote `clickedLinks[].userAgent`, so every click scored human too. An API that promises bot exclusion and delivers none is worse than not offering one — someone builds a re-engagement flow on it and wonders why everyone looks engaged. Both endpoints now record the requesting User-Agent (`opens[]`, `clickedLinks[].userAgent`) and both predicate paths apply the same pattern.
+
+The classification rules, which are behaviour and not implementation detail:
+
+- A send counts if **any** of its recorded opens (or clicks) looks human. One scanner prefetch does not disqualify a send the recipient also read.
+- A **missing** User-Agent counts as human, not bot. Image fetches frequently carry none, so the alternative silently discards real engagement — and would retroactively zero flows branching on sends recorded before User-Agents were stored.
+- The pattern and an optional timing signal (`minOpenDelayMs`, off by default) are configurable via `botFilter`; the built-in pattern is the default.
+
+## 7a. Tracking URLs are signed
+
+`/m/open` and `/m/click` are unauthenticated and their only identifier is a Mongo ObjectId — 4 bytes of timestamp, 5 bytes constant per process, 3 bytes of sequential counter. One tracking URL from one received email therefore predicts its neighbours, and forged opens are an automation input, not just a chart. Every generated tracking URL carries a truncated HMAC over its own path components, keyed with `unsubscribeSecret` and scoped to `open` or `click` so neither can be replayed as the other.
+
+Compatibility is part of the invariant, because mail already delivered will keep being opened for years:
+
+- A signature that is present and **wrong** is rejected in every mode. Grace covers "this URL predates signing", never "this URL was signed by someone without the key".
+- A **missing** signature is accepted while `requireSignedTrackingUrls` is false (the default) and logged at `info`, so an operator can watch legacy traffic decay before flipping it.
+- Rejections are invisible to the caller: the pixel still returns a 200 PNG and a bad click 404s exactly like an unknown send. Any distinguishable response is an enumeration oracle.
+- Tracking URLs do not expire by default (`trackingUrlLifetimeDays: 0`). A legitimate open a year later is real data; the signature, not a deadline, is what proves possession.
+
 Recommended pattern for "resend to non-openers in 3 days":
 
 ```ts

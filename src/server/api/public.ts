@@ -5,11 +5,15 @@
  *   app.use('/m', createPublicRouter(mailer))
  *
  * Routes:
- *   GET  /open/:sendId.png         — open pixel (records open, returns 1×1 PNG)
- *   GET  /click/:sendId/:linkId    — click redirect (records click, 302 → target)
- *   GET  /unsub/:token             — confirmation page (one-click POST link)
- *   POST /unsub/:token             — RFC 8058 one-click unsubscribe
- *   POST /webhooks/:provider       — inbound provider event webhook
+ *   GET  /open/:sendId.:sig.png        — open pixel (records open, returns 1×1 PNG)
+ *   GET  /click/:sendId/:linkId/:sig   — click redirect (records click, 302 → target)
+ *   GET  /unsub/:token                 — confirmation page (one-click POST link)
+ *   POST /unsub/:token                 — RFC 8058 one-click unsubscribe
+ *   POST /webhooks/:provider           — inbound provider event webhook
+ *
+ * `:sig` is a 12-character truncated HMAC issued by `applyTracking`. It is
+ * syntactically optional on both tracking routes so that mail delivered before
+ * signing existed keeps working — see `checkTrackingSignature`.
  */
 
 import express, { Router, type Request, type Response } from 'express'
@@ -17,8 +21,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { ObjectId } from 'mongodb'
 
-import { sha256Hex, verifyUnsubscribeToken, verifyDoiToken } from '../tokens.js'
+import {
+  sha256Hex,
+  verifyUnsubscribeToken,
+  verifyDoiToken,
+  verifyTrackingToken,
+  type TrackingScope,
+  type TrackingTokenParams,
+} from '../tokens.js'
 import type { Mailer } from '../mailer.js'
+import type { SendDoc } from '../models/index.js'
 import type { MailProvider } from '../../shared/types.js'
 import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
 
@@ -68,26 +80,62 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // GET /open/:sendId.png
   // -------------------------------------------------------------------------
   router.get('/open/:sendId.png', wrap(logger, async (req: Request, res: Response) => {
+    // The pixel is returned unconditionally, before anything is validated. A
+    // rejected signature must look exactly like an accepted one on the wire:
+    // any difference (404, empty body, slower response) is an oracle that tells
+    // an attacker when a guessed sendId is real.
     res.setHeader('Content-Type', 'image/png')
     res.setHeader('Content-Length', String(PIXEL.length))
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
     res.status(200).end(PIXEL)
 
     // Async update — never block the response.
-    const id = (req.params as any).sendId as string
+    const parsed = splitOpenParam((req.params as any).sendId as string)
+    if (!parsed) return
+    const { id, sig } = parsed
     if (!ObjectId.isValid(id)) return
     const sendId = new ObjectId(id)
+
+    const verdict = checkTrackingSignature({
+      scope: 'open',
+      params: { sendId: id },
+      sig,
+      secret: mailer.config.unsubscribeSecret,
+      requireSigned: mailer.config.requireSignedTrackingUrls,
+      logger,
+      fields: { sendId: id },
+    })
+    if (verdict === 'rejected') return
+
     try {
-      const send = await mailer.collections.sends.findOne({ _id: sendId }, { projection: { openedAt: 1 } })
+      const send = await mailer.collections.sends.findOne(
+        { _id: sendId },
+        { projection: { openedAt: 1, queuedAt: 1 } },
+      )
       if (!send) return
+      if (isTrackingExpired(send, mailer.config.trackingUrlLifetimeDays)) {
+        logger.warn?.({ sendId: id }, 'mailery: open ignored — tracking URL past trackingUrlLifetimeDays')
+        return
+      }
+      const now = new Date()
       await mailer.collections.sends.updateOne(
         { _id: sendId },
         {
           $set: {
-            openedAt: send.openedAt ?? new Date(),
+            openedAt: send.openedAt ?? now,
             status: 'delivered' as const,
           },
           $inc: { openCount: 1 },
+          // Per-open user agent, so `hasOpenedExcludingBots` has a signal to
+          // filter on. Capped: an open pixel can be re-fetched indefinitely
+          // (every time the recipient re-opens the mail) and an unbounded
+          // array would eventually run the send document into the 16MB limit.
+          $push: {
+            opens: {
+              $each: [{ openedAt: now, userAgent: requestUserAgent(req) }],
+              $slice: -MAX_TRACKED_OPENS,
+            },
+          },
         },
       )
     } catch (err) {
@@ -98,16 +146,41 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // -------------------------------------------------------------------------
   // GET /click/:sendId/:linkId
   // -------------------------------------------------------------------------
-  router.get('/click/:sendId/:linkId', wrap(logger, async (req: Request, res: Response) => {
-    const { sendId: sendIdStr, linkId } = req.params as { sendId: string; linkId: string }
+  router.get('/click/:sendId/:linkId{/:sig}', wrap(logger, async (req: Request, res: Response) => {
+    const { sendId: sendIdStr, linkId, sig } = req.params as {
+      sendId: string
+      linkId: string
+      sig?: string
+    }
     if (!ObjectId.isValid(sendIdStr)) return res.status(400).end()
     const sendId = new ObjectId(sendIdStr)
 
+    // A bad signature is answered with the same 404 an unknown send gets. Any
+    // distinct status would confirm "this sendId exists, keep guessing".
+    const verdict = checkTrackingSignature({
+      scope: 'click',
+      params: { sendId: sendIdStr, linkId },
+      sig,
+      secret: mailer.config.unsubscribeSecret,
+      requireSigned: mailer.config.requireSignedTrackingUrls,
+      logger,
+      fields: { sendId: sendIdStr, linkId },
+    })
+    if (verdict === 'rejected') return res.status(404).end()
+
     const send = await mailer.collections.sends.findOne(
       { _id: sendId },
-      { projection: { links: 1, firstClickAt: 1 } },
+      { projection: { links: 1, firstClickAt: 1, queuedAt: 1 } },
     )
     if (!send) return res.status(404).end()
+
+    if (isTrackingExpired(send, mailer.config.trackingUrlLifetimeDays)) {
+      logger.warn?.(
+        { sendId: sendIdStr, linkId },
+        'mailery: click rejected — tracking URL past trackingUrlLifetimeDays',
+      )
+      return res.status(404).end()
+    }
 
     const link = (send.links ?? []).find((l) => l.linkId === linkId)
     if (!link) return res.status(404).end()
@@ -139,6 +212,9 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
               url: link.url,
               linkId,
               clickedAt: new Date(),
+              // The bot filter has always read `clickedLinks[].userAgent`; until
+              // now nothing ever wrote it, so every click scored as human.
+              userAgent: requestUserAgent(req),
             },
           },
         },
@@ -296,6 +372,112 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   }))
 
   return router
+}
+
+// ---------------------------------------------------------------------------
+// Tracking-URL verification
+// ---------------------------------------------------------------------------
+
+/** Most recent opens kept per send. See `SendDoc.opens`. */
+const MAX_TRACKED_OPENS = 50
+
+/** User agents are stored for bot classification only; the tail carries nothing. */
+const MAX_UA_LENGTH = 256
+
+function requestUserAgent(req: Request): string | null {
+  const ua = req.headers['user-agent']
+  if (typeof ua !== 'string' || ua.trim() === '') return null
+  return ua.slice(0, MAX_UA_LENGTH)
+}
+
+/**
+ * Split the `:sendId.png` path parameter into id and optional signature.
+ *
+ * Express hands us everything before the literal `.png`, so a signed pixel
+ * arrives as `<objectId>.<sig>` and a legacy one as `<objectId>`. Anything with
+ * more dots than that was not produced by `applyTracking` and is dropped
+ * outright rather than guessed at.
+ */
+function splitOpenParam(raw: unknown): { id: string; sig?: string } | null {
+  if (typeof raw !== 'string') return null
+  const parts = raw.split('.')
+  if (parts.length === 1) return { id: parts[0]! }
+  if (parts.length === 2) return { id: parts[0]!, sig: parts[1]! }
+  return null
+}
+
+type TrackingVerdict = 'signed' | 'legacy' | 'rejected'
+
+/**
+ * Decide whether a tracking hit may be counted.
+ *
+ * Three cases, and the middle one is the whole backward-compatibility story:
+ *
+ *   signature present + valid  → 'signed'
+ *   signature present + wrong  → 'rejected', always, in every mode
+ *   signature absent           → 'rejected' if `requireSignedTrackingUrls`,
+ *                                otherwise 'legacy' — counted, and logged
+ *
+ * Grace mode exists because mail already in inboxes carries unsigned URLs and
+ * will keep being opened for years; hard-rejecting it would silently zero the
+ * tracking for every send that predates this change. The per-hit warn is the
+ * operator's instrument: watch the legacy rate decay, then set
+ * `requireSignedTrackingUrls: true`.
+ *
+ * A wrong signature is never graced. Grace covers "this URL predates signing",
+ * not "this URL was signed by someone who does not have the key".
+ */
+function checkTrackingSignature(args: {
+  scope: TrackingScope
+  params: TrackingTokenParams
+  sig: string | undefined
+  secret: string
+  requireSigned: boolean
+  logger: RouteLogger
+  fields: Record<string, unknown>
+}): TrackingVerdict {
+  const { sig, logger, fields, scope } = args
+
+  if (sig === undefined || sig === '') {
+    if (args.requireSigned) {
+      logger.warn?.(
+        { ...fields, scope },
+        'mailery: unsigned tracking URL rejected (requireSignedTrackingUrls)',
+      )
+      return 'rejected'
+    }
+    // `info`, not `warn`: in grace mode this fires once per legacy open, which
+    // is telemetry rather than a fault. It is the operator's readout for
+    // "has legacy traffic stopped yet?" — when this line goes quiet, flipping
+    // `requireSignedTrackingUrls` to true is safe.
+    logger.info?.(
+      { ...fields, scope },
+      'mailery: unsigned tracking URL accepted — legacy grace mode',
+    )
+    return 'legacy'
+  }
+
+  if (!verifyTrackingToken(sig, scope, args.params, args.secret)) {
+    logger.warn?.({ ...fields, scope }, 'mailery: tracking URL signature invalid')
+    return 'rejected'
+  }
+  return 'signed'
+}
+
+/**
+ * True when the send is older than `trackingUrlLifetimeDays`.
+ *
+ * The deadline is derived from the send row rather than embedded in the token:
+ * it costs no URL bytes, and changing the config takes effect immediately for
+ * mail that has already gone out. A send with no usable `queuedAt` is never
+ * treated as expired — losing a real open to a missing timestamp is worse than
+ * counting a stale one.
+ */
+function isTrackingExpired(send: Pick<SendDoc, 'queuedAt'>, lifetimeDays: number, now: Date = new Date()): boolean {
+  if (!lifetimeDays || lifetimeDays <= 0) return false
+  const queuedAt = send.queuedAt
+  if (!(queuedAt instanceof Date) || Number.isNaN(queuedAt.getTime())) return false
+  return now.getTime() - queuedAt.getTime() > lifetimeDays * 24 * 60 * 60 * 1000
 }
 
 function sendUnsubError(res: Response, msg: string): Response {

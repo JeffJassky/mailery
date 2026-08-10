@@ -108,8 +108,51 @@ All-clear states are silent. The banner only renders when there's at least one w
   trackClicks: true,
   storeTrackingIp: false,         // privacy default — IPs not stored
   storeRenderedBody: false,       // size default — body hash is stored, not full HTML
+
+  requireSignedTrackingUrls: false, // default; reject unsigned (pre-v0.15.0) tracking URLs
+  trackingUrlLifetimeDays: 0,       // default; 0 = tracking URLs never expire
 }
 ```
+
+Tracking URLs are HMAC-signed with `unsubscribeSecret` — see
+[Tracking URL signatures](/reference/public-endpoints#tracking-url-signatures)
+for the format, the rollout, and what `requireSignedTrackingUrls` costs you if
+you flip it too early. Nothing here needs configuring to *get* signing; these
+two knobs only govern how strict the endpoints are about URLs that were minted
+before it existed.
+
+### Bot filtering
+
+`hasOpenedExcludingBots` / `hasClickedExcludingBots` / `openedAtLeastN` /
+`clickedAtLeastN` classify a recorded open or click as automated using this:
+
+```ts
+{
+  botFilter: {
+    // Default. Replaces, not merges — include the built-ins if you want them.
+    userAgentPattern: /Mimecast|SafeLinks|proofpoint|HeadlessChrome|Googlebot|bingbot/i,
+    // Default 0 (off). Opens landing within this many ms of `queuedAt` are
+    // treated as gateway prefetches. 10000 is the value worth trying first.
+    minOpenDelayMs: 0,
+  },
+}
+```
+
+Import the built-in pattern as `DEFAULT_BOT_UA_RE` if you want to extend rather
+than replace it:
+
+```ts
+import { DEFAULT_BOT_UA_RE } from 'mailery'
+
+botFilter: { userAgentPattern: new RegExp(`${DEFAULT_BOT_UA_RE.source}|AcmeScanner`, 'i') }
+```
+
+An open or click with **no** user agent counts as human, not bot — image
+fetches frequently carry none, and Apple Mail Privacy Protection strips
+identifying headers, so scoring unknown as bot would drop a large share of real
+engagement. INVARIANT 7 is the posture here: these predicates are a noisy
+signal with a filter on top, not a precise one. Where a product event exists,
+prefer it.
 
 ## Broadcasts
 
@@ -293,6 +336,15 @@ MAILER_MONGODB_URI          MAILER_REDIS_URL            (only when MAILER_QUEUE_
 MAILER_PUBLIC_URL           MAILER_UNSUBSCRIBE_SECRET
 MAILER_SENDER_ADDRESS       MAILER_FROM_NAME / MAILER_FROM_EMAIL
 MAILER_DEFAULT_PROVIDER     MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
+MAILER_SENDGRID_WEBHOOK_TOLERANCE
+                            Replay window for signed SendGrid webhooks, in seconds.
+                            Default 300. A signed event whose timestamp is further
+                            from now than this is rejected; '0' disables the freshness
+                            check entirely. An unparseable value falls back to 300
+                            rather than disabling it, so a typo can never silently
+                            switch the check off. Raise it only for genuine clock
+                            skew — the window is how long a captured webhook stays
+                            replayable.
 MAILER_QUEUE_DRIVER         'bull' (default) | 'agenda' | 'noop'
 MAILER_QUEUE_PREFIX         Namespaces this instance (optional). bull: Redis key prefix.
                             agenda: jobs collection suffix (_mailerJobs_<prefix>).
