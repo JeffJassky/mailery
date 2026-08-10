@@ -61,9 +61,10 @@ List-Unsubscribe-Post: List-Unsubscribe=One-Click
 Gmail and modern clients show a one-click button in the inbox UI. Clicking POSTs to the URL. mailery:
 
 1. Verifies the HMAC token (signed with `unsubscribeSecret`).
-2. Returns 200 immediately — INVARIANT 8.
-3. Writes the suppression + updates the subscription asynchronously.
-4. Falls back to disk (`/tmp/mailery-pending-unsubs.jsonl`) if Mongo is degraded.
+2. Writes the suppression + updates the subscription, waiting up to `unsubscribeWriteTimeoutMs` (default 5s).
+3. Returns 200 — INVARIANT 8: **never a 200 for an unsubscribe that was not durably recorded.**
+4. If that write fails or times out, appends the opt-out to [`pendingUnsubsPath`](./configuration#pendingunsubspath-the-unsubscribe-journal) and still returns 200; the tick drain replays it when Mongo is back.
+5. If there is nowhere to journal it either, returns **503** rather than confirm an unsubscribe it did not record.
 
 A GET to the same URL renders a confirmation page so browser visits show a friendly "click to unsubscribe" page.
 

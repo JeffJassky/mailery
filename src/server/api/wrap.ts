@@ -6,12 +6,17 @@
  * a rejection always arrives before any header is written and Express can turn
  * it into a clean JSON 500.
  *
- * The public router cannot use that. `/open`, `POST /unsub` and `/webhooks` all
- * respond *first* and do their work after (INVARIANT 8 — never make a mail
- * client or a provider wait on our database). By the time those handlers can
- * reject, `res.headersSent` is already true, and forwarding post-headers makes
- * Express destroy the socket underneath a response the client has already been
+ * The public router cannot use that. `/open`, `/click` and `/webhooks` respond
+ * *first* and do their work after — never make a mail client or a provider
+ * wait on our database. By the time those handlers can reject,
+ * `res.headersSent` is already true, and forwarding post-headers makes Express
+ * destroy the socket underneath a response the client has already been
  * promised.
+ *
+ * (`POST /unsub` used to be in that list. It now awaits its write before
+ * answering, because a response sent first can only ever report success —
+ * see INVARIANT 8 and the route's own comment. It still needs this wrapper for
+ * the pre-headers branch.)
  *
  * So this is a log-and-swallow wrapper, ported from featureboard's
  * `src/server/routes/wrap.js`, with one deliberate difference: featureboard

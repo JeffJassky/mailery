@@ -223,6 +223,40 @@ export interface MailerConfig {
   requireDoubleOptIn?: boolean
   unsubscribeTokenLifetimeDays?: number
   transactionalRespectUnsubscribe?: boolean
+  /**
+   * Absolute path to the pending-unsubscribe journal (INVARIANT 8).
+   *
+   * When `POST /m/unsub/:token` cannot reach Mongo, the opt-out is appended
+   * here as JSONL and replayed by the tick drain
+   * (`drainPendingUnsubscribes`). The file is created 0600 inside a 0700
+   * directory and opened `O_NOFOLLOW`.
+   *
+   * **There is no default, and that is deliberate.** The journal holds
+   * recipient email addresses in plaintext outside the database, and a library
+   * mounted into an unknown host cannot pick a directory that is at once
+   * writable, durable and private — which is how the previous default ended up
+   * being `/tmp` (world-writable, wiped on reboot, and never read back).
+   *
+   * With this unset the endpoint answers **503** when Mongo is unreachable,
+   * rather than promising an unsubscribe it has nowhere to record. Set it to a
+   * durable, private, node-local path to get the journal instead — e.g.
+   * `/var/lib/mailery/pending-unsubs.jsonl` (systemd: `StateDirectory=mailery`).
+   *
+   * Must not be on a shared network filesystem: claiming a batch relies on
+   * `rename` being atomic within the directory.
+   */
+  pendingUnsubsPath?: string
+  /**
+   * How long `POST /m/unsub/:token` waits for the Mongo write before falling
+   * back to the journal. Default 5000ms.
+   *
+   * The tension is INVARIANT 8's own: the response must be fast (clients are
+   * impatient, providers retry) *and* must not claim an unsubscribe that was
+   * never recorded. A healthy write is sub-millisecond, so this budget is only
+   * ever spent during an outage, and spending it is what makes the difference
+   * between a truthful 200 and a lie.
+   */
+  unsubscribeWriteTimeoutMs?: number
   /** Slug of the transactional template sent for DOI confirmation. Defaults to 'doi-confirmation'. */
   doiTemplateSlug?: string
   /** How long the DOI token stays valid. Default 7 days. */
@@ -269,10 +303,18 @@ export interface MailerConfig {
   // ---- DMARC aggregate report ingestion ------------------------------------
   /**
    * DMARC RUA aggregate reports tell you who is sending mail that claims to
-   * be from your domain — both legitimate sources and spoofers. Operator
-   * uploads the report attachments (or POSTs them via SendGrid Inbound Parse
-   * to /admin/mailer/api/dmarc/upload). Mailery decompresses, parses, and
-   * surfaces alignment failures + unknown senders.
+   * be from your domain — both legitimate sources and spoofers. Mailery
+   * decompresses, parses, and surfaces alignment failures + unknown senders.
+   *
+   * Two ways in:
+   *   - the operator uploads attachments in the admin UI
+   *     (`POST /admin/mailer/api/dmarc/upload`, behind your admin guard)
+   *   - the inbound webhook, for SendGrid Inbound Parse and friends:
+   *     `createPublicRouter(mailer, { dmarcInbound: { secret } })`. Off unless
+   *     that secret is set. Do **not** point Inbound Parse at the admin
+   *     upload route — it sits behind the host's `requireAdmin` guard, which
+   *     Inbound Parse cannot satisfy. (Versions before 0.15 recommended
+   *     exactly that, and it never worked.)
    */
   dmarc?: DmarcConfig
 
@@ -340,6 +382,7 @@ export type ResolvedConfig = Required<
     | 'requireDoubleOptIn'
     | 'unsubscribeTokenLifetimeDays'
     | 'transactionalRespectUnsubscribe'
+    | 'unsubscribeWriteTimeoutMs'
     | 'doiTemplateSlug'
     | 'doiTokenLifetimeDays'
     | 'broadcastConfirmationThreshold'
@@ -369,6 +412,7 @@ export const DEFAULTS = {
   requireDoubleOptIn: false,
   unsubscribeTokenLifetimeDays: 90,
   transactionalRespectUnsubscribe: false,
+  unsubscribeWriteTimeoutMs: 5000,
   doiTemplateSlug: 'doi-confirmation',
   doiTokenLifetimeDays: 7,
   broadcastConfirmationThreshold: 1000,
@@ -406,6 +450,7 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     requireDoubleOptIn: c.requireDoubleOptIn ?? DEFAULTS.requireDoubleOptIn,
     unsubscribeTokenLifetimeDays: c.unsubscribeTokenLifetimeDays ?? DEFAULTS.unsubscribeTokenLifetimeDays,
     transactionalRespectUnsubscribe: c.transactionalRespectUnsubscribe ?? DEFAULTS.transactionalRespectUnsubscribe,
+    unsubscribeWriteTimeoutMs: c.unsubscribeWriteTimeoutMs ?? DEFAULTS.unsubscribeWriteTimeoutMs,
     doiTemplateSlug: c.doiTemplateSlug ?? DEFAULTS.doiTemplateSlug,
     doiTokenLifetimeDays: c.doiTokenLifetimeDays ?? DEFAULTS.doiTokenLifetimeDays,
     broadcastConfirmationThreshold: c.broadcastConfirmationThreshold ?? DEFAULTS.broadcastConfirmationThreshold,

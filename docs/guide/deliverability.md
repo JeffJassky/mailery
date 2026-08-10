@@ -403,6 +403,63 @@ Mailery decompresses, parses (RFC 7489), and persists:
 
 Re-uploading the same report is idempotent (keyed on `reportId × orgName`).
 
+### Receive reports automatically {#dmarc-inbound}
+
+Uploading a file a day gets old. Point the RUA mailbox at an inbound-email webhook — SendGrid [Inbound Parse](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/setting-up-the-inbound-parse-webhook), Mailgun Routes, Postmark inbound — and mailery ingests each report as it arrives.
+
+::: danger Read this before you enable it
+**SendGrid Inbound Parse does not sign its payloads.** The SendGrid *Event Webhook* does, and mailery verifies that signature (plus a replay window) on `/m/webhooks/sendgrid`. Inbound Parse is a different product with no signature, no HMAC and no verifiable identity — there is nothing to verify.
+
+So this endpoint is authenticated by a shared secret and nothing else. It is **off unless you set that secret**, it is never mounted by default, and it will not appear on an upgrade.
+:::
+
+```ts
+app.use(
+  '/m',
+  createPublicRouter(mailer, {
+    dmarcInbound: {
+      secret: process.env.MAILERY_DMARC_INBOUND_SECRET, // absent → route not mounted
+      path: '/inbound/dmarc',                           // default
+    },
+  }),
+)
+```
+
+Then set the Inbound Parse destination URL with the secret as the basic-auth password:
+
+```
+https://mailery:$MAILERY_DMARC_INBOUND_SECRET@example.com/m/inbound/dmarc
+```
+
+The username is ignored; only the password is compared, in constant time. `Authorization: Bearer <secret>` works too, for anything forwarding to this route that isn't SendGrid.
+
+**Use basic auth rather than putting the secret in the path.** Both work — nothing stops you making `path` itself unguessable — but a URL path is written to every access log, proxy log and load-balancer log between the sender and you, and an `Authorization` header is not.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `secret` | — | Shared secret. **Absent or empty → the route does not exist.** |
+| `path` | `/inbound/dmarc` | Sub-path on the public router. |
+| `maxFileSizeBytes` | `10 * 1024 * 1024` | Per-attachment cap, matching the admin upload. |
+| `maxFiles` | `10` | Attachments accepted per message. |
+| `allowedDomains` | derived | Domains whose reports are accepted. Defaults to `senderDomains` + the From defaults, plus each one's parent domain. |
+| `parseInbound` | SendGrid shape | Seam for other inbound-email providers. |
+
+What the endpoint does with a request:
+
+1. Checks the secret **before** reading a byte of the body, so an anonymous caller cannot make the process buffer an upload.
+2. Enforces the size and count limits above.
+3. Takes only attachments ending `.zip`, `.gz` or `.xml`; a message with none (an auto-reply, a human) is a 200 with `ingested: 0`, not a retry-inducing error.
+4. Runs them through the same parser the admin upload uses — decompression caps, declared-vs-actual size checks, compression-ratio check, zip-slip guard.
+5. **Rejects any report whose `policy_published.domain` is not a domain you send from.** If the secret ever leaks, that bounds the damage to "rows about your own domains".
+
+Responses: `200` ingested (or nothing to ingest), `400` nothing usable in the message, `401` bad or missing secret, `413` over the size or count limit.
+
+A leaked secret buys an attacker exactly one capability: inserting DMARC report rows for domains you already send from. No mail is sent, no contact data is read or written, nothing is deleted. Rotate it by changing the config value and the Inbound Parse destination URL.
+
+::: warning Not the admin upload route
+Do **not** point Inbound Parse at `/admin/mailer/api/dmarc/upload`. mailery's own docs recommended that before v0.15 and it never worked: that route sits behind your `requireAdmin` guard, which Inbound Parse cannot satisfy. If it *did* work for you, check whether the guard is actually applied to your admin router.
+:::
+
 ### Tag known sources
 
 After a week or two of reports, the **Top failing source IPs** table lists every IP sending as your domain that didn't pass DMARC alignment, sorted by message count. Click "Tag" on each row and label it:

@@ -171,8 +171,36 @@ prefer it.
   requireDoubleOptIn: false,
   unsubscribeTokenLifetimeDays: 90,
   transactionalRespectUnsubscribe: false,    // false = transactional sends to unsubscribed users still go out
+  pendingUnsubsPath: undefined,              // no default — see below
+  unsubscribeWriteTimeoutMs: 5000,
 }
 ```
+
+### `pendingUnsubsPath` — the unsubscribe journal
+
+`POST /m/unsub/:token` waits for the Mongo write before answering, bounded by `unsubscribeWriteTimeoutMs`. If that write fails or times out, the opt-out is appended to this file as JSONL and replayed by the tick (`drainPendingUnsubscribes`). If it fails and there is nowhere to journal it, the endpoint answers **503** rather than confirm an unsubscribe it did not record. See [INVARIANT 8](https://github.com/JeffJassky/mailery/blob/main/plans/INVARIANTS.md).
+
+**There is no default.** Set it to a path that is:
+
+- **durable** — it must survive a reboot. `/tmp` does not, which is why the old default was worse than useless.
+- **private** — the file holds recipient email addresses in plaintext outside your database. mailery creates it `0600` inside a `0700` directory and opens it `O_NOFOLLOW`, but it cannot make a world-writable *parent* safe.
+- **local** — not NFS or any other network filesystem. Batch claiming relies on `rename` being atomic within the directory.
+- **per-node** — several processes on one host may share it safely; two hosts must not.
+
+```ts
+{
+  // systemd: StateDirectory=mailery gives you /var/lib/mailery owned by the unit's user
+  pendingUnsubsPath: '/var/lib/mailery/pending-unsubs.jsonl',
+}
+```
+
+```yaml
+# Kubernetes: any writable volume that outlives the process will do.
+# An emptyDir survives a container restart but not a pod reschedule; if you
+# leave it unset instead, an outage produces 503s, which is the honest failure.
+```
+
+Leaving it unset is a legitimate choice — you are saying "if Mongo is down, tell the caller so" instead of "hold it on this node's disk". What is not legitimate is the pre-0.15 behaviour of writing it somewhere nothing ever read.
 
 ## Circuit breaker
 

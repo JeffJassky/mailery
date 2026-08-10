@@ -39,6 +39,7 @@ import {
 import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
+import { applyUnsubscribe } from './unsubscribe.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -373,40 +374,14 @@ export class Mailer {
     }
   }
 
+  /**
+   * The writes live in `server/unsubscribe.ts` so the pending-unsubscribe
+   * drain (INVARIANT 8) replays a journaled opt-out through exactly this path
+   * without holding a `Mailer` instance.
+   */
   async unsubscribe(email: string, opts: Omit<UnsubscribeInput, 'email'>): Promise<void> {
     const parsed = unsubscribeInputSchema.parse({ email, ...opts })
-    const normalized = parsed.email
-    const now = new Date()
-
-    await this.collections.suppressions.updateOne(
-      { email: normalized, scope: parsed.scope },
-      {
-        $setOnInsert: {
-          email: normalized,
-          emailHash: sha256Hex(normalized),
-          scope: parsed.scope,
-          // mailer_suppressions canonical reason — see plans/02-data-model.md.
-          reason: 'unsubscribed' as const,
-          source: parsed.source,
-          notes: parsed.notes ?? null,
-          addedAt: now,
-          expiresAt: null,
-        },
-      },
-      { upsert: true },
-    )
-
-    await this.collections.subscriptions.updateOne(
-      { emailAtSubscribe: normalized },
-      {
-        $set: {
-          status: 'unsubscribed' as const,
-          unsubscribedAt: now,
-          unsubscribeReason: parsed.reason,
-          updatedAt: now,
-        },
-      },
-    )
+    await applyUnsubscribe(this.collections, parsed)
   }
 
   async suppress(email: string, opts: Omit<SuppressInput, 'email'>): Promise<void> {

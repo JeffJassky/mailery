@@ -32,6 +32,12 @@ export { createAdminRouter } from './api/admin.js'
 export type { AdminRouterOptions } from './api/admin.js'
 export { createPublicRouter } from './api/public.js'
 export type { PublicRouterOptions } from './api/public.js'
+export { sendgridInboundParser } from './api/dmarc-inbound.js'
+export type {
+  DmarcInboundOptions,
+  InboundAttachment,
+  InboundParser,
+} from './api/dmarc-inbound.js'
 export type { RouteLogger } from './api/wrap.js'
 
 // Templates (host apps may want compile + render directly for previews)
@@ -52,6 +58,11 @@ export {
   applyWebhookEvent,
   processNewlyFiredEventTriggers,
   sweepStrandedFlowRuns,
+  drainPendingUnsubscribes,
+} from './runner/index.js'
+export type {
+  DrainPendingUnsubsOptions,
+  DrainPendingUnsubsResult,
 } from './runner/index.js'
 
 // Models (collection helpers, in case hosts need to query directly)

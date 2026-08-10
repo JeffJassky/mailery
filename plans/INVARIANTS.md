@@ -98,11 +98,39 @@ Where a product event exists ("user clicked through and used the feature"), pref
 The `/m/unsub/<token>` endpoint:
 - Accepts GET and POST (RFC 8058 one-click)
 - Verifies HMAC-signed token
-- Writes the unsubscribe even if Mongo is degraded — falls back to writing to local disk (`mailer-pending-unsubs.jsonl`) for later drain
-- Returns 200 quickly (clients are impatient and providers retry aggressively otherwise)
 - Never requires re-authentication
+- **Never returns 200 for an unsubscribe it did not durably record**
 
-If the DB is fully down and disk is also unwritable, the endpoint returns 503 and SendGrid (or the provider) will queue the unsubscribe internally as a fallback. We don't pretend perfect availability — we make sure compliance is never silently dropped.
+That last clause is the invariant; everything below is how it is kept.
+
+`POST /m/unsub/<token>` awaits the Mongo write, bounded by `unsubscribeWriteTimeoutMs` (default 5s):
+
+| outcome | response |
+|---|---|
+| write succeeds (the normal case, sub-millisecond) | 200 |
+| write fails or exceeds the budget, and a journal is configured | append to the journal, then 200 |
+| no journal configured, or the journal write also fails | **503** + `Retry-After` |
+
+The endpoint is still fast — the budget is only ever spent during an outage — but "fast" is subordinate to "true". Through v0.14 the route answered 200 unconditionally *before* attempting either write, which made the 503 branch unreachable and turned every failed write into a recipient who had been told they were unsubscribed and would keep receiving mail. That is a compliance failure, not a dropped metric.
+
+### The journal
+
+`MailerConfig.pendingUnsubsPath` — one JSON object per line, file 0600 inside a 0700 directory, opened `O_NOFOLLOW`.
+
+It is **opt-in and has no default**. The old default was `/tmp/mailery-pending-unsubs.jsonl`: world-writable, wiped on reboot, and — because the drain was never written — never read back. There is no safe replacement default: a library mounted into an unknown host cannot pick a directory that is at once writable, durable and private, and the file holds recipient addresses in plaintext outside the database, so its location is the operator's decision. Unset means the 503 row above, which is a worse experience and a better outcome than the silent loss it replaces.
+
+### The drain
+
+`drainPendingUnsubscribes` runs from `mailer:tick` (`src/server/runner/pending-unsubs.ts`) and is exported for hosts that don't run the tick. It replays each entry through the same `applyUnsubscribe` the live route uses.
+
+- **Idempotent** — the suppression write is a `$setOnInsert` upsert, the subscription write a `$set` to a terminal state. Applying twice is applying once.
+- **Crash-safe** — a pass claims a batch by renaming the journal aside; a pass that dies leaves its claim file behind and a later pass adopts it. Entries that could not be applied are appended back to the live journal *before* the claim is unlinked, so the crash window duplicates rather than drops.
+- **Concurrency-safe** — claiming and adopting are `rename`, atomic within a directory, so two processes can drain the same journal without owning the same batch. (Consequence: the journal must be on a local filesystem, not NFS.)
+- **Tolerant** — an absent, empty, truncated or hand-mangled file never crashes the drain and never causes a valid neighbouring entry to be skipped. Unusable lines are logged and dropped; entries that fail to *apply* are retried forever and get louder, never discarded.
+
+### What the provider does not do for us
+
+An earlier version of this invariant said a 503 was safe because "SendGrid (or the provider) will queue the unsubscribe internally as a fallback." That is false and was worth removing. The `List-Unsubscribe` URL points at *us*; the one-click POST comes from the recipient's mail client, and the sending provider never sees the request and has nothing to queue. Our journal is the only fallback there is, which is why it had to be finished rather than deleted.
 
 ## 9. GDPR forget keeps a hashed suppression record forever
 

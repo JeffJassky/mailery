@@ -294,6 +294,21 @@ export interface IngestResult {
   duplicate: boolean
 }
 
+export interface IngestOptions {
+  /**
+   * Gate on the report's `<policy_published><domain>`, checked after parsing
+   * and before any write.
+   *
+   * The admin upload leaves this unset: the caller is already a privileged
+   * operator who chose the file. The public inbound route
+   * (`api/dmarc-inbound.ts`) sets it, because that endpoint authenticates with
+   * a shared secret and nothing else — if the secret leaks, this is what keeps
+   * the blast radius at "reports about domains you actually send from" rather
+   * than "arbitrary rows in your DMARC dashboard".
+   */
+  allowDomain?: (domain: string) => boolean
+}
+
 /**
  * Full ingest path: extract attachment → parse each XML payload → upsert
  * into mailer_dmarc_reports + mailer_dmarc_failures. Idempotent on
@@ -305,6 +320,7 @@ export async function ingestDmarcAttachment(
   ctx: RunnerContext,
   buffer: Buffer,
   filename: string,
+  opts: IngestOptions = {},
 ): Promise<IngestResult & { additionalReports?: number }> {
   const xmls = await extractDmarcXmls(buffer, filename)
   if (xmls.length === 0) throw new Error('attachment contained no XML payload')
@@ -313,6 +329,9 @@ export async function ingestDmarcAttachment(
   for (const xml of xmls) {
     try {
       const parsed = parseDmarcReport(xml)
+      if (opts.allowDomain && !opts.allowDomain(parsed.report.domain)) {
+        throw new Error(`DMARC report is for domain "${parsed.report.domain}", which this deployment does not send from`)
+      }
       results.push(await ingestParsedDmarcReport(ctx, parsed))
     } catch (err) {
       if (!firstError) firstError = err

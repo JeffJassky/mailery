@@ -10,6 +10,12 @@
  *   GET  /unsub/:token                 — confirmation page (one-click POST link)
  *   POST /unsub/:token                 — RFC 8058 one-click unsubscribe
  *   POST /webhooks/:provider           — inbound provider event webhook
+ *   POST /inbound/dmarc                — inbound DMARC report (opt-in; see below)
+ *
+ * Every route here is unauthenticated by necessity — mail clients and provider
+ * webhook servers cannot present credentials. The one exception is
+ * `/inbound/dmarc`, which is **not mounted at all** unless a shared secret is
+ * configured; see `api/dmarc-inbound.ts`.
  *
  * `:sig` is a 12-character truncated HMAC issued by `applyTracking`. It is
  * syntactically optional on both tracking routes so that mail delivered before
@@ -17,8 +23,6 @@
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import fs from 'node:fs'
-import path from 'node:path'
 import { ObjectId } from 'mongodb'
 
 import {
@@ -32,12 +36,19 @@ import {
 import type { Mailer } from '../mailer.js'
 import type { SendDoc } from '../models/index.js'
 import type { MailProvider } from '../../shared/types.js'
+import { appendPendingUnsub } from '../unsub-journal.js'
+import { mountDmarcInbound, type DmarcInboundOptions } from './dmarc-inbound.js'
 import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
 
 export interface PublicRouterOptions {
   /**
-   * Path on disk where unsubscribe events fall back to when Mongo is degraded.
-   * Defaults to /tmp/mailery-pending-unsubs.jsonl.
+   * Overrides `MailerConfig.pendingUnsubsPath` for this router only.
+   *
+   * @deprecated Set `pendingUnsubsPath` in `MailerConfig` instead. The tick
+   * drain (`drainPendingUnsubscribes`) reads the *config* value, so a path set
+   * only here is written but never replayed — which is precisely the bug
+   * INVARIANT 8 was carrying. Setting it here without also setting it in
+   * config logs a warning at construction time.
    */
   pendingUnsubsPath?: string
   /**
@@ -48,6 +59,13 @@ export interface PublicRouterOptions {
    * package emitted before the option existed. Pass `{}` to silence.
    */
   logger?: RouteLogger
+  /**
+   * Inbound DMARC aggregate-report webhook (SendGrid Inbound Parse and
+   * friends). **Off unless `secret` is set** — see `api/dmarc-inbound.ts` for
+   * why an endpoint that accepts unsigned file uploads must never appear on an
+   * upgrade by itself.
+   */
+  dmarcInbound?: DmarcInboundOptions
 }
 
 // 1×1 transparent PNG (43 bytes)
@@ -58,8 +76,35 @@ const PIXEL = Buffer.from(
 
 export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {}): Router {
   const router = Router()
-  const pendingUnsubsPath = opts.pendingUnsubsPath ?? '/tmp/mailery-pending-unsubs.jsonl'
   const logger = opts.logger ?? consoleRouteLogger
+
+  // INVARIANT 8. No filesystem default: see `MailerConfig.pendingUnsubsPath`
+  // for why a library cannot pick one, and what happens when it is unset.
+  const pendingUnsubsPath = opts.pendingUnsubsPath ?? mailer.config.pendingUnsubsPath ?? null
+  if (opts.pendingUnsubsPath && !mailer.config.pendingUnsubsPath) {
+    logger.warn?.(
+      { path: opts.pendingUnsubsPath },
+      'mailery: pendingUnsubsPath set on the public router but not in MailerConfig — the tick drain will not replay this journal',
+    )
+  }
+  if (!pendingUnsubsPath) {
+    logger.warn?.(
+      {},
+      'mailery: no pendingUnsubsPath configured — POST /unsub answers 503 when Mongo is unreachable instead of journaling the opt-out',
+    )
+  }
+
+  // Inbound DMARC reports. Mounted only when a secret is configured; the
+  // route's own module explains why that is not negotiable. Registered before
+  // the body parsers below so nothing consumes its multipart stream, and
+  // `mounted` is logged so an operator can see it exists.
+  const dmarcInboundPath = mountDmarcInbound(router, mailer, opts.dmarcInbound, logger)
+  if (dmarcInboundPath) {
+    logger.info?.(
+      { path: dmarcInboundPath },
+      'mailery: DMARC inbound route mounted (shared-secret auth; SendGrid Inbound Parse does not sign payloads)',
+    )
+  }
 
   // Parse JSON for webhooks — capture raw body for signature verification.
   router.use(
@@ -245,6 +290,28 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
 </body></html>`)
   }))
 
+  /**
+   * RFC 8058 one-click unsubscribe.
+   *
+   * This is the one public route that does *not* answer before doing its work,
+   * and INVARIANT 8 is why. "Return 200 quickly" and "never silently drop an
+   * opt-out" are both in that invariant, and answering first can only satisfy
+   * the former: the response is already on the wire by the time we learn the
+   * write failed, so the recipient is told they are unsubscribed and then
+   * keeps receiving mail. Through v0.14 that is exactly what happened, and the
+   * 503 the invariant describes was unreachable.
+   *
+   * So: durability first, within a budget.
+   *
+   *   Mongo write succeeds (typically sub-millisecond)   → 200
+   *   Mongo fails or exceeds `unsubscribeWriteTimeoutMs` → journal → 200
+   *   no journal configured, or the journal write fails  → 503
+   *
+   * A 503 is not a worse outcome than the old unconditional 200 — it is the
+   * same failure, told honestly. The caller (a mail client's one-click
+   * infrastructure, or a human on the confirmation page) can retry, and
+   * nothing has claimed an unsubscribe that does not exist.
+   */
   router.post('/unsub/:token', wrap(logger, async (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) {
@@ -252,25 +319,51 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       return
     }
 
-    // Reply 200 immediately. INVARIANT 8: bulletproof unsubscribe.
-    res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
+    const write = mailer.unsubscribe(decoded.email, {
+      scope: decoded.scope,
+      reason: 'user_request',
+      source: 'one-click',
+    })
 
+    let dbError: unknown = null
     try {
-      await mailer.unsubscribe(decoded.email, {
-        scope: decoded.scope,
-        reason: 'user_request',
-        source: 'one-click',
-      })
+      await withTimeout(write, mailer.config.unsubscribeWriteTimeoutMs)
     } catch (err) {
+      dbError = err ?? new Error('unsubscribe write failed')
+      // The write may still land after the timeout. Nothing here depends on
+      // whether it does — the journal replay is idempotent — but an unobserved
+      // rejection would take the host process down.
+      void write.catch(() => {})
+    }
+
+    if (dbError) {
+      if (!pendingUnsubsPath) {
+        logger.error?.(
+          { err: dbError },
+          'mailery: unsubscribe write failed and no pendingUnsubsPath is configured — answering 503',
+        )
+        return sendUnsubUnavailable(res)
+      }
       try {
-        fs.appendFileSync(
-          pendingUnsubsPath,
-          JSON.stringify({ email: decoded.email, scope: decoded.scope, at: Date.now() }) + '\n',
+        appendPendingUnsub(pendingUnsubsPath, {
+          email: decoded.email,
+          scope: decoded.scope,
+          at: Date.now(),
+        })
+        logger.warn?.(
+          { err: dbError, path: pendingUnsubsPath },
+          'mailery: unsubscribe journaled to disk — will be replayed by the tick drain',
         )
       } catch (diskErr) {
-        logger.error?.({ err, diskErr, path: pendingUnsubsPath }, 'mailery: unsub disk fallback failed')
+        logger.error?.(
+          { err: dbError, diskErr, path: pendingUnsubsPath },
+          'mailery: unsub disk fallback failed — answering 503',
+        )
+        return sendUnsubUnavailable(res)
       }
     }
+
+    res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
   }))
 
   // -------------------------------------------------------------------------
@@ -366,9 +459,6 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         /* will be picked up by next tick */
       }
     }
-
-    // Bypass linting — `path` import retained for any future on-disk fallback.
-    void path
   }))
 
   return router
@@ -482,6 +572,50 @@ function isTrackingExpired(send: Pick<SendDoc, 'queuedAt'>, lifetimeDays: number
 
 function sendUnsubError(res: Response, msg: string): Response {
   return res.status(400).type('html').send(`<!doctype html><html><body><p>${escapeHtml(msg)}</p></body></html>`)
+}
+
+/**
+ * The 503 INVARIANT 8 describes: neither Mongo nor the journal could record
+ * the opt-out. `Retry-After` is set because the honest answer to a one-click
+ * client is "come back", not "done".
+ */
+function sendUnsubUnavailable(res: Response): Response {
+  return res
+    .status(503)
+    .set('Retry-After', '60')
+    .type('html')
+    .send(
+      '<!doctype html><html><body><p>We could not record your unsubscribe right now, ' +
+        'so you are <strong>not</strong> unsubscribed yet. Please try again in a minute.</p></body></html>',
+    )
+}
+
+/**
+ * Resolve `p`, or reject once `ms` has elapsed.
+ *
+ * A rejected `p` still settles the race normally; the timer exists for the
+ * case that matters here, a Mongo client that is neither resolving nor
+ * rejecting because the server it is waiting on is gone. `unref()` keeps a
+ * pending timer from holding the process open.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  if (!Number.isFinite(ms) || ms <= 0) return p
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`timed out after ${ms}ms`))
+    }, ms)
+    if (typeof timer.unref === 'function') timer.unref()
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
 }
 
 function escapeHtml(s: string): string {

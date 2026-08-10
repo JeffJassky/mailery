@@ -86,12 +86,14 @@ RFC 8058 one-click unsubscribe. Gmail and other modern clients POST here when th
 | | |
 |---|---|
 | Path param | `token` |
-| Response | Empty 200 |
-| Side effects (async) | `mailer.unsubscribe(email, { scope })` with the scope embedded in the token |
-| Fallback | If Mongo is degraded, the request is appended to `pendingUnsubsPath` (default `/tmp/mailery-pending-unsubs.jsonl`); the next tick replays it |
-| Status code | Always 200 — INVARIANT 8: never 5xx, providers retry too aggressively |
+| Response | Tiny "You are unsubscribed" HTML page |
+| Side effects | `mailer.unsubscribe(email, { scope })` with the scope embedded in the token, awaited within `unsubscribeWriteTimeoutMs` (default 5s) |
+| Fallback | If the write fails or times out, the opt-out is appended to `pendingUnsubsPath` and replayed by the tick drain |
+| Status codes | 200 (recorded, or durably journaled), 200 (invalid/expired token — never make a provider retry a token we will never accept), 503 (neither Mongo nor the journal could take it) |
 
-mailery returns 200 first, processes asynchronously. Providers (e.g. Gmail's one-click button infrastructure) get fast acks; users get a tiny "You are unsubscribed" page.
+INVARIANT 8 in one line: **mailery never returns 200 for an unsubscribe it did not durably record.** A healthy write is sub-millisecond, so the response is still fast; the timeout budget is only ever spent during an outage, and spending it is the difference between a truthful 200 and a lie. Before v0.15 this route answered 200 unconditionally *before* trying either write, so a failed write meant a recipient who had been told they were unsubscribed and would keep receiving mail.
+
+See [Routers → The unsubscribe journal](./routers#the-unsubscribe-journal-invariant-8).
 
 ### Token format
 
@@ -126,6 +128,24 @@ Events are upserted by `(provider, providerEventId)`. Duplicate deliveries (prov
 ### Reconciliation
 
 Webhook delivery is unreliable enough that mailery also runs (in roadmap) a daily reconciliation job pulling the provider's Activity API for the last 24h to catch dropped events.
+
+## `POST /inbound/dmarc` <Badge type="warning" text="opt-in" />
+
+Inbound DMARC RUA aggregate report, for SendGrid Inbound Parse and equivalents.
+
+**This route does not exist unless `dmarcInbound.secret` is configured.** It is the only endpoint here that accepts a file upload, and — unlike `/webhooks/:provider` — there is no signature to verify, because Inbound Parse does not sign its payloads.
+
+| | |
+|---|---|
+| Path | `dmarcInbound.path`, default `/inbound/dmarc` |
+| Auth | Shared secret as the HTTP Basic password (username ignored) or `Authorization: Bearer <secret>`, compared in constant time — checked **before** the body is read |
+| Body | `multipart/form-data` in SendGrid Inbound Parse's shape; only `.zip` / `.gz` / `.xml` attachments are considered |
+| Limits | `maxFileSizeBytes` (default 10MB) per attachment, `maxFiles` (default 10) per message |
+| Side effects | The same ingest path as the admin upload — upserts `mailer_dmarc_reports` + `mailer_dmarc_failures`, idempotent on `reportId × orgName` |
+| Rejections | A report whose `policy_published.domain` is not a domain this deployment sends from |
+| Status codes | 200 (ingested, or nothing to ingest), 400 (nothing usable), 401 (bad/missing secret), 413 (over a limit) |
+
+Setup and threat model: [Deliverability → Receive reports automatically](../guide/deliverability#dmarc-inbound).
 
 ## CORS / cookies
 

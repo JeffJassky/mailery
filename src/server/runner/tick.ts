@@ -14,6 +14,7 @@ import { runDnsblChecks } from './dnsbl.js'
 import { runPostmasterPull } from './postmaster.js'
 import { runSndsPull } from './snds.js'
 import { pruneDmarcFailures } from './dmarc.js'
+import { drainPendingUnsubscribes } from './pending-unsubs.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 
@@ -75,6 +76,14 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await drainOutbox(ctx).catch((err) => {
     console.error('mailery: outbox drain failed', err)
+  })
+  // INVARIANT 8: opt-outs journaled to disk while Mongo was unreachable. Runs
+  // early and unconditionally — a pending unsubscribe is a legal obligation,
+  // and every send dispatched below re-checks suppression at send time
+  // (INVARIANT 3), so applying these first is what stops the next broadcast
+  // mailing someone who already opted out.
+  await drainPendingUnsubscribes(ctx).catch((err) => {
+    console.error('mailery: pending-unsubscribe drain failed', err)
   })
   await processScheduledBroadcasts(ctx).catch((err) => {
     console.error('mailery: broadcast dispatch failed', err)
