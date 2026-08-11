@@ -98,6 +98,7 @@
   },
   "devDependencies": {
     "@agendajs/mongo-backend": "^4.0.2",
+    "@maily-to/core": "^0.3.7",
     "@playwright/test": "^1.60.0",
     "@types/express": "^5.0.6",
     "@types/html-to-text": "^9.0.4",
@@ -135,7 +136,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@maily-to/core": "^0.3.7",
     "@maily-to/render": "^0.2.3",
     "@sendgrid/mail": "^8.1.6",
     "adm-zip": "^0.6.0",

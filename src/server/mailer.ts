@@ -38,6 +38,7 @@ import {
 } from './models/index.js'
 import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
+import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
 import { applyUnsubscribe } from './unsubscribe.js'
 import {
@@ -200,8 +201,26 @@ export class Mailer {
 
   static async init(input: MailerConfig): Promise<Mailer> {
     const config = resolveConfig(input)
-    if (!config.providers[config.defaultProvider]) {
-      throw new Error(`defaultProvider "${config.defaultProvider}" not in providers map`)
+    // Both defaults are validated here, through the same guarded lookup the
+    // routes and the runner use — a name that resolves to an inherited
+    // `Object.prototype` member is not a provider. `defaultTransactionalProvider`
+    // was previously unchecked, so a typo in it stayed silent until a
+    // transactional send failed at dispatch time, long after startup.
+    if (!resolveProvider(config.providers, config.defaultProvider)) {
+      throw new Error(
+        `defaultProvider "${config.defaultProvider}" is not a registered provider. `
+          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+      )
+    }
+    if (
+      config.defaultTransactionalProvider != null
+      && !resolveProvider(config.providers, config.defaultTransactionalProvider)
+    ) {
+      throw new Error(
+        `defaultTransactionalProvider "${config.defaultTransactionalProvider}" is not a `
+          + `registered provider. `
+          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+      )
     }
     if (config.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
