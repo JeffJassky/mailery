@@ -85,7 +85,7 @@ app.post('/m/unsub/:token', async (req, res) => {
     // Fallback: append to the journal for the tick drain to replay.
     if (await journal.append(decoded)) return res.status(200).end()
     // Nothing durable happened. Say so.
-    res.setHeader('Retry-After', '300')
+    res.setHeader('Retry-After', '60')
     return res.status(503).end()
   }
 })
