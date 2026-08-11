@@ -24,6 +24,7 @@ import { ObjectId } from 'mongodb'
 import { createPublicRouter } from '../../src/server/api/public.js'
 import type { RouteLogger } from '../../src/server/api/wrap.js'
 import { signTrackingToken } from '../../src/server/tokens.js'
+import type { SendDoc } from '../../src/server/models/index.js'
 import { createTestMailer, type TestMailerHarness } from '../../src/testing/index.js'
 
 let H: TestMailerHarness
@@ -134,17 +135,31 @@ function get(path: string, headers: Record<string, string> = {}): Promise<{ stat
 }
 
 /**
- * The open route answers before it writes (INVARIANT 8), so the assertion has
- * to wait for the write rather than for the response.
+ * The open and click routes answer before they write (INVARIANT 8), so an
+ * assertion has to wait for the write rather than for the response.
+ *
+ * `done` says what this caller is waiting for, and defaults to "any tracking
+ * write landed". Pass it whenever you assert on more than one field: the
+ * default returns as soon as *either* counter moves, so a test that fires an
+ * open and then a click and asserts both would read the doc with the open
+ * recorded and the click still in flight. That is not hypothetical — it passed
+ * on a fast machine and failed on a 2-core CI runner, which is the worst way
+ * for a race to present.
  */
-async function readSend(id: ObjectId = SEND_ID) {
+async function readSend(
+  id: ObjectId = SEND_ID,
+  done: (d: SendDoc) => boolean = (d) => d.openCount > 0 || d.clickCount > 0,
+) {
   for (let i = 0; i < 40; i++) {
     const doc = await H.mailer.collections.sends.findOne({ _id: id })
-    if (doc && (doc.openCount > 0 || doc.clickCount > 0)) return doc
+    if (doc && done(doc)) return doc
     await new Promise((r) => setTimeout(r, 25))
   }
   return await H.mailer.collections.sends.findOne({ _id: id })
 }
+
+const openRecorded = (d: SendDoc) => (d.opens?.length ?? 0) > 0
+const clickRecorded = (d: SendDoc) => (d.clickedLinks?.length ?? 0) > 0
 
 const openSig = (id: ObjectId) => signTrackingToken('open', { sendId: id.toHexString() }, SECRET)
 const clickSig = (id: ObjectId, linkId = LINK_ID) =>
@@ -305,7 +320,7 @@ describe('legacy unsigned URLs — requireSignedTrackingUrls: true', () => {
     expect(open.status).toBe(200)
     const click = await get(`/m/click/${SEND_ID.toHexString()}/${LINK_ID}/${clickSig(SEND_ID)}`)
     expect(click.status).toBe(302)
-    const doc = await readSend()
+    const doc = await readSend(SEND_ID, (d) => d.openCount > 0 && d.clickCount > 0)
     expect(doc?.openCount).toBe(1)
     expect(doc?.clickCount).toBe(1)
   })
@@ -363,7 +378,7 @@ describe('user-agent capture', () => {
     await get(`/m/open/${SEND_ID.toHexString()}.${openSig(SEND_ID)}.png`, {
       'user-agent': 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36',
     })
-    const doc = await readSend()
+    const doc = await readSend(SEND_ID, openRecorded)
     expect(doc?.opens).toHaveLength(1)
     expect(doc?.opens?.[0]?.userAgent).toContain('Macintosh')
     expect(doc?.opens?.[0]?.openedAt).toBeInstanceOf(Date)
@@ -373,7 +388,7 @@ describe('user-agent capture', () => {
     // node:http always sets one, so blank it explicitly — image fetches from
     // real mail clients frequently arrive this way.
     await get(`/m/open/${SEND_ID.toHexString()}.${openSig(SEND_ID)}.png`, { 'user-agent': '' })
-    const doc = await readSend()
+    const doc = await readSend(SEND_ID, openRecorded)
     expect(doc?.opens?.[0]?.userAgent).toBeNull()
   })
 
@@ -381,7 +396,7 @@ describe('user-agent capture', () => {
     await get(`/m/click/${SEND_ID.toHexString()}/${LINK_ID}/${clickSig(SEND_ID)}`, {
       'user-agent': 'Mimecast-Link-Protection/1.0',
     })
-    const doc = await readSend()
+    const doc = await readSend(SEND_ID, clickRecorded)
     expect(doc?.clickedLinks?.[0]?.userAgent).toBe('Mimecast-Link-Protection/1.0')
   })
 
@@ -389,7 +404,7 @@ describe('user-agent capture', () => {
     await get(`/m/open/${SEND_ID.toHexString()}.${openSig(SEND_ID)}.png`, {
       'user-agent': 'A'.repeat(4000),
     })
-    const doc = await readSend()
+    const doc = await readSend(SEND_ID, openRecorded)
     expect(doc?.opens?.[0]?.userAgent).toHaveLength(256)
   })
 
