@@ -3,6 +3,11 @@
  * Wraps the v4 zones / dns_records endpoints with idempotent upsert.
  */
 
+// Static, not `require()`: `inferZone` is synchronous, and tsup compiles a
+// `require()` in a `"type": "module"` package to esbuild's `__require` shim,
+// which throws in the ESM output (dist/cli.js). Same defect as #12.
+import psl from 'psl'
+
 export interface CloudflareClient {
   findZoneId(name: string): Promise<string | null>
   upsertRecord(zoneId: string, rec: { type: string; host: string; data: string }): Promise<'created' | 'updated' | 'noop'>
@@ -82,7 +87,5 @@ export function cloudflareClient(apiToken: string, fetchFn: typeof fetch): Cloud
  * original input if PSL can't classify the domain (e.g., private TLD).
  */
 export function inferZone(domain: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const psl = require('psl') as typeof import('psl')
   return psl.get(domain) ?? domain
 }

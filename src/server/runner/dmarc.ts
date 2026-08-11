@@ -13,10 +13,20 @@
  *   - the `mailery ingest-dmarc` CLI
  */
 
-// Heavy parsers are loaded lazily inside the functions that need them so
-// the testing bundle doesn't drag adm-zip + fast-xml-parser through.
+// `adm-zip` is still loaded lazily — `extractDmarcXmls` is already async, so
+// `await import()` costs nothing and compiles correctly under both output
+// formats.
+//
+// `fast-xml-parser` is NOT lazy. `parseDmarcReport` is synchronous, so the
+// only lazy form available to it was `require()`, and tsup compiles that to
+// esbuild's `__require` shim, which throws unconditionally in the ESM output
+// of a `"type": "module"` package. That shipped broken in v0.14.0 (see #12).
+// A static import is the one form that is correct in both the esm and cjs
+// bundles. The cost is ~25ms of module init at import time (against ~360ms
+// for the bundle as a whole) for a package that is a hard, non-optional
+// dependency and is therefore always installed anyway.
 import type AdmZipType from 'adm-zip'
-import type { XMLParser as XMLParserType } from 'fast-xml-parser'
+import { XMLParser } from 'fast-xml-parser'
 
 import type {
   DmarcAuthResult,
@@ -169,8 +179,6 @@ export interface ParsedDmarcReport {
  * required identifiers (report_id, domain, date_range) are missing.
  */
 export function parseDmarcReport(xml: string): ParsedDmarcReport {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { XMLParser } = require('fast-xml-parser') as { XMLParser: typeof XMLParserType }
   const parser = new XMLParser({
     ignoreAttributes: false,
     parseAttributeValue: false,
