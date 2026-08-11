@@ -139,7 +139,7 @@ async function handleCondition(
   ctx: RunnerContext,
 ): Promise<void> {
   if (!contact) return
-  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections })
+  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections, botFilter: ctx.config.botFilter })
 
   if (result) {
     await advanceStep(run, ctx, { action: 'condition_evaluated', details: { result: true } })
@@ -159,7 +159,7 @@ async function handleBranch(
   ctx: RunnerContext,
 ): Promise<void> {
   if (!contact) return
-  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections })
+  const result = await evaluatePredicate(step.test, { contact, run, collections: ctx.collections, botFilter: ctx.config.botFilter })
   const newPath = [...run.currentBranchPath, run.currentStepIndex, result ? 'true' : 'false', 0] as Array<number | 'true' | 'false'>
 
   const updated = await ctx.collections.flowRuns.findOneAndUpdate(
@@ -253,6 +253,31 @@ async function handleWebhookStep(
   ctx: RunnerContext,
 ): Promise<void> {
   try {
+    // `step.url` is passed to fetch VERBATIM — deliberately NOT rendered through
+    // Handlebars, and it must stay that way.
+    //
+    // The URL comes only from a flow definition authored through the admin routes,
+    // so the set of reachable destinations is fixed by a privileged system admin.
+    // Under that constraint, "this server can POST to an arbitrary URL" is an
+    // intended admin capability, not a vulnerability.
+    //
+    // Templating it would invert that. A URL like `{{contact.callbackUrl}}` is a
+    // natural-sounding request, but it hands the destination of a server-side
+    // fetch — one that originates INSIDE the deployment's network, past any
+    // perimeter — to whoever controls the template data: contact fields, event
+    // properties, adapter vars. That is a textbook SSRF vector (cloud metadata
+    // endpoints, internal admin services, localhost) reachable by an unprivileged
+    // party. If templated webhook URLs are ever genuinely needed, they require a
+    // destination allowlist plus DNS/redirect-aware egress filtering, not a
+    // render call added here.
+    //
+    // Note the zod schema (`url: z.string().url()` in src/shared/schemas.ts)
+    // validates SHAPE only — it accepts http://169.254.169.254/ quite happily and
+    // provides no protection whatsoever on this point.
+    //
+    // The `advanceStep` audit entry below records the resolved URL and response
+    // status (and the error on the failure path), so every outbound call a flow
+    // makes is attributable after the fact.
     const res = await fetch(step.url, {
       method: step.method ?? 'POST',
       headers: { 'Content-Type': 'application/json' },

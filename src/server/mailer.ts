@@ -38,7 +38,9 @@ import {
 } from './models/index.js'
 import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
+import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
+import { applyUnsubscribe } from './unsubscribe.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -112,6 +114,10 @@ export class Mailer {
    *   MAILER_FROM_NAME / MAILER_FROM_EMAIL
    *   MAILER_DEFAULT_PROVIDER           — defaults to 'sendgrid' if SENDGRID_API_KEY is set
    *   MAILER_SENDGRID_API_KEY / MAILER_SENDGRID_WEBHOOK_KEY
+   *   MAILER_SENDGRID_WEBHOOK_TOLERANCE — signed-webhook replay window, seconds
+   *                                       (default 300; '0' disables the check).
+   *                                       Unparseable values fall back to the
+   *                                       default rather than disabling it.
    *   MAILER_HOST_USERS_COLLECTION (default 'users')
    *   MAILER_HOST_USERS_EMAIL_FIELD (default 'email')
    *   MAILER_HOST_USERS_ID_FIELD (default '_id')
@@ -150,6 +156,12 @@ export class Mailer {
       providers.sendgrid = new SendGridProvider({
         apiKey: env.MAILER_SENDGRID_API_KEY,
         webhookVerificationKey: env.MAILER_SENDGRID_WEBHOOK_KEY,
+        // Left undefined when unset/blank so the provider default (300s) applies.
+        // resolveWebhookToleranceSeconds() rejects NaN back to the default, so a
+        // typo here can never silently switch the replay check off.
+        webhookToleranceSeconds: env.MAILER_SENDGRID_WEBHOOK_TOLERANCE
+          ? Number(env.MAILER_SENDGRID_WEBHOOK_TOLERANCE)
+          : undefined,
         sandbox: env.NODE_ENV !== 'production',
       })
     }
@@ -189,8 +201,26 @@ export class Mailer {
 
   static async init(input: MailerConfig): Promise<Mailer> {
     const config = resolveConfig(input)
-    if (!config.providers[config.defaultProvider]) {
-      throw new Error(`defaultProvider "${config.defaultProvider}" not in providers map`)
+    // Both defaults are validated here, through the same guarded lookup the
+    // routes and the runner use — a name that resolves to an inherited
+    // `Object.prototype` member is not a provider. `defaultTransactionalProvider`
+    // was previously unchecked, so a typo in it stayed silent until a
+    // transactional send failed at dispatch time, long after startup.
+    if (!resolveProvider(config.providers, config.defaultProvider)) {
+      throw new Error(
+        `defaultProvider "${config.defaultProvider}" is not a registered provider. `
+          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+      )
+    }
+    if (
+      config.defaultTransactionalProvider != null
+      && !resolveProvider(config.providers, config.defaultTransactionalProvider)
+    ) {
+      throw new Error(
+        `defaultTransactionalProvider "${config.defaultTransactionalProvider}" is not a `
+          + `registered provider. `
+          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+      )
     }
     if (config.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
@@ -363,40 +393,14 @@ export class Mailer {
     }
   }
 
+  /**
+   * The writes live in `server/unsubscribe.ts` so the pending-unsubscribe
+   * drain (INVARIANT 8) replays a journaled opt-out through exactly this path
+   * without holding a `Mailer` instance.
+   */
   async unsubscribe(email: string, opts: Omit<UnsubscribeInput, 'email'>): Promise<void> {
     const parsed = unsubscribeInputSchema.parse({ email, ...opts })
-    const normalized = parsed.email
-    const now = new Date()
-
-    await this.collections.suppressions.updateOne(
-      { email: normalized, scope: parsed.scope },
-      {
-        $setOnInsert: {
-          email: normalized,
-          emailHash: sha256Hex(normalized),
-          scope: parsed.scope,
-          // mailer_suppressions canonical reason — see plans/02-data-model.md.
-          reason: 'unsubscribed' as const,
-          source: parsed.source,
-          notes: parsed.notes ?? null,
-          addedAt: now,
-          expiresAt: null,
-        },
-      },
-      { upsert: true },
-    )
-
-    await this.collections.subscriptions.updateOne(
-      { emailAtSubscribe: normalized },
-      {
-        $set: {
-          status: 'unsubscribed' as const,
-          unsubscribedAt: now,
-          unsubscribeReason: parsed.reason,
-          updatedAt: now,
-        },
-      },
-    )
+    await applyUnsubscribe(this.collections, parsed)
   }
 
   async suppress(email: string, opts: Omit<SuppressInput, 'email'>): Promise<void> {

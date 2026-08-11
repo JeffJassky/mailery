@@ -1,5 +1,397 @@
 # Changelog
 
+## 0.15.0 — Public-surface hardening and honest unsubscribes
+
+`createPublicRouter` is the only unauthenticated surface this package mounts,
+and most of this release is about it: tracking URLs that can't be forged, an
+unsubscribe that doesn't lie, a redirect that can't be pointed at
+`javascript:`, and a rejected promise that can no longer take the host process
+down. Alongside that, three places where a mistyped provider name silently
+routed mail somewhere else now say so.
+
+### If you are upgrading
+
+Six things need a decision or a config change. Each is expanded below.
+
+1. **Set `pendingUnsubsPath`** — or accept that `POST /m/unsub/:token` answers
+   **503** while Mongo is degraded, where 0.14 answered a false 200. There is
+   no default any more, and the public router logs a warning at construction
+   when it is unset.
+2. **Check `defaultTransactionalProvider` for typos before you deploy.**
+   `Mailer.init` now validates it and throws. A typo that has been silently
+   routing transactional mail through your marketing provider will stop your
+   app from starting.
+3. **`hasOpenedExcludingBots` / `hasClickedExcludingBots` / `openedAtLeastN` /
+   `clickedAtLeastN` will match fewer sends** from now on. They were no-ops.
+   Flows that branch on them will behave differently.
+4. **Leave `requireSignedTrackingUrls` at its default `false`** until the
+   `unsigned tracking URL accepted — legacy grace mode` log line goes quiet.
+   Mail already in inboxes carries unsigned URLs.
+5. **If your ingress can delay a webhook past five minutes**, set
+   `webhookToleranceSeconds` (or `MAILER_SENDGRID_WEBHOOK_TOLERANCE`).
+   Otherwise SendGrid events start being rejected with 401.
+6. **`NullProvider.verifyWebhook()` now returns `false`.** Local or staging
+   setups that POST unsigned bodies at `/m/webhooks/null` will get 401.
+
+### Changed
+
+- **`pendingUnsubsPath` has no default, and `POST /m/unsub/:token` can now
+  answer 503.** Through 0.14 the route replied 200 before attempting anything
+  and appended failures to `/tmp/mailery-pending-unsubs.jsonl` — a file nothing
+  ever read back, on a world-writable directory, cleared on reboot. INVARIANT 8
+  described a drain and a 503 path; neither existed. A recipient who asked to
+  stop receiving mail during a Mongo blip was told they had unsubscribed and
+  then kept receiving mail, and no counter anywhere moved.
+
+  The route now awaits the write, bounded by the new `unsubscribeWriteTimeoutMs`
+  (default `5000`), and answers 200 only for something durably recorded:
+
+  | outcome | response |
+  |---|---|
+  | Mongo write succeeds (sub-millisecond, normally) | 200 |
+  | write fails or times out, `pendingUnsubsPath` is set | journal → 200 |
+  | write fails and there is nowhere to journal it | **503** + `Retry-After: 60` |
+
+  The journal is replayed by `drainPendingUnsubscribes`, which runs on every
+  tick — claiming its batch by `rename` (the whole mutex), appending
+  undrained entries back before unlinking the claim, so a crash duplicates
+  rather than drops, and replaying through the same idempotent path
+  `mailer.unsubscribe` uses. It is exported for hosts that don't run the tick.
+  A malformed or repeatedly-failing entry is never discarded, only made loud.
+
+  **Existing installs:** upgrading does not pick a path for you, and it must
+  not. The journal holds recipient email addresses in plaintext outside the
+  database and outside INVARIANT 9's purge story, so where it lives is your
+  data-residency decision. It also has to be durable (not `/tmp`), private
+  (mailery creates the file `0600` in a `0700` dir and opens it `O_NOFOLLOW`,
+  but cannot fix a world-writable parent), node-local (batch claiming needs
+  `rename` to be atomic within the directory, so no NFS) and not shared between
+  hosts:
+
+  ```ts
+  // systemd: StateDirectory=mailery gives you this, owned by the unit's user
+  await Mailer.init({ pendingUnsubsPath: '/var/lib/mailery/pending-unsubs.jsonl' })
+  ```
+
+  Leaving it unset is a legitimate choice — you are saying "if Mongo is down,
+  tell the caller so" rather than "hold it on this node's disk". **A host that
+  leaves it unset will see 503s where 0.14 returned 200.** That is the same
+  failure, told honestly; the 200 was what made the 503 unreachable and every
+  failure a lie. The invariant used to justify the old behaviour by claiming
+  SendGrid would queue the unsubscribe internally — it will not. The
+  `List-Unsubscribe` URL points at us and the one-click POST comes from the
+  recipient's mail client, so the provider never sees it. The journal is the
+  only fallback there is.
+
+  `PublicRouterOptions.pendingUnsubsPath` still works but is deprecated: the
+  drain reads the **config** value, so a path set only on the router is written
+  and never replayed — which is precisely the old bug. Setting it there without
+  also setting it in config logs a warning.
+
+- **`Mailer.init` now validates `defaultTransactionalProvider`.** Only
+  `defaultProvider` was checked. A typo in the transactional default was
+  completely silent, and combined with the runner's fallback (below) it did not
+  fail at all: transactional mail went out through the marketing provider, from
+  the wrong sending reputation, with nothing recorded to say so.
+
+  **Existing installs:** if that name is wrong today, **your app will now fail
+  to start**, with an error naming the unresolved provider and the registered
+  alternatives. That is intended — but it will look like the upgrade broke your
+  deploy, so check the value before you ship. Both defaults now go through the
+  same guarded lookup, so a name like `constructor` is rejected rather than
+  resolving to a truthy non-provider.
+
+- **The send runner no longer falls back to `defaultProvider`.** It did
+  `providers[send.provider] ?? providers[defaultProvider]`, so a stale or
+  mistyped provider name on a send row quietly routed that mail through the
+  default: delivered from a reputation the send row does not record, with
+  nobody ever learning of the typo. `send.provider` is written by
+  `pickProviderName`, which has already applied the default, so a name that
+  still doesn't resolve is stale rather than absent and substituting hides it
+  forever.
+
+  The send now fails with `provider_unknown: no provider is registered as
+  "<name>". Registered providers: …` — marked failed and returned, not thrown,
+  matching the `template_missing` / `contact_missing` paths beside it, so the
+  queue job settles instead of burning its whole retry budget on a config error
+  no retry can fix. The admin test-send and Mail-Tester routes return 400 with
+  the same detail (naming whether the offending name came from a template's
+  `providerOverride` or from config) instead of a 500 that named
+  `defaultProvider` even when a template override was at fault. Mail-Tester
+  also resolves the provider before `provisionCheck()`, which was spending a
+  paid credit on a request that could never have completed.
+
+- **`hasOpenedExcludingBots`, `hasClickedExcludingBots`, `openedAtLeastN` and
+  `clickedAtLeastN` will now return lower numbers.** They did no filtering
+  whatsoever. The `opened` branch of the shared counter incremented before the
+  bot check ever ran, so `hasOpenedExcludingBots` was identical to
+  `hasOpened`; and nothing in the package had ever written
+  `clickedLinks[].userAgent`, the only field the click branch inspected, so
+  every click scored human too. Both endpoints now record the requesting
+  User-Agent (truncated to 256 chars) and both predicate paths apply the same
+  pattern.
+
+  A send counts if **any one** of its opens or clicks looks human — a scanner
+  that prefetches ahead of the recipient does not disqualify a send the
+  recipient also read. **A missing User-Agent counts as human**, deliberately:
+  image fetches frequently carry none and Apple Mail Privacy Protection strips
+  identifying headers, so scoring unknown as bot would silently discard a large
+  share of genuine engagement. The cost is that a scanner sending no UA still
+  counts; forgery is what the URL signature below is for, and this filter's job
+  is only to be honest about scanners that identify themselves.
+
+  **Existing installs:** this changes automation behaviour, not just reporting.
+  Sends recorded before this release carry no User-Agent and therefore still
+  all count as human, so nothing is reclassified retroactively and no running
+  flow is retroactively emptied — but from the first send after upgrading,
+  flows branching on these predicates will take the other path more often and
+  engagement segments will shrink. If a flow was tuned against numbers that
+  were really unfiltered `hasOpened`, revisit its thresholds.
+
+  Tunable via the new `botFilter` config:
+
+  ```ts
+  import { DEFAULT_BOT_UA_RE } from 'mailery'
+
+  botFilter: {
+    // replaces the default outright — compose with DEFAULT_BOT_UA_RE to extend it
+    userAgentPattern: new RegExp(`${DEFAULT_BOT_UA_RE.source}|AcmeScanner`, 'i'),
+    minOpenDelayMs: 0, // default; opens landing this soon after queuedAt are prefetches
+  }
+  ```
+
+  `minOpenDelayMs` is off by default because it has a real false-positive tail
+  (a recipient already reading their inbox when the mail lands) and because
+  turning it on silently moves the numbers every existing flow branches on.
+  `10000` is the value worth trying first if your open counts look implausible.
+
+- **`NullProvider.verifyWebhook()` returns `false`.** It returned `true`
+  unconditionally. The provider holds no signing key, so it can never establish
+  that a payload is authentic, and a method whose entire job is to reject
+  unauthenticated input must not answer "yes" by default — least of all in the
+  dev and staging configurations where that is easiest to miss.
+  `RecordingProvider` delegates, so it inherits this.
+
+  **Existing installs:** nothing is lost at runtime — `parseWebhookEvents()`
+  returns `[]`, so there was never any inbound behaviour to preserve — but a
+  local setup that POSTs unsigned bodies at `/m/webhooks/null` to exercise the
+  ingest path will now get 401. Use a provider that actually signs.
+
+- **Non-`http(s)` hrefs are no longer click-rewritten.** `shouldSkipClickRewrite`
+  named `mailto:` and `tel:` explicitly; it now skips anything that is not an
+  absolute `http:`/`https:` URL, which covers those two plus a `javascript:`
+  or `data:` URL that arrived through a substituted Handlebars variable. Such a
+  link is left exactly as authored, gets no `linkId`, and is never stored on
+  the send. A malformed href is skipped rather than thrown on — one bad
+  variable must not fail the render and block the whole send.
+
+### Fixed
+
+- **Tracking URLs are now signed, so opens and clicks can't be forged.** A
+  tracking URL identified its send by bare ObjectId, which is four bytes of
+  timestamp, five bytes constant per process and three bytes of sequential
+  counter — so one tracking URL out of one received email largely predicts its
+  neighbours. That is not merely a reporting problem: `hasOpened`,
+  `hasClicked` and `openedAtLeastN` are flow inputs, so forged opens advance
+  real people through real automation and fire real follow-up mail.
+
+  Every generated tracking URL now carries a 12-character truncated HMAC over
+  its own path components, keyed with `unsubscribeSecret` (so there is still
+  exactly one secret to provision and rotate) and scoped to `open` or `click`
+  so neither replays as the other:
+
+  ```
+  /m/open/<sendId>.<sig>.png
+  /m/click/<sendId>/<linkId>/<sig>
+  ```
+
+  Signing is automatic and needs no configuration. What is configurable is how
+  the endpoints treat the unsigned URLs sitting in mail you have already sent —
+  and that is the whole compatibility design, not a migration step, because
+  that mail will keep being opened for years:
+
+  - a signature that is **present and wrong** is rejected, always, in both
+    modes. Grace covers "this URL predates signing", never "this URL was signed
+    by someone without the key";
+  - a **missing** signature is accepted while `requireSignedTrackingUrls` is
+    `false` (the default) and logged at `info` as
+    `mailery: unsigned tracking URL accepted — legacy grace mode`. That line is
+    the instrument: watch the legacy rate decay to nothing, then set the flag
+    to `true`;
+  - URLs **do not expire** by default. A legitimate open six months later is
+    real data, and the signature rather than a deadline is what proves
+    possession. `trackingUrlLifetimeDays` sets a window if you have a retention
+    policy; because the deadline is derived from the send's `queuedAt` rather
+    than baked into the token, changing it takes effect immediately for mail
+    already delivered and costs no URL bytes.
+
+  Rejections are response-identical to ordinary traffic — the pixel still
+  returns its 200 PNG and a rejected click 404s exactly like an unknown send —
+  because any distinguishable response is an enumeration oracle.
+
+- **A rejected promise in a public route could take down the host
+  application.** None of the six public routes had async error handling, so any
+  rejection was an unhandled rejection; under Node's default
+  `--unhandled-rejections=throw` that is an unauthenticated denial of service
+  against the whole host process. All six are now wrapped in a log-and-swallow
+  handler: a rejection before headers are sent becomes a plain 500, and one
+  after (these routes answer first and work second, by design) is logged and
+  swallowed rather than forwarded to `next(err)` — forwarding hands it to a
+  host error handler likely to attempt a second response, which is the
+  `ERR_HTTP_HEADERS_SENT` crash being avoided.
+
+- **Webhook provider lookup resolved `Object.prototype` members.**
+  `/m/webhooks/:provider` indexed a plain object with a request-path segment,
+  so `/m/webhooks/constructor` returned something truthy, sailed past the
+  `if (!provider)` guard and reached `.verifyWebhook(...)` as a non-provider.
+  Lookups now go through a shared helper that gates on both `Object.hasOwn`
+  and a shape check — either alone is incomplete — and unknown names 404
+  before anything is called. The same helper is applied to the three other
+  lookups (runner, admin test-send, Mail-Tester), which take their names from
+  the database rather than a request path and so were never exploitable the
+  same way; there the defect was that they failed incomprehensibly.
+
+- **Click tracking redirected to the stored URL without validating its
+  scheme.** `applyTracking` harvests hrefs from *rendered* HTML — after
+  Handlebars substitution — so a template variable in href position could put
+  an arbitrary scheme into storage and then be redirected to from the sending
+  domain's own origin, with the sender's reputation behind it. The redirect
+  now allowlists `http:`/`https:` (parsed with `new URL()`, so `JavaScript:`
+  and `java\tscript:` normalise to the same rejection, and a protocol-relative
+  `//evil.com` fails to parse), which also covers links already in storage. A
+  blocked click returns **400** with a static body — the rejected URL is
+  logged but never echoed back — and **is not counted**.
+
+- **SendGrid webhook signatures had no replay window.** The signature check was
+  correct and already failed closed without a key, but nothing checked
+  freshness, so a captured signed payload replayed indefinitely. SendGrid signs
+  `timestamp + body`, so the timestamp was already present and already covered
+  by the signature. New `webhookToleranceSeconds` on `SendGridProvider`,
+  default **300** seconds, symmetric (rejecting implausibly-future timestamps
+  too, since clock skew cuts both ways); `0` or `false` disables the check.
+  `Mailer.fromEnv` reads `MAILER_SENDGRID_WEBHOOK_TOLERANCE`. A malformed value
+  falls back to the default rather than reading as "disabled" — a config typo
+  must not silently reopen the window. The signature is verified *before*
+  freshness, so an unauthenticated caller learns nothing about server clock
+  state, and a rejection is the same bare 401 a bad signature gets.
+
+  **Existing installs:** this is on by default. **A host whose proxy, ingress
+  or queue can delay webhook delivery past five minutes will start seeing
+  events rejected** — widen the window (`webhookToleranceSeconds: 900`) or, if
+  the delay is unbounded, disable it and keep the signature check.
+
+- **`mailery setup-sendgrid` and `setup-dmarc` threw in the published bundle,
+  and DMARC ingest was broken for every ESM consumer.** `parseDmarcReport`
+  lazy-loaded `fast-xml-parser` with `require()`, and `src/cli/cloudflare.ts`
+  required `psl` inside a synchronous function. The package is
+  `"type": "module"`, so tsup compiled both to esbuild's `__require` shim,
+  which throws unconditionally. Every DMARC ingest path was dead for an ESM
+  consumer — admin upload, CLI and inbound alike — and both CLI setup commands
+  threw on zone inference whenever `--cloudflare` was used without an explicit
+  `--cloudflare-zone`. Both are now static imports; `__require` is absent from
+  `dist/index.js` and `dist/cli.js` entirely. `adm-zip` stays lazy, since
+  `extractDmarcXmls` is already async and its `await import()` is correct in
+  both output formats.
+
+  **This shipped in v0.14.0.** If you hit either, you were not doing anything
+  wrong. The test suite never caught it because tests import from `src/`, where
+  the `require` is a real CommonJS require; there is now a regression test that
+  runs the built bundle in a separate node process and POSTs a real gzipped
+  report over a socket, because node's loader is precisely what the old test
+  path could not exercise.
+
+### Added
+
+- **`logger` on `createPublicRouter`.** A pino-style structured logger
+  (`logger.error(fields, msg)`; `warn` and `info` optional) for public-route
+  failures, replacing scattered `console.error` calls. Defaults to a
+  console-backed logger reproducing the previous output, so hosts that pass
+  nothing see no change. Pass `{}` to silence it entirely.
+
+- **An opt-in inbound DMARC route**,
+  `createPublicRouter(mailer, { dmarcInbound: { secret } })`, for SendGrid
+  Inbound Parse and equivalents, so RUA reports ingest as they arrive instead
+  of being uploaded by hand. It reuses the existing parser (decompression caps,
+  declared-vs-actual size checks, compression-ratio check, zip-slip guard)
+  rather than adding a second one.
+
+  **It is off unless you set that secret — no secret, no route registered, so
+  it cannot appear on an upgrade.** Read why before enabling it: **SendGrid
+  Inbound Parse does not sign its payloads.** The Event Webhook does and
+  mailery verifies that; Inbound Parse is a different product with no
+  signature, no HMAC and no verifiable identity. There is nothing to verify, so
+  auth is a shared secret compared in constant time — as a basic-auth password
+  embedded in the destination URL (recommended; unlike a path secret it stays
+  out of every access log between SendGrid and you) or as
+  `Authorization: Bearer`. It is checked *before* multer reads a byte, so an
+  anonymous caller cannot make the process buffer 10 MB. An IP allowlist was
+  rejected as the primary control: SendGrid publishes no stable Inbound Parse
+  egress range, and `req.ip` is the proxy's address unless the host set
+  `trust proxy`, which a library cannot verify. Reports are additionally gated
+  on `policy_published.domain` matching a domain you send from, so a leaked
+  secret buys exactly one capability — rows about domains you already send
+  from. Options: `path` (default `/inbound/dmarc`), `maxFileSizeBytes`
+  (default 10 MB), `maxFiles` (default 10), `allowedDomains`, `parseInbound`.
+
+  **Existing installs:** if you followed the old advice and pointed Inbound
+  Parse at `/admin/mailer/api/dmarc/upload`, it never worked — that route sits
+  behind your `requireAdmin` guard, which Inbound Parse cannot satisfy. If it
+  *did* appear to work, check that the guard is actually applied to your admin
+  router. The docs recommended this before 0.15 and were wrong.
+
+- **`FlowStep` `webhook.url` is documented as never templated.** No behaviour
+  change; it never was rendered. Rendering contact or event data into that
+  field would hand the destination of an inside-the-perimeter `fetch` to
+  whoever controls the template data. The zod schema validates shape only and
+  is quite happy with `http://169.254.169.254/`. Recorded as INVARIANT 16 and
+  17, with comments at the fetch site and on the schema.
+
+- New exports: `signTrackingToken`, `verifyTrackingToken`,
+  `TRACKING_SIG_LENGTH`, `TrackingScope`, `TrackingTokenParams`,
+  `DEFAULT_BOT_UA_RE`, `drainPendingUnsubscribes` (+ its option and result
+  types), `sendgridInboundParser`, `DmarcInboundOptions`, `InboundAttachment`,
+  `InboundParser`, `RouteLogger`, `BotFilterConfig`.
+
+- `mailer_sends.opens[]` — per-open `{ openedAt, userAgent }`, capped at the 50
+  most recent so a repeatedly re-opened mail can't grow a send document toward
+  the 16 MB limit. `clickedLinks[]` entries gain `userAgent`. Absent on
+  documents written before this release.
+
+### Dependencies
+
+- **Production advisories 36 → 0.** No `resolutions` were needed for any of
+  them: every vulnerable transitive's parent already declared a range admitting
+  the patched version, and the lockfile was simply holding stale pins, so
+  stripping those blocks and re-resolving within the existing ranges was
+  enough — and is strictly better than pinning, since nothing in
+  `package.json` can then mask a future direct dependency's real range. Direct
+  bumps: `mjml` `^5.2.0 → ^5.4.0`, `multer` `^2.1.1 → ^2.2.0` (a direct
+  production dependency with two advisories), and `adm-zip` `^0.5.17 → ^0.6.0`
+  (hygiene — `dmarc.ts` checks each entry's declared size against a 50 MB cap
+  before `getData()`, so the advisory was never reachable here). `adm-zip`
+  0.6.0 bundles its own types, so `@types/adm-zip` is removed rather than left
+  as a 0.5.x type package beside a 0.6.0 runtime. Remaining `yarn audit`
+  findings are dev-only; `express` appears there only as a devDependency, and
+  in production it is a peer whose transitives are the host's to patch.
+
+- **`@maily-to/core` moved to `devDependencies`, dropping the production tree
+  524 → 351 packages.** It is imported only by `src/client` — the admin SPA —
+  which vite compiles into `dist/admin/spa` and ships prebuilt with no
+  externals, so consumers never resolved it from `node_modules`; it is already
+  inlined in the JavaScript they download. Everyone installing mailery was
+  fetching its Tailwind/PostCSS subtree for nothing. **Invisible to consumers:**
+  no API change and the built bundle is byte-identical.
+
+### Contributors
+
+Dev tooling moved to vitest 4 / vite 7 (clearing the last dev-only advisories,
+including a critical one in the vitest UI server; full-tree audit 13 → 0), and
+the test suite's roughly-two-in-five random failure is fixed — it was ~20-26
+concurrent `mongod` processes, not memory, so worker fan-out is capped at 4 and
+the timeouts raised past the harness setup cost. Vite stops at 7 deliberately:
+8 swaps Rollup and esbuild for Rolldown and Oxc, and this package publishes a
+built admin SPA. None of this affects consumers.
+
 ## 0.14.0 — Stop HTML-escaping the text/plain part
 
 ### Fixed

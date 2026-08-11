@@ -13,10 +13,20 @@
  *   - the `mailery ingest-dmarc` CLI
  */
 
-// Heavy parsers are loaded lazily inside the functions that need them so
-// the testing bundle doesn't drag adm-zip + fast-xml-parser through.
+// `adm-zip` is still loaded lazily — `extractDmarcXmls` is already async, so
+// `await import()` costs nothing and compiles correctly under both output
+// formats.
+//
+// `fast-xml-parser` is NOT lazy. `parseDmarcReport` is synchronous, so the
+// only lazy form available to it was `require()`, and tsup compiles that to
+// esbuild's `__require` shim, which throws unconditionally in the ESM output
+// of a `"type": "module"` package. That shipped broken in v0.14.0 (see #12).
+// A static import is the one form that is correct in both the esm and cjs
+// bundles. The cost is ~25ms of module init at import time (against ~360ms
+// for the bundle as a whole) for a package that is a hard, non-optional
+// dependency and is therefore always installed anyway.
 import type AdmZipType from 'adm-zip'
-import type { XMLParser as XMLParserType } from 'fast-xml-parser'
+import { XMLParser } from 'fast-xml-parser'
 
 import type {
   DmarcAuthResult,
@@ -169,8 +179,6 @@ export interface ParsedDmarcReport {
  * required identifiers (report_id, domain, date_range) are missing.
  */
 export function parseDmarcReport(xml: string): ParsedDmarcReport {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { XMLParser } = require('fast-xml-parser') as { XMLParser: typeof XMLParserType }
   const parser = new XMLParser({
     ignoreAttributes: false,
     parseAttributeValue: false,
@@ -294,6 +302,21 @@ export interface IngestResult {
   duplicate: boolean
 }
 
+export interface IngestOptions {
+  /**
+   * Gate on the report's `<policy_published><domain>`, checked after parsing
+   * and before any write.
+   *
+   * The admin upload leaves this unset: the caller is already a privileged
+   * operator who chose the file. The public inbound route
+   * (`api/dmarc-inbound.ts`) sets it, because that endpoint authenticates with
+   * a shared secret and nothing else — if the secret leaks, this is what keeps
+   * the blast radius at "reports about domains you actually send from" rather
+   * than "arbitrary rows in your DMARC dashboard".
+   */
+  allowDomain?: (domain: string) => boolean
+}
+
 /**
  * Full ingest path: extract attachment → parse each XML payload → upsert
  * into mailer_dmarc_reports + mailer_dmarc_failures. Idempotent on
@@ -305,6 +328,7 @@ export async function ingestDmarcAttachment(
   ctx: RunnerContext,
   buffer: Buffer,
   filename: string,
+  opts: IngestOptions = {},
 ): Promise<IngestResult & { additionalReports?: number }> {
   const xmls = await extractDmarcXmls(buffer, filename)
   if (xmls.length === 0) throw new Error('attachment contained no XML payload')
@@ -313,6 +337,9 @@ export async function ingestDmarcAttachment(
   for (const xml of xmls) {
     try {
       const parsed = parseDmarcReport(xml)
+      if (opts.allowDomain && !opts.allowDomain(parsed.report.domain)) {
+        throw new Error(`DMARC report is for domain "${parsed.report.domain}", which this deployment does not send from`)
+      }
       results.push(await ingestParsedDmarcReport(ctx, parsed))
     } catch (err) {
       if (!firstError) firstError = err

@@ -280,10 +280,20 @@ export interface SendDoc {
   vars: Record<string, unknown>
   openedAt: Date | null
   openCount: number
+  /**
+   * Per-open history, capped at the most recent `MAX_TRACKED_OPENS`. Exists so
+   * the bot filter (`hasOpenedExcludingBots`) has something to filter on —
+   * `openCount` alone cannot distinguish a scanner from a reader.
+   *
+   * `userAgent` is null when the requesting client sent no `User-Agent`, which
+   * is common for image fetches; see `predicate.ts` for how unknown is scored.
+   * Absent entirely on sends recorded before the field existed.
+   */
+  opens?: Array<{ openedAt: Date; userAgent: string | null }>
   firstClickAt: Date | null
   clickCount: number
   /** History of actual clicks (a linkId may appear multiple times). */
-  clickedLinks: Array<{ url: string; linkId: string; clickedAt: Date }>
+  clickedLinks: Array<{ url: string; linkId: string; clickedAt: Date; userAgent?: string | null }>
   unsubscribedAt: Date | null
   complainedAt: Date | null
   queuedAt: Date

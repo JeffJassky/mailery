@@ -5,27 +5,67 @@
  *   app.use('/m', createPublicRouter(mailer))
  *
  * Routes:
- *   GET  /open/:sendId.png         — open pixel (records open, returns 1×1 PNG)
- *   GET  /click/:sendId/:linkId    — click redirect (records click, 302 → target)
- *   GET  /unsub/:token             — confirmation page (one-click POST link)
- *   POST /unsub/:token             — RFC 8058 one-click unsubscribe
- *   POST /webhooks/:provider       — inbound provider event webhook
+ *   GET  /open/:sendId.:sig.png        — open pixel (records open, returns 1×1 PNG)
+ *   GET  /click/:sendId/:linkId/:sig   — click redirect (records click, 302 → target)
+ *   GET  /unsub/:token                 — confirmation page (one-click POST link)
+ *   POST /unsub/:token                 — RFC 8058 one-click unsubscribe
+ *   POST /webhooks/:provider           — inbound provider event webhook
+ *   POST /inbound/dmarc                — inbound DMARC report (opt-in; see below)
+ *
+ * Every route here is unauthenticated by necessity — mail clients and provider
+ * webhook servers cannot present credentials. The one exception is
+ * `/inbound/dmarc`, which is **not mounted at all** unless a shared secret is
+ * configured; see `api/dmarc-inbound.ts`.
+ *
+ * `:sig` is a 12-character truncated HMAC issued by `applyTracking`. It is
+ * syntactically optional on both tracking routes so that mail delivered before
+ * signing existed keeps working — see `checkTrackingSignature`.
  */
 
 import express, { Router, type Request, type Response } from 'express'
-import fs from 'node:fs'
-import path from 'node:path'
 import { ObjectId } from 'mongodb'
 
-import { sha256Hex, verifyUnsubscribeToken, verifyDoiToken } from '../tokens.js'
+import {
+  sha256Hex,
+  verifyUnsubscribeToken,
+  verifyDoiToken,
+  verifyTrackingToken,
+  type TrackingScope,
+  type TrackingTokenParams,
+} from '../tokens.js'
 import type { Mailer } from '../mailer.js'
+import type { SendDoc } from '../models/index.js'
+import { resolveProvider } from '../provider-lookup.js'
+import { appendPendingUnsub } from '../unsub-journal.js'
+import { mountDmarcInbound, type DmarcInboundOptions } from './dmarc-inbound.js'
+import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
 
 export interface PublicRouterOptions {
   /**
-   * Path on disk where unsubscribe events fall back to when Mongo is degraded.
-   * Defaults to /tmp/mailery-pending-unsubs.jsonl.
+   * Overrides `MailerConfig.pendingUnsubsPath` for this router only.
+   *
+   * @deprecated Set `pendingUnsubsPath` in `MailerConfig` instead. The tick
+   * drain (`drainPendingUnsubscribes`) reads the *config* value, so a path set
+   * only here is written but never replayed — which is precisely the bug
+   * INVARIANT 8 was carrying. Setting it here without also setting it in
+   * config logs a warning at construction time.
    */
   pendingUnsubsPath?: string
+  /**
+   * Structured logger for public-route failures, pino-style
+   * (`logger.error(fields, message)`).
+   *
+   * Defaults to a `console`-backed logger that reproduces the output this
+   * package emitted before the option existed. Pass `{}` to silence.
+   */
+  logger?: RouteLogger
+  /**
+   * Inbound DMARC aggregate-report webhook (SendGrid Inbound Parse and
+   * friends). **Off unless `secret` is set** — see `api/dmarc-inbound.ts` for
+   * why an endpoint that accepts unsigned file uploads must never appear on an
+   * upgrade by itself.
+   */
+  dmarcInbound?: DmarcInboundOptions
 }
 
 // 1×1 transparent PNG (43 bytes)
@@ -36,7 +76,35 @@ const PIXEL = Buffer.from(
 
 export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {}): Router {
   const router = Router()
-  const pendingUnsubsPath = opts.pendingUnsubsPath ?? '/tmp/mailery-pending-unsubs.jsonl'
+  const logger = opts.logger ?? consoleRouteLogger
+
+  // INVARIANT 8. No filesystem default: see `MailerConfig.pendingUnsubsPath`
+  // for why a library cannot pick one, and what happens when it is unset.
+  const pendingUnsubsPath = opts.pendingUnsubsPath ?? mailer.config.pendingUnsubsPath ?? null
+  if (opts.pendingUnsubsPath && !mailer.config.pendingUnsubsPath) {
+    logger.warn?.(
+      { path: opts.pendingUnsubsPath },
+      'mailery: pendingUnsubsPath set on the public router but not in MailerConfig — the tick drain will not replay this journal',
+    )
+  }
+  if (!pendingUnsubsPath) {
+    logger.warn?.(
+      {},
+      'mailery: no pendingUnsubsPath configured — POST /unsub answers 503 when Mongo is unreachable instead of journaling the opt-out',
+    )
+  }
+
+  // Inbound DMARC reports. Mounted only when a secret is configured; the
+  // route's own module explains why that is not negotiable. Registered before
+  // the body parsers below so nothing consumes its multipart stream, and
+  // `mounted` is logged so an operator can see it exists.
+  const dmarcInboundPath = mountDmarcInbound(router, mailer, opts.dmarcInbound, logger)
+  if (dmarcInboundPath) {
+    logger.info?.(
+      { path: dmarcInboundPath },
+      'mailery: DMARC inbound route mounted (shared-secret auth; SendGrid Inbound Parse does not sign payloads)',
+    )
+  }
 
   // Parse JSON for webhooks — capture raw body for signature verification.
   router.use(
@@ -56,50 +124,125 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // -------------------------------------------------------------------------
   // GET /open/:sendId.png
   // -------------------------------------------------------------------------
-  router.get('/open/:sendId.png', async (req: Request, res: Response) => {
+  router.get('/open/:sendId.png', wrap(logger, async (req: Request, res: Response) => {
+    // The pixel is returned unconditionally, before anything is validated. A
+    // rejected signature must look exactly like an accepted one on the wire:
+    // any difference (404, empty body, slower response) is an oracle that tells
+    // an attacker when a guessed sendId is real.
     res.setHeader('Content-Type', 'image/png')
     res.setHeader('Content-Length', String(PIXEL.length))
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
     res.status(200).end(PIXEL)
 
     // Async update — never block the response.
-    const id = (req.params as any).sendId as string
+    const parsed = splitOpenParam((req.params as any).sendId as string)
+    if (!parsed) return
+    const { id, sig } = parsed
     if (!ObjectId.isValid(id)) return
     const sendId = new ObjectId(id)
+
+    const verdict = checkTrackingSignature({
+      scope: 'open',
+      params: { sendId: id },
+      sig,
+      secret: mailer.config.unsubscribeSecret,
+      requireSigned: mailer.config.requireSignedTrackingUrls,
+      logger,
+      fields: { sendId: id },
+    })
+    if (verdict === 'rejected') return
+
     try {
-      const send = await mailer.collections.sends.findOne({ _id: sendId }, { projection: { openedAt: 1 } })
+      const send = await mailer.collections.sends.findOne(
+        { _id: sendId },
+        { projection: { openedAt: 1, queuedAt: 1 } },
+      )
       if (!send) return
+      if (isTrackingExpired(send, mailer.config.trackingUrlLifetimeDays)) {
+        logger.warn?.({ sendId: id }, 'mailery: open ignored — tracking URL past trackingUrlLifetimeDays')
+        return
+      }
+      const now = new Date()
       await mailer.collections.sends.updateOne(
         { _id: sendId },
         {
           $set: {
-            openedAt: send.openedAt ?? new Date(),
+            openedAt: send.openedAt ?? now,
             status: 'delivered' as const,
           },
           $inc: { openCount: 1 },
+          // Per-open user agent, so `hasOpenedExcludingBots` has a signal to
+          // filter on. Capped: an open pixel can be re-fetched indefinitely
+          // (every time the recipient re-opens the mail) and an unbounded
+          // array would eventually run the send document into the 16MB limit.
+          $push: {
+            opens: {
+              $each: [{ openedAt: now, userAgent: requestUserAgent(req) }],
+              $slice: -MAX_TRACKED_OPENS,
+            },
+          },
         },
       )
     } catch (err) {
-      console.error('mailery: open pixel update failed', err)
+      logger.error?.({ err, sendId: id }, 'mailery: open pixel update failed')
     }
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // GET /click/:sendId/:linkId
   // -------------------------------------------------------------------------
-  router.get('/click/:sendId/:linkId', async (req: Request, res: Response) => {
-    const { sendId: sendIdStr, linkId } = req.params as { sendId: string; linkId: string }
+  router.get('/click/:sendId/:linkId{/:sig}', wrap(logger, async (req: Request, res: Response) => {
+    const { sendId: sendIdStr, linkId, sig } = req.params as {
+      sendId: string
+      linkId: string
+      sig?: string
+    }
     if (!ObjectId.isValid(sendIdStr)) return res.status(400).end()
     const sendId = new ObjectId(sendIdStr)
 
+    // A bad signature is answered with the same 404 an unknown send gets. Any
+    // distinct status would confirm "this sendId exists, keep guessing".
+    const verdict = checkTrackingSignature({
+      scope: 'click',
+      params: { sendId: sendIdStr, linkId },
+      sig,
+      secret: mailer.config.unsubscribeSecret,
+      requireSigned: mailer.config.requireSignedTrackingUrls,
+      logger,
+      fields: { sendId: sendIdStr, linkId },
+    })
+    if (verdict === 'rejected') return res.status(404).end()
+
     const send = await mailer.collections.sends.findOne(
       { _id: sendId },
-      { projection: { links: 1, firstClickAt: 1 } },
+      { projection: { links: 1, firstClickAt: 1, queuedAt: 1 } },
     )
     if (!send) return res.status(404).end()
 
+    if (isTrackingExpired(send, mailer.config.trackingUrlLifetimeDays)) {
+      logger.warn?.(
+        { sendId: sendIdStr, linkId },
+        'mailery: click rejected — tracking URL past trackingUrlLifetimeDays',
+      )
+      return res.status(404).end()
+    }
+
     const link = (send.links ?? []).find((l) => l.linkId === linkId)
     if (!link) return res.status(404).end()
+
+    // Never redirect to a scheme we didn't sanction. The rejected URL is logged
+    // but deliberately kept out of the response body — echoing it back would
+    // reflect attacker-controlled content from the sending domain's origin.
+    if (!isSafeRedirectTarget(link.url)) {
+      logger.warn?.(
+        { sendId: sendIdStr, linkId, url: link.url },
+        'mailery: click redirect blocked — disallowed URL scheme',
+      )
+      return res
+        .status(400)
+        .type('html')
+        .send('<!doctype html><html><body><p>This link cannot be opened.</p></body></html>')
+    }
 
     res.redirect(302, link.url)
 
@@ -114,19 +257,22 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
               url: link.url,
               linkId,
               clickedAt: new Date(),
+              // The bot filter has always read `clickedLinks[].userAgent`; until
+              // now nothing ever wrote it, so every click scored as human.
+              userAgent: requestUserAgent(req),
             },
           },
         },
       )
     } catch (err) {
-      console.error('mailery: click recording failed', err)
+      logger.error?.({ err, sendId: sendIdStr, linkId }, 'mailery: click recording failed')
     }
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // GET + POST /unsub/:token
   // -------------------------------------------------------------------------
-  router.get('/unsub/:token', (req: Request, res: Response) => {
+  router.get('/unsub/:token', wrap(logger, (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) return sendUnsubError(res, 'Invalid or expired link.')
 
@@ -142,40 +288,88 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     <button type="submit">Unsubscribe</button>
   </form>
 </body></html>`)
-  })
+  }))
 
-  router.post('/unsub/:token', async (req: Request, res: Response) => {
+  /**
+   * RFC 8058 one-click unsubscribe.
+   *
+   * This is the one public route that does *not* answer before doing its work,
+   * and INVARIANT 8 is why. "Return 200 quickly" and "never silently drop an
+   * opt-out" are both in that invariant, and answering first can only satisfy
+   * the former: the response is already on the wire by the time we learn the
+   * write failed, so the recipient is told they are unsubscribed and then
+   * keeps receiving mail. Through v0.14 that is exactly what happened, and the
+   * 503 the invariant describes was unreachable.
+   *
+   * So: durability first, within a budget.
+   *
+   *   Mongo write succeeds (typically sub-millisecond)   → 200
+   *   Mongo fails or exceeds `unsubscribeWriteTimeoutMs` → journal → 200
+   *   no journal configured, or the journal write fails  → 503
+   *
+   * A 503 is not a worse outcome than the old unconditional 200 — it is the
+   * same failure, told honestly. The caller (a mail client's one-click
+   * infrastructure, or a human on the confirmation page) can retry, and
+   * nothing has claimed an unsubscribe that does not exist.
+   */
+  router.post('/unsub/:token', wrap(logger, async (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) {
       res.status(200).end() // never 5xx; let provider stop retrying
       return
     }
 
-    // Reply 200 immediately. INVARIANT 8: bulletproof unsubscribe.
-    res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
+    const write = mailer.unsubscribe(decoded.email, {
+      scope: decoded.scope,
+      reason: 'user_request',
+      source: 'one-click',
+    })
 
+    let dbError: unknown = null
     try {
-      await mailer.unsubscribe(decoded.email, {
-        scope: decoded.scope,
-        reason: 'user_request',
-        source: 'one-click',
-      })
+      await withTimeout(write, mailer.config.unsubscribeWriteTimeoutMs)
     } catch (err) {
+      dbError = err ?? new Error('unsubscribe write failed')
+      // The write may still land after the timeout. Nothing here depends on
+      // whether it does — the journal replay is idempotent — but an unobserved
+      // rejection would take the host process down.
+      void write.catch(() => {})
+    }
+
+    if (dbError) {
+      if (!pendingUnsubsPath) {
+        logger.error?.(
+          { err: dbError },
+          'mailery: unsubscribe write failed and no pendingUnsubsPath is configured — answering 503',
+        )
+        return sendUnsubUnavailable(res)
+      }
       try {
-        fs.appendFileSync(
-          pendingUnsubsPath,
-          JSON.stringify({ email: decoded.email, scope: decoded.scope, at: Date.now() }) + '\n',
+        appendPendingUnsub(pendingUnsubsPath, {
+          email: decoded.email,
+          scope: decoded.scope,
+          at: Date.now(),
+        })
+        logger.warn?.(
+          { err: dbError, path: pendingUnsubsPath },
+          'mailery: unsubscribe journaled to disk — will be replayed by the tick drain',
         )
       } catch (diskErr) {
-        console.error('mailery: unsub disk fallback failed', { err, diskErr })
+        logger.error?.(
+          { err: dbError, diskErr, path: pendingUnsubsPath },
+          'mailery: unsub disk fallback failed — answering 503',
+        )
+        return sendUnsubUnavailable(res)
       }
     }
-  })
+
+    res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
+  }))
 
   // -------------------------------------------------------------------------
   // GET /confirm-doi/:token
   // -------------------------------------------------------------------------
-  router.get('/confirm-doi/:token', async (req: Request, res: Response) => {
+  router.get('/confirm-doi/:token', wrap(logger, async (req: Request, res: Response) => {
     const token = (req.params as any).token as string
     const decoded = verifyDoiToken(token, mailer.config.unsubscribeSecret)
     if (!decoded) {
@@ -204,14 +398,14 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       /* swallow — subscription is confirmed regardless */
     }
     return res.status(200).type('html').send('<!doctype html><html><body><p>Thanks — you\'re subscribed.</p></body></html>')
-  })
+  }))
 
   // -------------------------------------------------------------------------
   // POST /webhooks/:provider
   // -------------------------------------------------------------------------
-  router.post('/webhooks/:provider', async (req: Request, res: Response) => {
+  router.post('/webhooks/:provider', wrap(logger, async (req: Request, res: Response) => {
     const providerName = (req.params as any).provider as string
-    const provider = mailer.providers[providerName]
+    const provider = resolveProvider(mailer.providers, providerName)
     if (!provider) return res.status(404).end()
 
     const rawBody = (req as any).rawBody as Buffer | undefined
@@ -251,7 +445,10 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           { upsert: true },
         )
       } catch (err) {
-        console.error('mailery: webhook dedupe insert failed', err)
+        logger.error?.(
+          { err, provider: providerName, providerEventId: evt.providerEventId },
+          'mailery: webhook dedupe insert failed',
+        )
       }
     }
 
@@ -262,16 +459,163 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         /* will be picked up by next tick */
       }
     }
-
-    // Bypass linting — `path` import retained for any future on-disk fallback.
-    void path
-  })
+  }))
 
   return router
 }
 
+// ---------------------------------------------------------------------------
+// Tracking-URL verification
+// ---------------------------------------------------------------------------
+
+/** Most recent opens kept per send. See `SendDoc.opens`. */
+const MAX_TRACKED_OPENS = 50
+
+/** User agents are stored for bot classification only; the tail carries nothing. */
+const MAX_UA_LENGTH = 256
+
+function requestUserAgent(req: Request): string | null {
+  const ua = req.headers['user-agent']
+  if (typeof ua !== 'string' || ua.trim() === '') return null
+  return ua.slice(0, MAX_UA_LENGTH)
+}
+
+/**
+ * Split the `:sendId.png` path parameter into id and optional signature.
+ *
+ * Express hands us everything before the literal `.png`, so a signed pixel
+ * arrives as `<objectId>.<sig>` and a legacy one as `<objectId>`. Anything with
+ * more dots than that was not produced by `applyTracking` and is dropped
+ * outright rather than guessed at.
+ */
+function splitOpenParam(raw: unknown): { id: string; sig?: string } | null {
+  if (typeof raw !== 'string') return null
+  const parts = raw.split('.')
+  if (parts.length === 1) return { id: parts[0]! }
+  if (parts.length === 2) return { id: parts[0]!, sig: parts[1]! }
+  return null
+}
+
+type TrackingVerdict = 'signed' | 'legacy' | 'rejected'
+
+/**
+ * Decide whether a tracking hit may be counted.
+ *
+ * Three cases, and the middle one is the whole backward-compatibility story:
+ *
+ *   signature present + valid  → 'signed'
+ *   signature present + wrong  → 'rejected', always, in every mode
+ *   signature absent           → 'rejected' if `requireSignedTrackingUrls`,
+ *                                otherwise 'legacy' — counted, and logged
+ *
+ * Grace mode exists because mail already in inboxes carries unsigned URLs and
+ * will keep being opened for years; hard-rejecting it would silently zero the
+ * tracking for every send that predates this change. The per-hit warn is the
+ * operator's instrument: watch the legacy rate decay, then set
+ * `requireSignedTrackingUrls: true`.
+ *
+ * A wrong signature is never graced. Grace covers "this URL predates signing",
+ * not "this URL was signed by someone who does not have the key".
+ */
+function checkTrackingSignature(args: {
+  scope: TrackingScope
+  params: TrackingTokenParams
+  sig: string | undefined
+  secret: string
+  requireSigned: boolean
+  logger: RouteLogger
+  fields: Record<string, unknown>
+}): TrackingVerdict {
+  const { sig, logger, fields, scope } = args
+
+  if (sig === undefined || sig === '') {
+    if (args.requireSigned) {
+      logger.warn?.(
+        { ...fields, scope },
+        'mailery: unsigned tracking URL rejected (requireSignedTrackingUrls)',
+      )
+      return 'rejected'
+    }
+    // `info`, not `warn`: in grace mode this fires once per legacy open, which
+    // is telemetry rather than a fault. It is the operator's readout for
+    // "has legacy traffic stopped yet?" — when this line goes quiet, flipping
+    // `requireSignedTrackingUrls` to true is safe.
+    logger.info?.(
+      { ...fields, scope },
+      'mailery: unsigned tracking URL accepted — legacy grace mode',
+    )
+    return 'legacy'
+  }
+
+  if (!verifyTrackingToken(sig, scope, args.params, args.secret)) {
+    logger.warn?.({ ...fields, scope }, 'mailery: tracking URL signature invalid')
+    return 'rejected'
+  }
+  return 'signed'
+}
+
+/**
+ * True when the send is older than `trackingUrlLifetimeDays`.
+ *
+ * The deadline is derived from the send row rather than embedded in the token:
+ * it costs no URL bytes, and changing the config takes effect immediately for
+ * mail that has already gone out. A send with no usable `queuedAt` is never
+ * treated as expired — losing a real open to a missing timestamp is worse than
+ * counting a stale one.
+ */
+function isTrackingExpired(send: Pick<SendDoc, 'queuedAt'>, lifetimeDays: number, now: Date = new Date()): boolean {
+  if (!lifetimeDays || lifetimeDays <= 0) return false
+  const queuedAt = send.queuedAt
+  if (!(queuedAt instanceof Date) || Number.isNaN(queuedAt.getTime())) return false
+  return now.getTime() - queuedAt.getTime() > lifetimeDays * 24 * 60 * 60 * 1000
+}
+
 function sendUnsubError(res: Response, msg: string): Response {
   return res.status(400).type('html').send(`<!doctype html><html><body><p>${escapeHtml(msg)}</p></body></html>`)
+}
+
+/**
+ * The 503 INVARIANT 8 describes: neither Mongo nor the journal could record
+ * the opt-out. `Retry-After` is set because the honest answer to a one-click
+ * client is "come back", not "done".
+ */
+function sendUnsubUnavailable(res: Response): Response {
+  return res
+    .status(503)
+    .set('Retry-After', '60')
+    .type('html')
+    .send(
+      '<!doctype html><html><body><p>We could not record your unsubscribe right now, ' +
+        'so you are <strong>not</strong> unsubscribed yet. Please try again in a minute.</p></body></html>',
+    )
+}
+
+/**
+ * Resolve `p`, or reject once `ms` has elapsed.
+ *
+ * A rejected `p` still settles the race normally; the timer exists for the
+ * case that matters here, a Mongo client that is neither resolving nor
+ * rejecting because the server it is waiting on is gone. `unref()` keeps a
+ * pending timer from holding the process open.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  if (!Number.isFinite(ms) || ms <= 0) return p
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`timed out after ${ms}ms`))
+    }, ms)
+    if (typeof timer.unref === 'function') timer.unref()
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
 }
 
 function escapeHtml(s: string): string {
@@ -281,6 +625,37 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+/** Schemes we are willing to bounce a click through. */
+const ALLOWED_REDIRECT_PROTOCOLS = new Set(['http:', 'https:'])
+
+/**
+ * Guard for the click-tracking redirect target.
+ *
+ * Stored link URLs come out of `applyTracking`, which harvests `href` values
+ * from *rendered* HTML — i.e. after Handlebars substitution — so a template
+ * that interpolates a variable into an href position can put an arbitrary
+ * scheme into the stored URL. Redirecting to it would launch `javascript:` or
+ * `data:` from the sending domain's own origin, with the sender's reputation
+ * behind it.
+ *
+ * Parsed with `new URL()` rather than string matching: the URL parser strips
+ * tab/newline and lowercases the scheme, so `java\tscript:` and `JavaScript:`
+ * normalize to the same rejected protocol. A protocol-relative `//evil.com`
+ * has no scheme and no base here, so parsing throws and it is rejected too.
+ */
+function isSafeRedirectTarget(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false
+  const trimmed = raw.trim()
+  if (trimmed === '') return false
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return false
+  }
+  return ALLOWED_REDIRECT_PROTOCOLS.has(parsed.protocol)
 }
 
 function lowercaseHeaders(h: any): Record<string, string> {

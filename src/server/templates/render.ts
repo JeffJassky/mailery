@@ -18,6 +18,7 @@ import mjml2html from 'mjml'
 
 import type { Contact } from '../../shared/types.js'
 import type { TemplateDoc } from '../models/index.js'
+import { signTrackingToken } from '../tokens.js'
 
 // ---------------------------------------------------------------------------
 // Compile (publish-time)
@@ -162,6 +163,16 @@ export interface TrackingOptions {
   trackClicks: boolean
   /** URL that must NOT be rewritten (e.g. the resolved unsubscribe URL). */
   preserveUrls?: string[]
+  /**
+   * HMAC key for tracking-URL signatures — pass `config.unsubscribeSecret`.
+   *
+   * When set, every generated `/m/open` and `/m/click` URL carries a truncated
+   * HMAC so it cannot be forged or enumerated from a neighbouring ObjectId.
+   * When omitted the legacy unsigned shape is emitted; that path exists for
+   * preview/test renders that never reach the tracking endpoints, not as a
+   * supported production mode.
+   */
+  signingSecret?: string
 }
 
 export interface TrackingResult {
@@ -171,9 +182,15 @@ export interface TrackingResult {
 }
 
 /**
- * Rewrite `<a href>` in `html` to /m/click/<sendId>/<linkId>?... and append an
- * open pixel. Returns the modified HTML plus the link map to persist on the
- * send document.
+ * Rewrite `<a href>` in `html` to /m/click/<sendId>/<linkId>/<sig> and append
+ * an open pixel at /m/open/<sendId>.<sig>.png. Returns the modified HTML plus
+ * the link map to persist on the send document.
+ *
+ * The `<sig>` components are 12-character truncated HMACs (see
+ * `signTrackingToken`) and are present whenever `opts.signingSecret` is set.
+ * Without them a Mongo ObjectId is the only thing standing between an attacker
+ * and a forged open — and ObjectIds are a timestamp plus a per-process counter,
+ * so one received email hands out its neighbours.
  */
 export function applyTracking(html: string, opts: TrackingOptions): TrackingResult {
   const preserve = new Set((opts.preserveUrls ?? []).map((u) => u.trim()))
@@ -194,13 +211,19 @@ export function applyTracking(html: string, opts: TrackingOptions): TrackingResu
         seen.set(url, linkId)
         links.push({ linkId, url })
       }
-      const newHref = `${opts.publicUrl}/m/click/${opts.sendId}/${linkId}`
+      const sig = opts.signingSecret
+        ? `/${signTrackingToken('click', { sendId: opts.sendId, linkId }, opts.signingSecret)}`
+        : ''
+      const newHref = `${opts.publicUrl}/m/click/${opts.sendId}/${linkId}${sig}`
       return `<a${pre}href="${newHref}"${post}>`
     })
   }
 
   if (opts.trackOpens) {
-    const pixel = `<img src="${opts.publicUrl}/m/open/${opts.sendId}.png" width="1" height="1" alt="" style="display:block;border:0" />`
+    const sig = opts.signingSecret
+      ? `.${signTrackingToken('open', { sendId: opts.sendId }, opts.signingSecret)}`
+      : ''
+    const pixel = `<img src="${opts.publicUrl}/m/open/${opts.sendId}${sig}.png" width="1" height="1" alt="" style="display:block;border:0" />`
     if (/<\/body>/i.test(out)) {
       out = out.replace(/<\/body>/i, `${pixel}</body>`)
     } else {
@@ -213,13 +236,32 @@ export function applyTracking(html: string, opts: TrackingOptions): TrackingResu
 
 function shouldSkipClickRewrite(url: string, preserve: Set<string>, fullTag: string): boolean {
   if (!url) return true
-  if (url.startsWith('mailto:')) return true
-  if (url.startsWith('tel:')) return true
   if (url.startsWith('#')) return true
   if (url.startsWith('{{') || url.startsWith('{')) return true // unrendered handlebars
   if (preserve.has(url.trim())) return true
   if (/data-mailer-notrack=["']true["']/.test(fullTag)) return true
+  // Defence in depth for the click redirect (which validates the scheme again
+  // at redirect time): an href whose scheme isn't http(s) is left exactly as
+  // authored, gets no linkId, and is therefore never stored on the send and
+  // never becomes a `/m/click/…` URL. Covers `mailto:` and `tel:` — which were
+  // already skipped by name — and everything else, including a `javascript:`
+  // that arrived via a substituted Handlebars variable.
+  //
+  // A malformed href is skipped, never thrown on: one bad variable in one link
+  // must not fail the render and block the whole send.
+  if (!isHttpUrl(url)) return true
   return false
+}
+
+/** True only for an absolute `http:`/`https:` URL. Anything unparseable is false. */
+function isHttpUrl(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url.trim())
+  } catch {
+    return false
+  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:'
 }
 
 const NAMED_ENTITIES: Record<string, string> = {

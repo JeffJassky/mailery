@@ -12,7 +12,7 @@ export const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : '
 
 // Core
 export { Mailer } from './mailer.js'
-export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, SenderDomainConfig, SenderDomainRegistry } from './config.js'
+export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, BotFilterConfig, SenderDomainConfig, SenderDomainRegistry } from './config.js'
 export { validateSenderDomain } from './templates/sender-domain.js'
 export type { SenderDomainValidation } from './templates/sender-domain.js'
 
@@ -32,6 +32,13 @@ export { createAdminRouter } from './api/admin.js'
 export type { AdminRouterOptions } from './api/admin.js'
 export { createPublicRouter } from './api/public.js'
 export type { PublicRouterOptions } from './api/public.js'
+export { sendgridInboundParser } from './api/dmarc-inbound.js'
+export type {
+  DmarcInboundOptions,
+  InboundAttachment,
+  InboundParser,
+} from './api/dmarc-inbound.js'
+export type { RouteLogger } from './api/wrap.js'
 
 // Templates (host apps may want compile + render directly for previews)
 export {
@@ -51,6 +58,11 @@ export {
   applyWebhookEvent,
   processNewlyFiredEventTriggers,
   sweepStrandedFlowRuns,
+  drainPendingUnsubscribes,
+} from './runner/index.js'
+export type {
+  DrainPendingUnsubsOptions,
+  DrainPendingUnsubsResult,
 } from './runner/index.js'
 
 // Models (collection helpers, in case hosts need to query directly)
@@ -77,6 +89,14 @@ export type {
 
 // Token helpers (rarely needed by hosts, useful for tests)
 export { signUnsubscribeToken, verifyUnsubscribeToken, sha256Hex } from './tokens.js'
+export {
+  signTrackingToken,
+  verifyTrackingToken,
+  TRACKING_SIG_LENGTH,
+  type TrackingScope,
+  type TrackingTokenParams,
+} from './tokens.js'
+export { DEFAULT_BOT_UA_RE } from './runner/predicate.js'
 
 // Shared types
 export { computeDeliveryTime } from './runner/delivery-window.js'

@@ -45,3 +45,8 @@ export { dispatchSend } from './send.js'
 export { processNewlyFiredEventTriggers } from './triggers.js'
 export { sweepStrandedFlowRuns } from './sweep.js'
 export { applyWebhookEvent } from './webhook.js'
+export { drainPendingUnsubscribes } from './pending-unsubs.js'
+export type {
+  DrainPendingUnsubsOptions,
+  DrainPendingUnsubsResult,
+} from './pending-unsubs.js'

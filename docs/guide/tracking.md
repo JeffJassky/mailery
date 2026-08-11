@@ -7,10 +7,10 @@ mailery tracks opens, clicks, deliveries, bounces, and complaints. All five conv
 A 1×1 transparent PNG is appended to every send with `trackOpens: true`:
 
 ```html
-<img src="https://yourdomain.com/m/open/<sendId>.png" width="1" height="1" alt="" style="display:block" />
+<img src="https://yourdomain.com/m/open/<sendId>.<sig>.png" width="1" height="1" alt="" style="display:block" />
 ```
 
-When the recipient's mail client fetches it, mailery records `openedAt` + increments `openCount` on the Send row.
+When the recipient's mail client fetches it, mailery records `openedAt`, increments `openCount`, and appends `{ openedAt, userAgent }` to `mailer_sends.opens` (capped at the 50 most recent) so the bot filter has something to work with.
 
 ### Why opens are noisy
 
@@ -20,16 +20,44 @@ For branching flows, use real product events (`Used Feature X`) or aggregated pr
 
 ## Click tracking
 
-At send time, every `<a href="X">` becomes `<a href="https://yourdomain.com/m/click/<sendId>/<linkId>">` where `linkId` is a short hash of the URL within the send. The original-URL map is stored on `mailer_sends.links` for lookup.
+At send time, every `<a href="X">` becomes `<a href="https://yourdomain.com/m/click/<sendId>/<linkId>/<sig>">` where `linkId` is a short hash of the URL within the send. The original-URL map is stored on `mailer_sends.links` for lookup.
 
-When the recipient clicks, mailery records `firstClickAt` + appends to `clickedLinks` + 302-redirects to the original URL.
+When the recipient clicks, mailery records `firstClickAt` + appends to `clickedLinks` (with the requesting user agent) + 302-redirects to the original URL.
 
 ### Links NOT rewritten
 
-- `mailto:` and `tel:` links
+- Anything that isn't an absolute `http:` / `https:` URL. That covers `mailto:` and `tel:`, and also means a template variable that lands a `javascript:` or `data:` URL in an href position is left as authored rather than being handed a tracking redirect. A malformed href is skipped, never thrown on — one bad variable must not fail the render and block the send.
 - Anchors (`#section`)
 - The send's own unsubscribe URL (passed to `applyTracking` as `preserveUrls`)
 - Any `<a data-mailer-notrack="true" href="...">` link
+
+The click endpoint validates the stored target's scheme *again* at redirect time and answers 400 without counting the click. Both checks stay: the render-time skip cannot help links written directly to a send document, and the redirect-time check cannot help links that were already rewritten.
+
+## Signed tracking URLs
+
+The `<sig>` in both URLs is a 12-character truncated HMAC over the URL's own path components, keyed with `unsubscribeSecret`. Without it, the only secret in a tracking URL is a Mongo ObjectId — a timestamp plus a per-process-constant random plus a sequential counter — so one received email largely gives up the ids of its neighbours, and anyone can forge opens and clicks for mail they never received.
+
+That is not only a reporting problem. `hasOpened`, `hasClicked` and `openedAtLeastN` are flow inputs, so forged opens advance recipients through automation, fire follow-up sends, and corrupt the numbers you make decisions from.
+
+Signing is automatic — nothing to configure. What *is* configurable is how the endpoints treat unsigned URLs still sitting in mail you sent before upgrading, and whether URLs expire at all:
+
+```ts
+await Mailer.init({
+  // ...
+  requireSignedTrackingUrls: false,  // default — still count legacy unsigned URLs
+  trackingUrlLifetimeDays: 0,        // default — never expire
+})
+```
+
+Full format, status codes, and the migration procedure: [Tracking URL signatures](/reference/public-endpoints#tracking-url-signatures).
+
+## Filtering bots out of predicates
+
+`hasOpenedExcludingBots`, `hasClickedExcludingBots`, `openedAtLeastN` and `clickedAtLeastN` drop opens and clicks whose recorded user agent matches a scanner pattern. A send counts if *any* one of its opens (or clicks) looks human, so a scanner that prefetches ahead of the recipient does not disqualify the recipient.
+
+An open or click with **no** user agent counts as human. Image fetches frequently carry none and Apple's privacy proxy strips identifying headers, so treating unknown as bot would silently discard a large share of real engagement — and would retroactively empty flows branching on sends recorded before user agents were stored. The cost is that a scanner sending no UA still counts.
+
+Tune with [`botFilter`](/guide/configuration#bot-filtering). These predicates remain a noisy signal with a filter on top (INVARIANT 7); where a product event exists, prefer it.
 
 ## Provider webhooks
 
@@ -93,7 +121,7 @@ skipped so the text keeps readable URLs. See
 
 ## IPs
 
-Mailery does **not** store recipient IPs by default. Only User-Agent and timestamp. To opt in (for compliance investigations):
+Mailery does **not** store recipient IPs by default. Only User-Agent and timestamp — user agents are recorded on `opens[]` and `clickedLinks[]` for bot classification, truncated to 256 characters. To opt in to IPs as well (for compliance investigations):
 
 ```ts
 await Mailer.init({

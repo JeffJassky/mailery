@@ -150,6 +150,31 @@ export interface CircuitBreakerThresholds {
   minSendsBeforeEval: number
 }
 
+export interface BotFilterConfig {
+  /**
+   * User agents matching this pattern are treated as automated. Applied to
+   * recorded open and click user agents alike.
+   *
+   * Default: `/Mimecast|SafeLinks|proofpoint|HeadlessChrome|Googlebot|bingbot/i`
+   * (`DEFAULT_BOT_UA_RE`). Replace it to cover your own corporate scanners;
+   * extend rather than replace if you want to keep the built-ins.
+   */
+  userAgentPattern?: RegExp
+  /**
+   * Opens recorded within this many milliseconds of the send being queued are
+   * treated as automated regardless of user agent — corporate scanners and
+   * gateway prefetchers fetch the pixel within seconds of delivery, and a
+   * human cannot.
+   *
+   * Default `0` — disabled. It is off by default because it is a heuristic
+   * with a real false-positive tail (a recipient already reading their inbox
+   * when the mail lands) and because enabling it silently changes the counts
+   * every existing flow branches on. `10000` (10s) is the value worth trying
+   * first if your open counts look implausible.
+   */
+  minOpenDelayMs?: number
+}
+
 export interface MailerConfig {
   // ---- Storage --------------------------------------------------------------
   db: Db
@@ -198,6 +223,40 @@ export interface MailerConfig {
   requireDoubleOptIn?: boolean
   unsubscribeTokenLifetimeDays?: number
   transactionalRespectUnsubscribe?: boolean
+  /**
+   * Absolute path to the pending-unsubscribe journal (INVARIANT 8).
+   *
+   * When `POST /m/unsub/:token` cannot reach Mongo, the opt-out is appended
+   * here as JSONL and replayed by the tick drain
+   * (`drainPendingUnsubscribes`). The file is created 0600 inside a 0700
+   * directory and opened `O_NOFOLLOW`.
+   *
+   * **There is no default, and that is deliberate.** The journal holds
+   * recipient email addresses in plaintext outside the database, and a library
+   * mounted into an unknown host cannot pick a directory that is at once
+   * writable, durable and private — which is how the previous default ended up
+   * being `/tmp` (world-writable, wiped on reboot, and never read back).
+   *
+   * With this unset the endpoint answers **503** when Mongo is unreachable,
+   * rather than promising an unsubscribe it has nowhere to record. Set it to a
+   * durable, private, node-local path to get the journal instead — e.g.
+   * `/var/lib/mailery/pending-unsubs.jsonl` (systemd: `StateDirectory=mailery`).
+   *
+   * Must not be on a shared network filesystem: claiming a batch relies on
+   * `rename` being atomic within the directory.
+   */
+  pendingUnsubsPath?: string
+  /**
+   * How long `POST /m/unsub/:token` waits for the Mongo write before falling
+   * back to the journal. Default 5000ms.
+   *
+   * The tension is INVARIANT 8's own: the response must be fast (clients are
+   * impatient, providers retry) *and* must not claim an unsubscribe that was
+   * never recorded. A healthy write is sub-millisecond, so this budget is only
+   * ever spent during an outage, and spending it is what makes the difference
+   * between a truthful 200 and a lie.
+   */
+  unsubscribeWriteTimeoutMs?: number
   /** Slug of the transactional template sent for DOI confirmation. Defaults to 'doi-confirmation'. */
   doiTemplateSlug?: string
   /** How long the DOI token stays valid. Default 7 days. */
@@ -244,10 +303,18 @@ export interface MailerConfig {
   // ---- DMARC aggregate report ingestion ------------------------------------
   /**
    * DMARC RUA aggregate reports tell you who is sending mail that claims to
-   * be from your domain — both legitimate sources and spoofers. Operator
-   * uploads the report attachments (or POSTs them via SendGrid Inbound Parse
-   * to /admin/mailer/api/dmarc/upload). Mailery decompresses, parses, and
-   * surfaces alignment failures + unknown senders.
+   * be from your domain — both legitimate sources and spoofers. Mailery
+   * decompresses, parses, and surfaces alignment failures + unknown senders.
+   *
+   * Two ways in:
+   *   - the operator uploads attachments in the admin UI
+   *     (`POST /admin/mailer/api/dmarc/upload`, behind your admin guard)
+   *   - the inbound webhook, for SendGrid Inbound Parse and friends:
+   *     `createPublicRouter(mailer, { dmarcInbound: { secret } })`. Off unless
+   *     that secret is set. Do **not** point Inbound Parse at the admin
+   *     upload route — it sits behind the host's `requireAdmin` guard, which
+   *     Inbound Parse cannot satisfy. (Versions before 0.15 recommended
+   *     exactly that, and it never worked.)
    */
   dmarc?: DmarcConfig
 
@@ -271,6 +338,35 @@ export interface MailerConfig {
   trackClicks?: boolean
   storeTrackingIp?: boolean
   storeRenderedBody?: boolean
+  /**
+   * Reject `/m/open` and `/m/click` hits that carry no signature.
+   *
+   * Default `false` — grace mode. Newly rendered mail is always signed; this
+   * flag only decides what happens to the *unsigned* URLs sitting in mail that
+   * was already delivered. In grace mode they are still counted and each one is
+   * logged (`mailery: unsigned tracking URL accepted`) so the operator can watch
+   * the legacy rate fall to zero and then flip this to `true`.
+   *
+   * A signature that is *present but wrong* is always rejected, in both modes.
+   */
+  requireSignedTrackingUrls?: boolean
+  /**
+   * How long a tracking URL stays valid, in days, measured from the send's
+   * `queuedAt`. Default `0` — never expires.
+   *
+   * Never-expire is the right default: an email sits in an inbox for years and
+   * a legitimate open six months later is real data, not an attack. The
+   * signature already proves the caller was handed the URL. Operators with a
+   * data-retention policy can set a window; because the deadline is derived
+   * from the send row rather than baked into the token, changing this value
+   * takes effect immediately for already-delivered mail and costs no URL bytes.
+   */
+  trackingUrlLifetimeDays?: number
+  /**
+   * Tuning for `hasOpenedExcludingBots` / `hasClickedExcludingBots` /
+   * `openedAtLeastN` / `clickedAtLeastN`. See `BotFilterConfig`.
+   */
+  botFilter?: BotFilterConfig
 
   // ---- Hooks ----------------------------------------------------------------
   getAdminActor?: (req: any) => string
@@ -286,6 +382,7 @@ export type ResolvedConfig = Required<
     | 'requireDoubleOptIn'
     | 'unsubscribeTokenLifetimeDays'
     | 'transactionalRespectUnsubscribe'
+    | 'unsubscribeWriteTimeoutMs'
     | 'doiTemplateSlug'
     | 'doiTokenLifetimeDays'
     | 'broadcastConfirmationThreshold'
@@ -303,6 +400,8 @@ export type ResolvedConfig = Required<
     | 'trackClicks'
     | 'storeTrackingIp'
     | 'storeRenderedBody'
+    | 'requireSignedTrackingUrls'
+    | 'trackingUrlLifetimeDays'
   >
 > & {
   circuitBreaker: CircuitBreakerThresholds
@@ -313,6 +412,7 @@ export const DEFAULTS = {
   requireDoubleOptIn: false,
   unsubscribeTokenLifetimeDays: 90,
   transactionalRespectUnsubscribe: false,
+  unsubscribeWriteTimeoutMs: 5000,
   doiTemplateSlug: 'doi-confirmation',
   doiTokenLifetimeDays: 7,
   broadcastConfirmationThreshold: 1000,
@@ -330,6 +430,8 @@ export const DEFAULTS = {
   trackClicks: true,
   storeTrackingIp: false,
   storeRenderedBody: false,
+  requireSignedTrackingUrls: false,
+  trackingUrlLifetimeDays: 0,
 } as const
 
 export const CIRCUIT_BREAKER_DEFAULTS: CircuitBreakerThresholds = {
@@ -348,6 +450,7 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     requireDoubleOptIn: c.requireDoubleOptIn ?? DEFAULTS.requireDoubleOptIn,
     unsubscribeTokenLifetimeDays: c.unsubscribeTokenLifetimeDays ?? DEFAULTS.unsubscribeTokenLifetimeDays,
     transactionalRespectUnsubscribe: c.transactionalRespectUnsubscribe ?? DEFAULTS.transactionalRespectUnsubscribe,
+    unsubscribeWriteTimeoutMs: c.unsubscribeWriteTimeoutMs ?? DEFAULTS.unsubscribeWriteTimeoutMs,
     doiTemplateSlug: c.doiTemplateSlug ?? DEFAULTS.doiTemplateSlug,
     doiTokenLifetimeDays: c.doiTokenLifetimeDays ?? DEFAULTS.doiTokenLifetimeDays,
     broadcastConfirmationThreshold: c.broadcastConfirmationThreshold ?? DEFAULTS.broadcastConfirmationThreshold,
@@ -365,6 +468,8 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     trackClicks: c.trackClicks ?? DEFAULTS.trackClicks,
     storeTrackingIp: c.storeTrackingIp ?? DEFAULTS.storeTrackingIp,
     storeRenderedBody: c.storeRenderedBody ?? DEFAULTS.storeRenderedBody,
+    requireSignedTrackingUrls: c.requireSignedTrackingUrls ?? DEFAULTS.requireSignedTrackingUrls,
+    trackingUrlLifetimeDays: c.trackingUrlLifetimeDays ?? DEFAULTS.trackingUrlLifetimeDays,
     circuitBreaker: { ...CIRCUIT_BREAKER_DEFAULTS, ...(c.circuitBreaker ?? {}) },
   }
 }
