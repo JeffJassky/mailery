@@ -103,6 +103,7 @@ export default defineConfig({
           items: [
             { text: 'Public endpoints', link: '/reference/public-endpoints' },
             { text: 'Admin REST API', link: '/reference/admin-api' },
+            { text: 'Agent API', link: '/reference/agent-api' },
           ],
         },
       ],

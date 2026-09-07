@@ -1,9 +1,9 @@
 # Routers
 
-mailery ships two Express routers. Both are factory functions that take a `Mailer` instance.
+mailery ships three Express routers. All are factory functions that take a `Mailer` instance.
 
 ```ts
-import { createAdminRouter, createPublicRouter } from 'mailery'
+import { createAdminRouter, createPublicRouter, createAgentRouter } from 'mailery'
 ```
 
 ## createAdminRouter(mailer, opts?)
@@ -164,3 +164,23 @@ The admin SPA's asset URLs are baked into the bundle at build time (`base: '/adm
 ## CSRF + cookies
 
 The `/m/*` endpoints are credentialed (cookies-included), so put them on the same origin as your app or configure your CORS / cookie scope accordingly. The admin `/api/*` endpoints sit behind your auth, which typically already handles CSRF.
+
+## createAgentRouter(mailer, opts)
+
+```ts
+function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Router
+```
+
+The automation surface: bearer-token auth, JSON only, the full admin API under `/api` plus verification, real test sends with delivery waits, flow simulation, run stepping, arm/gate and test-contact resets. Mount it where your session middleware does not reach; it authenticates itself.
+
+```ts
+app.use('/admin/mailer/agent', createAgentRouter(mailer, {
+  tokens: [{ token: process.env.MAILERY_AGENT_TOKEN!, actor: 'agent:claude' }],
+  testContacts: /^qa\+.*@example\.com$/i,
+}))
+```
+
+Options and every route: [Agent API](/reference/agent-api).
+
+`createAdminApiRouter(mailer, opts?)` is also exported — the admin JSON API without the SPA shell — for hosts that want to put those endpoints behind an auth of their own.
+

@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.16.0 — The Agent API, and enabling a flow without replaying history
+
+Everything an operator does by hand in the admin SPA to take an email program
+from "deployed" to "safely on" is now reachable as JSON behind a bearer token,
+built for an AI agent or a CI job to drive. Alongside it, the two admin routes
+that turn a flow on stop replaying the events that fired while it was off.
+
+### If you are upgrading
+
+1. **Turning a flow on no longer replays history.** `POST /flows/:slug/publish`
+   and `POST /flows/:slug/resume` stamp `lastTriggerScanAt` when it is null.
+   Before, a first enable scanned from `createdAt`, so every matching event
+   since the flow document was created entered at once — a month of signups
+   getting the welcome email in one tick, weeks late. If you relied on that to
+   backfill, pass the flow through `armFlow(mailer, slug, { since })` with the
+   instant you want to scan from; the result reports how many events that is.
+2. `POST /flows/:slug/publish` accepts `{ enable: false }` to promote a draft
+   without enabling it. The default is unchanged.
+3. Nothing else changes for existing installs. The agent router is opt-in.
+
+### Added
+
+- **`createAgentRouter(mailer, { tokens, testContacts })`** — a third router,
+  authenticated with bearer tokens (constant-time compared, ≥ 24 characters,
+  each with an audit actor), JSON in and out, with `GET /` describing every
+  route. The whole admin JSON API is mounted under `/api` with the token's
+  actor, so reads and existing operations need no second auth path. On top
+  of it:
+
+  - `POST /templates/:slug/verify` renders the published template as a real
+    contact (host `varsAdapter` and all) and returns named checks:
+    referenced variables missing from the render context (Handlebars
+    renders those as empty strings, silently — the blank-price bug),
+    leftover `{{placeholders}}`, relative links, missing unsubscribe link
+    or postal address, empty text part, subject length, From domain against
+    `senderDomains`, Gmail clip size, the content linter. The unsubscribe URL
+    in the render is genuinely signed for that contact. `verify-all` runs the
+    matrix — every template for every listed contact — in one call.
+  - `POST /templates/:slug/send` is a **real** send through the pipeline to a
+    test contact (a `mailer_sends` row, tracking, the provider, webhook
+    attribution), dispatched inline by default so a workerless web process
+    can deliver a test; `GET /sends/:id/wait?status=delivered` long-polls the
+    send and returns its webhook events. Together they prove delivery end to
+    end, and a send that reaches `sent` but never `delivered` while the
+    recipient plainly got it is the signature of a broken webhook.
+  - `POST /flows/:slug/simulate` walks the published steps for a contact
+    with a virtual clock, evaluating every gate with the runner's own
+    predicate evaluator against the contact's real state, and reports the
+    path, the projected send times and the exit — without writing anything.
+    It also says whether the trigger scan would create a run at all, and why
+    not (disabled, no subscription, `once` and already ran).
+  - `POST /flows/:slug/arm` enables a flow for **future** events by stamping
+    the watermark in the same write; `disarm`, `gate` (publish a canary
+    version whose first step exits anyone without a tag) and `ungate`
+    (restore the newest ungated version) round out the flow controls.
+  - `POST /runs/:id/advance` walks a test contact's run forward now — a
+    wait in front of a step is completed on the spot, recorded as
+    `wait_completed` with the forcing actor — and dispatches the sends it
+    creates. This replaces the trick of publishing a "minutes instead of
+    days" copy of a flow to test a sequence in an afternoon.
+  - `POST /contacts/:externalId/reset` puts a test contact back to "never
+    seen" (runs, sends, events, suppressions gone, subscription restored), so
+    a `trigger.once` flow can be tested again with the same address;
+    `subscribe`, `unsubscribe` and `unsubscribe-url` (a signed one-click URL
+    to exercise `POST /m/unsub/:token`) complete the contact controls.
+  - `POST /events` fires an event for a test contact; `POST /tick` runs the
+    runner tick now; `GET /status` is one document with setup checks,
+    health, every flow's enabled/version/watermark/gate/active-run state,
+    every template, and 24-hour send and webhook counts; `GET /webhooks/status`
+    reports ingest (last event, counts by type, unprocessed backlog).
+
+  **`testContacts` is the boundary.** Sends, event firing, run stepping,
+  subscription changes and resets only apply to contacts whose email matches
+  it; a router constructed without it refuses those routes with
+  `403 test_contacts_not_configured` rather than assuming anyone is
+  disposable. Everything else is read-only or stops mail (cancel, disarm).
+
+- **`armFlow`, `disarmFlow`, `gateFlow`, `ungateFlow`, `stampWatermarkIfNull`,
+  `simulateFlow`, `verifyTemplate`, `renderForContact`, `createAdminApiRouter`**
+  are exported for hosts that want the same operations from their own scripts
+  or routes. `FlowOperationError` carries a `code` and an HTTP `status`.
+
+### Fixed
+
+- A first `publish` or `resume` replayed every event since the flow was
+  created (see "If you are upgrading").
+
+### Dependencies
+
+- `@types/adm-zip` added to devDependencies; `yarn typecheck` did not pass on
+  a fresh checkout without it.
+
 ## 0.15.0 — Public-surface hardening and honest unsubscribes
 
 `createPublicRouter` is the only unauthenticated surface this package mounts,
