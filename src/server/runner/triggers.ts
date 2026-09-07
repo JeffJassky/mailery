@@ -15,7 +15,7 @@ const BATCH_SIZE = 1000
  * scan's read. Re-reading this much history every pass closes that race; the
  * unique (flowId, triggerDedupeKey) index makes re-reads harmless.
  */
-const SCAN_OVERLAP_MS = 30_000
+export const SCAN_OVERLAP_MS = 30_000
 
 export async function processNewlyFiredEventTriggers(ctx: RunnerContext): Promise<void> {
   const flows = await ctx.collections.flows.find({ enabled: true, 'trigger.type': 'event' }).toArray()

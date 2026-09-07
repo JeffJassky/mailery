@@ -90,7 +90,7 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
     next()
   })
 
-  router.use('/api', apiRouter(mailer, opts))
+  router.use('/api', createAdminApiRouter(mailer, opts))
 
   // SPA shell — any other route returns index.html so client-side routing
   // doesn't 404 on refresh.
@@ -105,7 +105,14 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
 // JSON API
 // ---------------------------------------------------------------------------
 
-function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
+/**
+ * The JSON API alone, without the SPA shell or the static assets. Exported
+ * so `createAgentRouter` can offer the same endpoints under bearer-token
+ * auth; hosts mounting the SPA should keep using `createAdminRouter`.
+ *
+ * Expects `(req as any).actor` to be set by whatever sits in front of it.
+ */
+export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
   const r = Router()
   const c = mailer.collections
 
@@ -329,7 +336,15 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
     asyncHandler(async (req, res) => {
       const before = await c.flows.findOne({ slug: req.params.slug })
       if (!before) return res.status(404).json({ error: 'not_found' })
-      await c.flows.updateOne({ _id: before._id }, { $set: { enabled: true, updatedAt: new Date() } })
+      // A flow that has never scanned has a null watermark, and the trigger
+      // scan falls back to `createdAt` — so a first "resume" replayed every
+      // matching event since the document was created. Stamp now; a flow that
+      // HAS scanned keeps its watermark, so events fired during a pause enter.
+      const now = new Date()
+      await c.flows.updateOne(
+        { _id: before._id },
+        { $set: { enabled: true, updatedAt: now, ...(before.lastTriggerScanAt ? {} : { lastTriggerScanAt: now }) } },
+      )
       await mailer.audit({
         actor: (req as any).actor,
         action: 'flow.resume',
@@ -1017,6 +1032,10 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
       if (!Array.isArray(draftSteps) || draftSteps.length === 0) {
         return res.status(400).json({ error: 'empty_flow', message: 'flow has no steps to publish' })
       }
+      // `enable: false` publishes without turning the flow on — the human
+      // decision to enable stays separate from the mechanical one to promote
+      // a draft. Default true for compatibility with the SPA's Publish button.
+      const enable = req.body?.enable !== false
       const nextVersion = (flow.version ?? 0) + 1
       const now = new Date()
       await c.flowVersions.insertOne({
@@ -1033,11 +1052,14 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
           $set: {
             steps: draftSteps,
             version: nextVersion,
-            enabled: true,
+            enabled: enable ? true : flow.enabled,
             draft: null,
             publishedAt: now,
             publishedBy: (req as any).actor,
             updatedAt: now,
+            // First enable: stamp the trigger watermark so the scan does not
+            // replay every event since the flow document was created.
+            ...(enable && !flow.lastTriggerScanAt ? { lastTriggerScanAt: now } : {}),
           },
         },
       )
@@ -1045,9 +1067,9 @@ function apiRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
         actor: (req as any).actor,
         action: 'flow.publish',
         resource: { collection: 'mailer_flows', id: flow._id, slug: flow.slug },
-        diffSummary: `Published v${nextVersion}`,
+        diffSummary: `Published v${nextVersion}${enable ? '' : ' (left disabled)'}`,
       })
-      return res.json({ ok: true, version: nextVersion })
+      return res.json({ ok: true, version: nextVersion, enabled: enable ? true : flow.enabled })
     }),
   )
 

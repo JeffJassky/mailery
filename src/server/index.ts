@@ -28,8 +28,22 @@ export { SendGridProvider } from './providers/sendgrid.js'
 export type { SendGridProviderOptions } from './providers/sendgrid.js'
 
 // HTTP routers
-export { createAdminRouter } from './api/admin.js'
+export { createAdminRouter, createAdminApiRouter } from './api/admin.js'
 export type { AdminRouterOptions } from './api/admin.js'
+export { createAgentRouter, verifyTemplate, renderForContact, referencedPaths, MIN_AGENT_TOKEN_LENGTH } from './api/agent.js'
+export type { AgentRouterOptions, AgentToken, VerifyReport, VerifyOptions } from './api/agent.js'
+export {
+  armFlow,
+  disarmFlow,
+  gateFlow,
+  ungateFlow,
+  isCanaryGate,
+  stampWatermarkIfNull,
+  FlowOperationError,
+} from './runner/arm.js'
+export type { ArmFlowOptions, ArmFlowResult, GateFlowResult, UngateFlowResult } from './runner/arm.js'
+export { simulateFlow } from './runner/simulate.js'
+export type { SimulateOptions, SimulationResult, SimulatedStep } from './runner/simulate.js'
 export { createPublicRouter } from './api/public.js'
 export type { PublicRouterOptions } from './api/public.js'
 export { sendgridInboundParser } from './api/dmarc-inbound.js'

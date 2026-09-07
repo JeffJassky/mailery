@@ -203,3 +203,8 @@ export default defineConfig({
 ```
 
 mongodb-memory-server downloads a Mongo binary on first run (~100MB, cached). Plan for slow CI start unless you cache the binary directory between runs.
+
+## Verifying against production
+
+The harness above answers "does my flow do what I think" offline. For "does the deployed program render, send and deliver for real contacts" — the questions an operator asks before enabling a flow — mount the [Agent API](/reference/agent-api). It renders every template as real contacts and returns named checks, sends through the real pipeline and waits for the provider webhook, simulates a flow against a contact's actual state, and walks a canary run step by step in production while every real contact is gated out.
+
