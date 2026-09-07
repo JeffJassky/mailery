@@ -44,6 +44,30 @@ function ts(offsetSeconds = 0): string {
   return String(Math.floor(Date.now() / 1000) + offsetSeconds)
 }
 
+describe('webhookVerificationKey formats', () => {
+  it('accepts the bare base64 SPKI string SendGrid shows and its API returns', async () => {
+    const bare = crypto.createPublicKey(publicKeyPem).export({ type: 'spki', format: 'der' }).toString('base64')
+    expect(bare.startsWith('MFkw')).toBe(true)
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: bare })
+    const body = Buffer.from('[{"event":"delivered","email":"a@b.c","timestamp":1}]')
+    const t = ts()
+    expect(await provider.verifyWebhook(body, { [SIG_HEADER]: sign(t, body), [TS_HEADER]: t })).toBe(true)
+  })
+
+  it('accepts a PEM block whose newlines were escaped for an .env line', async () => {
+    const escaped = publicKeyPem.replace(/\n/g, '\\n')
+    const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: escaped })
+    const body = Buffer.from('[]')
+    const t = ts()
+    expect(await provider.verifyWebhook(body, { [SIG_HEADER]: sign(t, body), [TS_HEADER]: t })).toBe(true)
+  })
+
+  it('refuses a key that is not a public key, at construction', () => {
+    expect(() => new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: 'not a key' })).toThrow(/webhookVerificationKey/)
+    expect(() => new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: 'QUJDRA==' })).toThrow(/did not parse/)
+  })
+})
+
 describe('verifyWebhook', () => {
   it('accepts a correctly signed payload', async () => {
     const provider = new SendGridProvider({ apiKey: API_KEY, webhookVerificationKey: publicKeyPem })

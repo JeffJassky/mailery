@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.16.1 — Accept the webhook key in the form SendGrid actually gives you
+
+### Fixed
+
+- **`SendGridProvider` rejected every signed event webhook when configured
+  with the key SendGrid shows.** SendGrid's dashboard and its
+  `/user/webhooks/event/settings/signed` API present the verification key as
+  a bare base64 SPKI string (`MFkwEwYHKoZI…`) — which is also exactly what
+  `mailery setup-sendgrid` prints for you to put in your environment. The
+  provider handed that string straight to Node's `crypto.verify`, which only
+  reads PEM; Node threw `DECODER routines::unsupported`, `verifyWebhook`
+  caught it and reported the signature invalid, and the public router answered
+  401 to every genuine delivery, bounce, complaint and unsubscribe. Nothing was
+  logged, `mailer_webhook_events` simply stayed empty, and the suppression
+  list never learned about a single bounce. A host that configured the key as
+  a PEM block was unaffected — which is what the docs described and what the
+  unit tests used, so the bug hid behind a passing suite.
+
+  The provider now normalises the key at construction: the bare base64
+  string, a PEM block, or a PEM block whose newlines were escaped to `\n` for
+  an `.env` line are all accepted, and anything that does not parse as a
+  public key **throws from `new SendGridProvider(...)`** with a message naming
+  the option — a key that silently verifies nothing is the failure this
+  replaces.
+
+  **Existing installs:** if your webhook has never ingested an event, this
+  is almost certainly why; upgrading fixes it with no configuration change.
+  Events SendGrid could not deliver are retried by SendGrid for up to 24
+  hours, so recent ones may still arrive once the fixed version is running.
+  If your key really is malformed, `Mailer.init` will now fail at startup
+  instead of your app coming up healthy and deaf.
+
 ## 0.16.0 — The Agent API, and enabling a flow without replaying history
 
 Everything an operator does by hand in the admin SPA to take an email program

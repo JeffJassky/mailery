@@ -11,7 +11,7 @@ import { SendGridProvider, NullProvider } from 'mailery'
 ```ts
 new SendGridProvider({
   apiKey: string                            // required — SendGrid API key
-  webhookVerificationKey?: string           // ECDSA public key (PEM) for event webhook signature verification
+  webhookVerificationKey?: string           // ECDSA public key: SendGrid's base64 string or PEM; invalid → throws at init
   webhookToleranceSeconds?: number | false  // default 300; replay window for the signed timestamp. 0 or false disables
   sendRatePerSecond?: number                // default 10 (shared IP); raise for dedicated IPs
   sandbox?: boolean                         // default false; true validates without delivering

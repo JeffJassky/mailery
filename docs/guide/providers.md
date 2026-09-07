@@ -52,10 +52,10 @@ One SendGrid account can hold several event webhooks. If the account already ser
 Same settings page, on **your** webhook (keys are per-webhook — another webhook's key will fail verification), scroll to **Signed Event Webhook**:
 
 - Click **Enable Signing** if not already on.
-- SendGrid generates an **ECDSA public verification key** (PEM format).
+- SendGrid generates an **ECDSA public verification key**.
 - Click **Test Your Integration** to confirm SendGrid can reach the URL.
-- Copy the **Verification Key** (it's a multi-line PEM block starting with `-----BEGIN PUBLIC KEY-----`).
-- Paste it as the `webhookVerificationKey` option (or set `SENDGRID_WEBHOOK_KEY` env var if using `Mailer.fromEnv()`).
+- Copy the **Verification Key** exactly as shown — a single-line base64 string starting with `MFkw…` (the same value `mailery setup-sendgrid` prints, and the API's `public_key`). A PEM block starting with `-----BEGIN PUBLIC KEY-----` works too, including one whose newlines were escaped to `\n` for an env file.
+- Paste it as the `webhookVerificationKey` option (or set `SENDGRID_WEBHOOK_KEY` env var if using `Mailer.fromEnv()`). A value that is not a public key makes `Mailer.init` throw — before 0.16.1 it silently failed every signature check instead.
 
 mailery verifies every inbound webhook signature against this key. Unsigned or invalid-signature requests are rejected with `401`. Don't skip this — without verification, anyone who finds your webhook URL can fake bounce events and poison your suppression list.
 
