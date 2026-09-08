@@ -44,7 +44,7 @@ export { processOneRunStep, exitFlowRun } from './step.js'
 export { dispatchSend } from './send.js'
 export { processNewlyFiredEventTriggers } from './triggers.js'
 export { sweepStrandedFlowRuns } from './sweep.js'
-export { applyWebhookEvent } from './webhook.js'
+export { applyWebhookEvent, findSendForEvent, webhookEventsForMessageId } from './webhook.js'
 export { drainPendingUnsubscribes } from './pending-unsubs.js'
 export type {
   DrainPendingUnsubsOptions,

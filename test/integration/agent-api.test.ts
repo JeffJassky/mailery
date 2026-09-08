@@ -10,6 +10,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { ObjectId } from 'mongodb'
 import express from 'express'
 import { request } from 'http'
 import type { AddressInfo } from 'net'
@@ -481,5 +482,33 @@ describe('runner + status', () => {
     expect(wh.status).toBe(200)
     expect(wh.body.lastReceivedAt).toBeNull()
     expect(wh.body.unprocessed).toBe(0)
+  })
+})
+
+describe('sends: webhook events behind a send', () => {
+  it('lists events whose stored message id still carries the provider routing suffix', async () => {
+    H.provider.reset()
+    const res = await call('POST', '/templates/welcome/send', { contactId: 't1' })
+    expect(res.status).toBe(201)
+    const id = new ObjectId(res.body.sendId)
+    await H.mailer.collections.sends.updateOne({ _id: id }, { $set: { providerMessageId: 'Ik7M_IBQT2uKYBiG8lDJTA' } })
+    const base = {
+      provider: 'sendgrid',
+      eventType: 'delivered',
+      normalizedType: 'delivered' as const,
+      email: 'qa+one@test.example',
+      occurredAt: new Date(),
+      receivedAt: new Date(),
+      processed: true,
+      raw: {},
+    }
+    await H.mailer.collections.webhookEvents.insertMany([
+      { ...base, providerEventId: 'suffix', providerMessageId: 'Ik7M_IBQT2uKYBiG8lDJTA.filterdrecv-p3iad2-1-0' },
+      { ...base, providerEventId: 'exact', providerMessageId: 'Ik7M_IBQT2uKYBiG8lDJTA' },
+      { ...base, providerEventId: 'other', providerMessageId: 'Ik7M_IBQT2uKYBiG8lDJTAX' },
+    ])
+    const wait = await call('GET', `/sends/${res.body.sendId}/wait?status=sent&timeoutMs=0`)
+    expect(wait.status).toBe(200)
+    expect(wait.body.webhookEvents.map((e: any) => e.providerEventId).sort()).toEqual(['exact', 'suffix'])
   })
 })

@@ -181,13 +181,29 @@ export class SendGridProvider implements MailProvider {
   }
 }
 
+/**
+ * SendGrid's event `sg_message_id` is the id the v3 send returned in
+ * `X-Message-Id` — which is what we stored on the send — followed by a
+ * routing suffix (`.filterdrecv-…`, `.recvd-…`) that never appears anywhere
+ * else. Strip it so events match the send by id instead of falling back to
+ * "newest send for that address", which mis-attributes deliveries the moment
+ * two sends to one contact are in flight. Legacy ids contain dots themselves
+ * (`14c5d75ce93.dfd.64b469.filter0001.…`), so cut at the marker, not the
+ * first dot.
+ */
+export function normalizeSendGridMessageId(raw: unknown): string {
+  const id = String(raw ?? '')
+  const marker = /\.(?:filter|recvd)\S*$/i.exec(id)
+  return marker ? id.slice(0, marker.index) : id
+}
+
 function normalizeSendGridEvent(e: any): NormalizedEvent | null {
   const type = mapEventType(e.event)
   if (!type) return null
   return {
     type,
     providerEventId: String(e.sg_event_id ?? e['smtp-id'] ?? `${e.event}-${e.timestamp}-${e.email}`),
-    providerMessageId: String(e.sg_message_id ?? e['smtp-id'] ?? ''),
+    providerMessageId: e.sg_message_id != null ? normalizeSendGridMessageId(e.sg_message_id) : String(e['smtp-id'] ?? ''),
     email: String(e.email ?? '').toLowerCase(),
     occurredAt: new Date(Number(e.timestamp) * 1000),
     details: {

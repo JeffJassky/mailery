@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.16.2 — Attribute SendGrid events to the right send
+
+### Fixed
+
+- **Delivered/open/click events landed on the wrong send.** SendGrid reports
+  `sg_message_id` as the send's `X-Message-Id` plus a routing suffix
+  (`<id>.filterdrecv-…`), so the id never matched the one stored on the send
+  and the runner fell back to "newest send for this address". The moment two
+  sends to one contact were in flight, the older one's delivery was pinned to
+  the newer one — and a delivery attributed to a row still being dispatched
+  was then overwritten back to `sent`. `SendGridProvider` now strips the
+  suffix (`normalizeSendGridMessageId`), and `applyWebhookEvent` matches by
+  id first, falling back by address only to sends that actually reached the
+  provider (`findSendForEvent`).
+- **`GET /sends/:id` (admin) and `GET /sends/:id/wait` (agent) listed no
+  webhook events** for the same reason. Both now also match rows ingested
+  before this fix, where the suffix is still on the stored id
+  (`webhookEventsForMessageId`).
+
 ## 0.16.1 — Accept the webhook key in the form SendGrid actually gives you
 
 ### Fixed

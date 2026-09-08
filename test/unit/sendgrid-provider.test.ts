@@ -12,7 +12,7 @@
 import crypto from 'node:crypto'
 import { describe, it, expect, beforeAll } from 'vitest'
 
-import { SendGridProvider } from '../../src/server/providers/sendgrid.js'
+import { SendGridProvider, normalizeSendGridMessageId } from '../../src/server/providers/sendgrid.js'
 
 const API_KEY = 'SG.not-a-real-key-nothing-here-touches-the-network'
 
@@ -341,5 +341,31 @@ describe('provider configuration', () => {
 
   it('identifies itself as sendgrid', () => {
     expect(new SendGridProvider({ apiKey: API_KEY }).name).toBe('sendgrid')
+  })
+})
+
+describe('normalizeSendGridMessageId', () => {
+  it('strips the routing suffix SendGrid appends to the X-Message-Id', () => {
+    expect(normalizeSendGridMessageId('Ik7M_IBQT2uKYBiG8lDJTA.filterdrecv-p3iad2-canary-1-5F0B2E8A-13.0')).toBe('Ik7M_IBQT2uKYBiG8lDJTA')
+    expect(normalizeSendGridMessageId('Ik7M_IBQT2uKYBiG8lDJTA.recvd-6f7d8e9a-xyz-0')).toBe('Ik7M_IBQT2uKYBiG8lDJTA')
+  })
+
+  it('keeps the dots inside a legacy id and only cuts at the marker', () => {
+    expect(normalizeSendGridMessageId('14c5d75ce93.dfd.64b469.filter0001.16648.5515E0B88.0')).toBe('14c5d75ce93.dfd.64b469')
+  })
+
+  it('returns an id with no suffix unchanged', () => {
+    expect(normalizeSendGridMessageId('Ik7M_IBQT2uKYBiG8lDJTA')).toBe('Ik7M_IBQT2uKYBiG8lDJTA')
+    expect(normalizeSendGridMessageId(undefined)).toBe('')
+  })
+
+  it('is applied to every parsed event, while smtp-id fallbacks stay untouched', () => {
+    const p = new SendGridProvider({ apiKey: 'SG.test' })
+    const [a, b] = p.parseWebhookEvents([
+      { event: 'delivered', email: 'A@B.c', timestamp: 1, sg_event_id: 'e1', sg_message_id: 'Ik7M_IBQT2uKYBiG8lDJTA.filterdrecv-p3iad2-1-0' },
+      { event: 'delivered', email: 'A@B.c', timestamp: 2, sg_event_id: 'e2', 'smtp-id': '<abc.def@mail.example>' },
+    ])
+    expect(a!.providerMessageId).toBe('Ik7M_IBQT2uKYBiG8lDJTA')
+    expect(b!.providerMessageId).toBe('<abc.def@mail.example>')
   })
 })

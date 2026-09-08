@@ -4,7 +4,9 @@
  */
 
 import type { NormalizedEvent } from '../../shared/types.js'
-import type { SendDoc } from '../models/index.js'
+import type { Filter } from 'mongodb'
+
+import type { SendDoc, WebhookEventDoc } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 import { sha256Hex } from '../tokens.js'
 import { recordHealthCounter, type HealthDims } from './health.js'
@@ -65,13 +67,36 @@ export async function processWebhookBacklog(
   }
 }
 
+/**
+ * Which send does a provider event belong to? The provider message id is the
+ * only reliable link, so it wins outright when it matches. Only when nothing
+ * carries that id (a provider that rewrites ids, an id we never stored) do we
+ * fall back to the newest send to that address that actually reached the
+ * provider. The previous single `$or` query sorted by queue time let the
+ * newest send for the address outrank an exact id match, and could pick a row
+ * still being dispatched — whose `sent` write then clobbered `delivered`.
+ */
+export async function findSendForEvent(event: NormalizedEvent, ctx: RunnerContext): Promise<SendDoc | null> {
+  if (event.providerMessageId) {
+    const byId = await ctx.collections.sends.findOne({ providerMessageId: event.providerMessageId })
+    if (byId) return byId
+  }
+  if (!event.email) return null
+  return ctx.collections.sends.findOne({ emailAtSend: event.email, sentAt: { $ne: null } }, { sort: { sentAt: -1 } })
+}
+
+/**
+ * Filter for the webhook events behind one send: the exact id, plus rows
+ * ingested before ids were normalised, where the provider's routing suffix
+ * is still attached (`<id>.filterdrecv-…`).
+ */
+export function webhookEventsForMessageId(providerMessageId: string): Filter<WebhookEventDoc> {
+  const escaped = providerMessageId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return { $or: [{ providerMessageId }, { providerMessageId: { $regex: `^${escaped}\\.` } }] }
+}
+
 export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerContext): Promise<void> {
-  const send = await ctx.collections.sends.findOne(
-    event.providerMessageId
-      ? { $or: [{ providerMessageId: event.providerMessageId }, { emailAtSend: event.email }] }
-      : { emailAtSend: event.email },
-    { sort: { queuedAt: -1 } },
-  )
+  const send = await findSendForEvent(event, ctx)
 
   switch (event.type) {
     case 'delivered':

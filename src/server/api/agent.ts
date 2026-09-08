@@ -51,6 +51,7 @@ import { signUnsubscribeToken } from '../tokens.js'
 import { effectiveOverallStatus } from '../runner/health.js'
 import { runTick } from '../runner/tick.js'
 import { dispatchSend } from '../runner/send.js'
+import { webhookEventsForMessageId } from '../runner/webhook.js'
 import { processOneRunStep, exitFlowRun } from '../runner/step.js'
 import {
   armFlow,
@@ -332,7 +333,7 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
         await sleep(1000)
       }
       const webhookEvents = send.providerMessageId
-        ? await c.webhookEvents.find({ providerMessageId: send.providerMessageId }).sort({ receivedAt: 1 }).limit(100).toArray()
+        ? await c.webhookEvents.find(webhookEventsForMessageId(send.providerMessageId)).sort({ receivedAt: 1 }).limit(100).toArray()
         : []
       res.json({ reached, target, waitedMs: Date.now() - started, send: sendSummary(send), webhookEvents })
     }),

@@ -30,6 +30,7 @@ import { runSetupChecks } from './setup-status.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
 import { registeredProviderNames, resolveProvider } from '../provider-lookup.js'
 import { effectiveOverallStatus } from '../runner/health.js'
+import { webhookEventsForMessageId } from '../runner/webhook.js'
 import { runDnsblChecks } from '../runner/dnsbl.js'
 import { runPostmasterPull } from '../runner/postmaster.js'
 import { runSndsPull } from '../runner/snds.js'
@@ -457,7 +458,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (!send) return res.status(404).json({ error: 'not_found' })
       const events = send.providerMessageId
         ? await c.webhookEvents
-            .find({ providerMessageId: send.providerMessageId })
+            .find(webhookEventsForMessageId(send.providerMessageId))
             .sort({ receivedAt: -1 })
             .limit(100)
             .toArray()
