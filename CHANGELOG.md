@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.3 — Click redirects under Express 4
+
+### Fixed
+
+- **Every tracked link 404'd when the host runs Express 4.** The click
+  redirect was registered as `/click/:sendId/:linkId{/:sig}`. That optional
+  segment is Express 5 syntax; Express 4 — which the peer range allows, and
+  whose `Router()` a 4.x host hands us — treats the braces as literal
+  characters, so the route never matched and recipients landed on the host's
+  404 page. The open pixel and unsubscribe routes use plain `:param` segments
+  and were unaffected. The route is now two explicit paths (with and without
+  the signature), and a test walks every router mailery builds and rejects
+  any path that only one Express major understands.
+
 ## 0.16.2 — Attribute SendGrid events to the right send
 
 ### Fixed

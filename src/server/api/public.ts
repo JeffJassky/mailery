@@ -189,9 +189,16 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   }))
 
   // -------------------------------------------------------------------------
-  // GET /click/:sendId/:linkId
+  // GET /click/:sendId/:linkId/:sig   (and the pre-0.15 unsigned form)
+  //
+  // Two explicit paths, not an optional segment. `{/:sig}` is Express 5
+  // syntax; to Express 4's matcher — which the peer range allows and which
+  // hosts on 4.x hand us when they build the router — the braces are literal
+  // characters, so the route never matched and every tracked link in every
+  // email answered the host's 404 page. Plain `:param` segments mean the same
+  // thing to both majors; test/integration/route-syntax.test.ts keeps it so.
   // -------------------------------------------------------------------------
-  router.get('/click/:sendId/:linkId{/:sig}', wrap(logger, async (req: Request, res: Response) => {
+  router.get(['/click/:sendId/:linkId/:sig', '/click/:sendId/:linkId'], wrap(logger, async (req: Request, res: Response) => {
     const { sendId: sendIdStr, linkId, sig } = req.params as {
       sendId: string
       linkId: string
