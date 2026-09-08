@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.6 — Tag a test contact over the agent API
+
+### Added
+
+- **Agent API: `POST /contacts/:externalId/tags`** (test contacts only) — add or remove tags on a test contact, through the host's `ContactAdapter` when it can write them and mailery's own `contactTags` collection when it cannot. `POST /flows/:slug/gate` publishes a canary whose first step exits every contact without a tag, but the tag lives on the contact record: until now an agent could gate a flow and then had no way to let anyone through it without the production database credential the agent API exists to avoid. The end-to-end walkthrough in the docs had the same hole.
+
 ## 0.16.5 — Publish compiled templates over the agent API
 
 ### Added

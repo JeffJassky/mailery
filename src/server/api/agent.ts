@@ -73,6 +73,11 @@ const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
  * minus what the server owns (timestamps, stats, draft). Defaults mirror what
  * the admin publish route writes for a template created in the SPA.
  */
+const agentTagsInputSchema = z.object({
+  add: z.array(z.string().min(1).max(128)).max(25).default([]),
+  remove: z.array(z.string().min(1).max(128)).max(25).default([]),
+})
+
 const publishTemplateInputSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(2000).default(''),
@@ -795,6 +800,50 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
   )
 
   /**
+   * Tag a test contact, so a gated flow has someone to let through.
+   * `POST /flows/:slug/gate` publishes a canary whose first step exits every
+   * contact without the tag; the tag itself lives on the host's contact record,
+   * which an agent otherwise reaches only through the production database.
+   */
+  router.post(
+    '/contacts/:externalId/tags',
+    wrap(async (req, res) => {
+      const contact = await loadContact(res, String(req.params.externalId))
+      if (!contact) return
+      if (!guardTestContact(res, contact)) return
+      const parsed = agentTagsInputSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'validation_failed', issues: parsed.error.issues })
+      }
+      const { add, remove } = parsed.data
+      if (add.length === 0 && remove.length === 0) {
+        return res.status(400).json({ error: 'no_tags', message: 'Pass {add: [...]} and/or {remove: [...]}.' })
+      }
+      const overlap = add.filter((t) => remove.includes(t))
+      if (overlap.length > 0) {
+        return res.status(400).json({ error: 'tag_conflict', tags: overlap })
+      }
+      for (const tag of add) await mailer.tag(contact.externalId, tag)
+      for (const tag of remove) await mailer.untag(contact.externalId, tag)
+      const after = await mailer.adapter.getById(contact.externalId)
+      await mailer.audit({
+        actor: actorOf(req),
+        action: 'agent.contact.tags',
+        resource: { collection: 'contacts', id: contact.externalId },
+        diffSummary: `${contact.email}: ${add.length ? `+${add.join(', +')}` : ''}${add.length && remove.length ? ' ' : ''}${
+          remove.length ? `-${remove.join(', -')}` : ''
+        }`,
+      })
+      res.json({
+        contact: { externalId: contact.externalId, email: contact.email },
+        added: add,
+        removed: remove,
+        tags: after?.tags ?? [],
+      })
+    }),
+  )
+
+  /**
    * Put a test contact back to "never seen": runs, sends, events and
    * suppressions gone, subscription restored. This is what makes a
    * `trigger.once` flow re-testable with the same address.
@@ -1433,6 +1482,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'GET', path: '/contacts/:externalId/unsubscribe-url', summary: 'A signed one-click unsubscribe URL for a test contact, to exercise POST /m/unsub/:token.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/subscribe', summary: 'Subscribe a test contact.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/unsubscribe', summary: 'Unsubscribe a test contact (marketing scope).', testContactsOnly: true },
+  { method: 'POST', path: '/contacts/:externalId/tags', summary: 'Add or remove tags on a test contact ({add: [...], remove: [...]}), so a gated flow lets it through.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/reset', summary: 'Delete a test contact\'s runs, sends, events ({events: [names]} to narrow) and suppressions, then resubscribe. Each part can be turned off with false.', testContactsOnly: true },
   { method: 'POST', path: '/tick', summary: 'Run the runner tick now (trigger scan, sweeps, outbox, webhook backlog).' },
   { method: 'GET', path: '/webhooks/status', summary: 'Provider webhook ingest: last event received, counts by type (24h), unprocessed backlog.' },

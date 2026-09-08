@@ -407,7 +407,9 @@ describe('flows: gate / ungate', () => {
     const blocked = await call('POST', '/flows/onboard/simulate', { contactId: 't1' })
     expect(blocked.body.path[0]).toMatchObject({ stepIndex: 0, type: 'condition', outcome: 'exited' })
     expect(blocked.body.sends).toHaveLength(0)
-    H.memoryAdapter!.upsert({ externalId: 't1', email: 'qa+one@test.example', tags: ['Created', 'Canary'], fields: { firstName: 'Quinn' } })
+    const tagged = await call('POST', '/contacts/t1/tags', { add: ['Canary'] })
+    expect(tagged.status).toBe(200)
+    expect(tagged.body.tags).toContain('Canary')
     const allowed = await call('POST', '/flows/onboard/simulate', { contactId: 't1' })
     expect(allowed.body.sends).toHaveLength(1)
 
@@ -449,6 +451,30 @@ describe('contacts', () => {
     expect(off.body.subscription.status).toBe('unsubscribed')
     const on = await call('POST', '/contacts/t2/subscribe')
     expect(on.body.subscription.status).toBe('subscribed')
+  })
+
+  it('tags and untags a test contact, and refuses everything else', async () => {
+    const added = await call('POST', '/contacts/t2/tags', { add: ['Canary', 'Beta'] })
+    expect(added.status).toBe(200)
+    expect(added.body.added).toEqual(['Canary', 'Beta'])
+    expect(added.body.tags).toEqual(expect.arrayContaining(['Canary', 'Beta']))
+    expect((await H.mailer.adapter.getById('t2'))!.tags).toEqual(expect.arrayContaining(['Canary', 'Beta']))
+
+    const removed = await call('POST', '/contacts/t2/tags', { add: ['Later'], remove: ['Canary'] })
+    expect(removed.status).toBe(200)
+    const after = (await H.mailer.adapter.getById('t2'))!.tags
+    expect(after).toContain('Later')
+    expect(after).not.toContain('Canary')
+
+    expect((await call('POST', '/contacts/t2/tags', {})).body.error).toBe('no_tags')
+    expect((await call('POST', '/contacts/t2/tags', { add: ['X'], remove: ['X'] })).body.error).toBe('tag_conflict')
+    expect((await call('POST', '/contacts/t2/tags', { add: [''] })).body.error).toBe('validation_failed')
+    expect((await call('POST', '/contacts/r1/tags', { add: ['Canary'] })).status).toBe(403)
+    expect((await call('POST', '/contacts/nobody/tags', { add: ['Canary'] })).status).toBe(404)
+    expect((await call('POST', '/contacts/t2/tags', { add: ['Canary'] }, null)).status).toBe(401)
+
+    const log = await H.mailer.collections.auditLog.findOne({ action: 'agent.contact.tags', 'resource.id': 't2' })
+    expect(log?.actor).toBe('agent:test')
   })
 
   it('resets a test contact so a once-only flow can run again', async () => {

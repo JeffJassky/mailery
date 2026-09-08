@@ -262,6 +262,20 @@ A signed one-click unsubscribe URL for the contact, so a check can `POST` it to 
 
 `→ { subscription }`. Unsubscribe uses the marketing scope, reason `user_request`, source `agent`.
 
+### `POST /contacts/:externalId/tags` — test contacts only
+
+Add or remove tags on a test contact.
+
+```ts
+body: { add?: string[]; remove?: string[] }
+→ { contact, added, removed, tags }
+→ 400 no_tags · 400 tag_conflict · 400 validation_failed
+```
+
+Writes through the host's `ContactAdapter` when it exposes `addTags`/`removeTags` (so the tag lands on the record the app itself reads), and falls back to mailery's own `contactTags` collection when it does not — the same path `mailer.tag()` takes for a flow's tag step.
+
+This is the other half of `POST /flows/:slug/gate`: the canary's first step exits every contact without the tag, and the tag lives on the contact record, so without this route a gated flow has nobody to let through and the only way to arrange one is the production database credential the agent API exists to avoid.
+
 ### `POST /contacts/:externalId/reset` — test contacts only
 
 Put a test contact back to "never seen".
@@ -324,6 +338,7 @@ curl -s -X POST "$A/flows/activation/simulate" -H "$T" -H 'content-type: applica
 
 # 4. canary in production: gate on a tag, arm for future events, fire, step, ungate
 curl -s -X POST "$A/flows/activation/gate" -H "$T" -H 'content-type: application/json' -d '{"tag":"Mailery Canary"}'
+curl -s -X POST "$A/contacts/u_qa1/tags" -H "$T" -H 'content-type: application/json' -d '{"add":["Mailery Canary"]}'
 curl -s -X POST "$A/flows/activation/arm"  -H "$T" -H 'content-type: application/json' -d '{"confirm":true}'
 curl -s -X POST "$A/events" -H "$T" -H 'content-type: application/json' -d '{"name":"Created","externalId":"u_qa1"}'
 curl -s -X POST "$A/tick" -H "$T"
@@ -332,5 +347,6 @@ curl -s -X POST "$A/runs/$RUN/advance" -H "$T" -H 'content-type: application/jso
 curl -s -X POST "$A/flows/activation/ungate" -H "$T"
 
 # 5. leave the test contact as you found it
+curl -s -X POST "$A/contacts/u_qa1/tags" -H "$T" -H 'content-type: application/json' -d '{"remove":["Mailery Canary"]}'
 curl -s -X POST "$A/contacts/u_qa1/reset" -H "$T"
 ```
