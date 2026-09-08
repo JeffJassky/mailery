@@ -512,3 +512,105 @@ describe('sends: webhook events behind a send', () => {
     expect(wait.body.webhookEvents.map((e: any) => e.providerEventId).sort()).toEqual(['exact', 'suffix'])
   })
 })
+
+describe('PUT /templates/:slug — publish a compiled template over HTTP', () => {
+  const BODY_HTML =
+    '<p>Hello there. This paragraph is long enough to count as real body copy for the linter, which wants more than a stub.</p>' +
+    '<a href="https://example.com/start">Start</a> <a href="{{unsubscribeUrl}}">Unsubscribe</a><p>{{senderAddress}}</p>'
+  const doc = {
+    name: 'Program · Day 0',
+    description: 'T + 30 min',
+    kind: 'marketing',
+    fromName: 'Quinn',
+    fromEmail: 'hello@example.com',
+    subject: 'Published over HTTP',
+    preheader: 'A preheader sentence',
+    body: { mjml: '', editorJson: null, html: BODY_HTML, plainText: '' },
+    tags: ['program', 'activation'],
+  }
+
+  it('creates the document, derives the plain text, then updates in place keeping createdAt and stats', async () => {
+    const a = await call('PUT', '/templates/http-published', doc)
+    expect(a.status).toBe(201)
+    expect(a.body.created).toBe(true)
+    expect(a.body.template.publishedBy).toBe('agent:test')
+    const stored = await H.mailer.collections.templates.findOne({ slug: 'http-published' })
+    expect(stored?.body.html).toBe(BODY_HTML)
+    expect(stored?.body.plainText).toMatch(/Hello there/)
+    expect(stored?.draft).toBeNull()
+    expect(stored?.trackOpens).toBe(true)
+    expect(stored?.trackClicks).toBe(true)
+    expect(stored?.stats.sent).toBe(0)
+    expect(stored?.tags).toEqual(['program', 'activation'])
+    const createdAt = stored!.createdAt
+
+    // The runner owns the counters; a redeploy must not reset them.
+    await H.mailer.collections.templates.updateOne({ slug: 'http-published' }, { $set: { 'stats.sent': 7 } })
+    const b = await call('PUT', '/templates/http-published', { ...doc, subject: 'Published again', trackClicks: false })
+    expect(b.status).toBe(200)
+    expect(b.body.created).toBe(false)
+    const again = await H.mailer.collections.templates.findOne({ slug: 'http-published' })
+    expect(again?.subject).toBe('Published again')
+    expect(again?.trackClicks).toBe(false)
+    expect(again?.createdAt.getTime()).toBe(createdAt.getTime())
+    expect(again?.stats.sent).toBe(7)
+    expect(again?.publishedAt?.getTime() ?? 0).toBeGreaterThanOrEqual(stored!.publishedAt?.getTime() ?? 0)
+
+    const audit = await H.mailer.collections.auditLog.findOne({ action: 'agent.template.publish', 'resource.slug': 'http-published' })
+    expect(audit?.actor).toBe('agent:test')
+  })
+
+  it('runs the publish gates: lint, sender domain, payload shape, empty body, slug', async () => {
+    const noUnsub = await call('PUT', '/templates/http-nolint', {
+      ...doc,
+      body: { html: '<p>Hello there, a long enough paragraph of real body copy with no unsubscribe link anywhere in it.</p>' },
+    })
+    expect(noUnsub.status).toBe(422)
+    expect(noUnsub.body.error).toBe('lint_failed')
+    expect(JSON.stringify(noUnsub.body.lint.errors)).toMatch(/unsubscribeUrl/)
+    expect(await H.mailer.collections.templates.findOne({ slug: 'http-nolint' })).toBeNull()
+
+    const badFrom = await call('PUT', '/templates/http-badfrom', { ...doc, fromEmail: 'x@other.example' })
+    expect(badFrom.status).toBe(400)
+    expect(badFrom.body.error).toBe('sender_domain_invalid')
+
+    const badShape = await call('PUT', '/templates/http-badshape', { ...doc, kind: 'newsletter' })
+    expect(badShape.status).toBe(400)
+    expect(badShape.body.error).toBe('validation_failed')
+    expect(badShape.body.message).toMatch(/kind/)
+
+    const empty = await call('PUT', '/templates/http-empty', { ...doc, body: { html: '' } })
+    expect(empty.status).toBe(400)
+    expect(empty.body.error).toBe('empty_body')
+
+    const badSlug = await call('PUT', '/templates/Not%20A%20Slug', doc)
+    expect(badSlug.status).toBe(400)
+    expect(badSlug.body.error).toBe('validation_failed')
+
+    expect((await call('PUT', '/templates/http-noauth', doc, null)).status).toBe(401)
+  })
+
+  it('a transactional template publishes with tracking off and sends through the pipeline', async () => {
+    const res = await call('PUT', '/templates/http-receipt', {
+      ...doc,
+      kind: 'transactional',
+      subject: 'Your trial ends soon',
+      body: {
+        html: '<p>Hello there. Your trial ends on {{vars.trialEndDate}}, and this sentence pads the body out to real copy length.</p><p>{{senderAddress}}</p>',
+      },
+      trackOpens: false,
+      trackClicks: false,
+    })
+    expect(res.status).toBe(201)
+    const stored = await H.mailer.collections.templates.findOne({ slug: 'http-receipt' })
+    expect(stored?.kind).toBe('transactional')
+    expect(stored?.trackOpens).toBe(false)
+    expect(stored?.trackClicks).toBe(false)
+
+    const send = await call('POST', '/templates/http-receipt/send', { contactId: 't1', vars: { trialEndDate: 'Thursday, September 10' } })
+    expect(send.status).toBe(201)
+    const sent = await H.mailer.collections.sends.findOne({ _id: new ObjectId(send.body.sendId) })
+    expect(sent?.kind).toBe('transactional')
+    expect(sent?.status).not.toBe('failed')
+  })
+})

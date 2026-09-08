@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.16.5 — Publish compiled templates over the agent API
+
+### Added
+
+- **`PUT /templates/:slug` on the agent router.** Publishes a compiled
+  template document (HTML, plain text, kind, sender, subject, tracking
+  flags) directly, with the sender-domain and lint gates the admin publish
+  route runs, upserting on slug. The admin route compiles a draft, so a
+  program authored as hand-built HTML had no HTTP path and its deploy script
+  had to write to `mailer_templates` with the database credential — the one
+  credential an agent or a CI job should not hold. `createdAt` and `stats`
+  survive a redeploy; `plainText` is derived when omitted; the write is
+  recorded in the audit log as `agent.template.publish`.
+
 ## 0.16.4 — Click redirects under Express 4
 
 (0.16.3 was tagged with a failing test and never published; this is the same fix.)

@@ -35,15 +35,17 @@
 import crypto from 'node:crypto'
 import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { ObjectId } from 'mongodb'
+import { z } from 'zod'
 
 import type { Mailer } from '../mailer.js'
 import type { Contact } from '../../shared/types.js'
+import { slugSchema } from '../../shared/schemas.js'
 import type { FlowRunDoc, SendDoc, TemplateDoc } from '../models/index.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 import { createAdminApiRouter, type AdminRouterOptions } from './admin.js'
 import { runSetupChecks } from './setup-status.js'
 import { consoleRouteLogger, type RouteLogger } from './wrap.js'
-import { renderTemplate, type RenderedTemplate } from '../templates/render.js'
+import { derivePlaintext, renderTemplate, type RenderedTemplate } from '../templates/render.js'
 import { lintTemplate } from '../templates/linter.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
@@ -65,6 +67,36 @@ import { simulateFlow } from '../runner/simulate.js'
 
 declare const __PKG_VERSION__: string | undefined
 const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
+
+/**
+ * Body of `PUT /templates/:slug`: the published fields of a `TemplateDoc`,
+ * minus what the server owns (timestamps, stats, draft). Defaults mirror what
+ * the admin publish route writes for a template created in the SPA.
+ */
+const publishTemplateInputSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).default(''),
+  kind: z.enum(['marketing', 'transactional']),
+  fromName: z.string().min(1).max(200),
+  fromEmail: z.string().email(),
+  replyTo: z.string().email().nullable().default(null),
+  providerOverride: z.string().min(1).nullable().default(null),
+  subject: z.string().min(1).max(998),
+  preheader: z.string().max(998).default(''),
+  body: z.object({
+    mjml: z.string().default(''),
+    editorJson: z.record(z.string(), z.unknown()).nullable().default(null),
+    html: z.string().default(''),
+    plainText: z.string().default(''),
+  }),
+  variablesSchema: z.record(z.string(), z.unknown()).default({}),
+  tags: z.array(z.string().min(1).max(100)).max(50).default([]),
+  bodyFormat: z.enum(['multipart', 'text_only']).default('multipart'),
+  trackOpens: z.boolean().default(true),
+  trackClicks: z.boolean().default(true),
+  /** Recorded as the publisher; defaults to the token's actor. */
+  publishedBy: z.string().min(1).max(200).optional(),
+})
 
 export interface AgentToken {
   /** The bearer token. At least 24 characters; generate it, never type it. */
@@ -308,6 +340,136 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
         diffSummary: `to=${contact.email} dispatch=${dispatchNow ? 'now' : 'queue'} dedupeKey=${dedupeKey}`,
       })
       res.status(201).json({ sendId, dedupeKey, dispatched: dispatchNow, send: send ? sendSummary(send) : null })
+    }),
+  )
+
+  /**
+   * Publish a compiled template document — the deploy-script path over HTTP.
+   *
+   * `POST /api/templates/:slug/publish` compiles a draft (MJML or editor
+   * JSON). A program authored as hand-built HTML has no draft to compile, so
+   * until now its only way into `mailer_templates` was a direct database
+   * write with the production credential — exactly the credential an agent or
+   * a CI job should not hold. This takes the published fields as JSON, runs
+   * the sender-domain and lint gates the publish route runs, and upserts on
+   * slug. `createdAt` and `stats` are the document's history and are written
+   * only on insert: send counters belong to the runner and survive a redeploy.
+   *
+   * Not gated by `testContacts`: a template is inert until a flow references
+   * its slug, so publishing one touches no real person.
+   */
+  router.put(
+    '/templates/:slug',
+    wrap(async (req, res) => {
+      const slugParse = slugSchema.safeParse(String(req.params.slug))
+      if (!slugParse.success) {
+        return res.status(400).json({ error: 'validation_failed', message: 'slug must be lowercase letters, digits and hyphens' })
+      }
+      const slug = slugParse.data
+      const parsed = publishTemplateInputSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: 'validation_failed',
+          message: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '),
+        })
+      }
+      const input = parsed.data
+      if (!input.body.html.trim()) {
+        return res.status(400).json({
+          error: 'empty_body',
+          message: 'body.html is required — this route publishes compiled HTML; a draft goes through POST /api/templates/:slug/publish',
+        })
+      }
+      const senderCheck = validateSenderDomain(input.fromEmail, input.kind, mailer.config.senderDomains)
+      if (!senderCheck.ok) {
+        return res.status(400).json({ error: 'sender_domain_invalid', code: senderCheck.code, message: senderCheck.reason })
+      }
+      const plainText = input.body.plainText.trim() ? input.body.plainText : derivePlaintext(input.body.html)
+      const lint = lintTemplate(
+        {
+          subject: input.subject,
+          preheader: input.preheader,
+          mjml: input.body.mjml,
+          editorJson: input.body.editorJson ?? undefined,
+          html: input.body.html,
+          plainText,
+          kind: input.kind,
+          fromEmail: input.fromEmail,
+        },
+        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
+      )
+      if (lint.errors.length > 0) {
+        return res.status(422).json({
+          error: 'lint_failed',
+          message: `Template publish blocked by ${lint.errors.length} content issue(s).`,
+          lint,
+        })
+      }
+
+      const now = new Date()
+      const publishedBy = input.publishedBy ?? actorOf(req)
+      const set = {
+        slug,
+        name: input.name,
+        description: input.description,
+        kind: input.kind,
+        fromName: input.fromName,
+        fromEmail: input.fromEmail,
+        replyTo: input.replyTo,
+        providerOverride: input.providerOverride,
+        subject: input.subject,
+        preheader: input.preheader,
+        body: {
+          mjml: input.body.mjml,
+          editorJson: input.body.editorJson,
+          html: input.body.html,
+          plainText,
+          compiledAt: now,
+        },
+        variablesSchema: input.variablesSchema as TemplateDoc['variablesSchema'],
+        draft: null,
+        tags: input.tags,
+        bodyFormat: input.bodyFormat,
+        trackOpens: input.trackOpens,
+        trackClicks: input.trackClicks,
+        publishedAt: now,
+        publishedBy,
+        updatedAt: now,
+      }
+      const result = await c.templates.updateOne(
+        { slug },
+        {
+          $set: set,
+          $setOnInsert: {
+            createdAt: now,
+            stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
+          },
+        },
+        { upsert: true },
+      )
+      const created = result.upsertedCount > 0
+      const stored = await c.templates.findOne({ slug })
+      await mailer.audit({
+        actor: actorOf(req),
+        action: 'agent.template.publish',
+        resource: { collection: 'mailer_templates', id: stored?._id, slug },
+        diffSummary: `${created ? 'created' : 'updated'} kind=${input.kind} html=${Buffer.byteLength(input.body.html, 'utf8')}B trackOpens=${input.trackOpens} trackClicks=${input.trackClicks}`,
+      })
+      res.status(created ? 201 : 200).json({
+        slug,
+        created,
+        lint: { warnings: lint.warnings, infos: lint.infos },
+        template: {
+          slug,
+          kind: input.kind,
+          subject: input.subject,
+          fromEmail: input.fromEmail,
+          trackOpens: input.trackOpens,
+          trackClicks: input.trackClicks,
+          publishedAt: now,
+          publishedBy,
+        },
+      })
     }),
   )
 
@@ -1253,6 +1415,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'POST', path: '/templates/verify-all', summary: 'Verify every template (or {slugs}) for each of {contactIds}; a matrix of pass/fail.' },
   { method: 'POST', path: '/templates/:slug/render', summary: 'Render for a contact and return subject, preheader, HTML, plain text, resolved vars and the signed unsubscribe URL.' },
   { method: 'POST', path: '/templates/:slug/send', summary: 'A real send through the pipeline to a test contact ({contactId}); dispatched inline unless {dispatch: "queue"}. Returns the sendId.', testContactsOnly: true },
+  { method: 'PUT', path: '/templates/:slug', summary: 'Publish a compiled template document (html, plain text, kind, sender, subject, tracking flags) with the sender-domain and lint gates; upserts on slug, keeping createdAt and stats. The deploy-script path over HTTP.' },
   { method: 'GET', path: '/sends/:id/wait?status=delivered&timeoutMs=30000', summary: 'Long-poll a send until it reaches sent | delivered | opened | clicked | terminal, with its webhook events.' },
   { method: 'POST', path: '/sends/:id/dispatch', summary: 'Dispatch a queued send now (test contacts only).', testContactsOnly: true },
   { method: 'POST', path: '/flows/:slug/simulate', summary: 'Dry-run the flow for {contactId} from {at} with {eventProperties}: the path taken, every gate verdict, projected send times, where it ends. Writes nothing.' },

@@ -121,6 +121,25 @@ body: { contactId: string; vars?: object; dedupeKey?: string; dispatch?: 'now' |
 
 This is how an automated check proves delivery end to end: send, then wait.
 
+### `PUT /templates/:slug`
+
+Publish a compiled template document directly — the deploy-script path over HTTP.
+
+```ts
+body: {
+  name: string; description?: string; kind: 'marketing' | 'transactional';
+  fromName: string; fromEmail: string; replyTo?: string | null; providerOverride?: string | null;
+  subject: string; preheader?: string;
+  body: { html: string; plainText?: string; mjml?: string; editorJson?: object | null };
+  variablesSchema?: object; tags?: string[]; bodyFormat?: 'multipart' | 'text_only';
+  trackOpens?: boolean; trackClicks?: boolean; publishedBy?: string
+}
+→ 201 { slug, created: true, lint: { warnings, infos }, template }   // inserted
+→ 200 { slug, created: false, … }                                     // updated in place
+```
+
+`POST /api/templates/:slug/publish` compiles a draft. A program authored as hand-built HTML has no draft, so until 0.16.5 its only way into `mailer_templates` was a direct database write with the production credential — the one credential an agent or a CI job should not hold. This route takes the published fields as JSON, runs the same sender-domain (`400 sender_domain_invalid`) and lint (`422 lint_failed`, with the `lint` report) gates publish runs, and upserts on slug. `plainText` is derived from the HTML when omitted. `createdAt` and `stats` are written only on insert, so a redeploy never resets send counters. `publishedBy` defaults to the token's actor. Not gated by `testContacts`: a template is inert until a flow references its slug.
+
 ## Sends
 
 ### `GET /sends/:id/wait?status=delivered&timeoutMs=30000`
