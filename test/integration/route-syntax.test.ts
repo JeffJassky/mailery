@@ -34,7 +34,9 @@ function routePaths(router: Router, prefix = ''): string[] {
   for (const layer of (router as any).stack ?? []) {
     if (layer.route) {
       const paths = Array.isArray(layer.route.path) ? layer.route.path : [layer.route.path]
-      for (const p of paths) out.push(prefix + String(p))
+      // A RegExp path is handed to both majors verbatim, so it is portable by
+      // construction; only string patterns are parsed differently.
+      for (const p of paths) if (!(p instanceof RegExp)) out.push(prefix + String(p))
     } else if (layer.handle?.stack) {
       out.push(...routePaths(layer.handle, `${prefix}<mount>`))
     }

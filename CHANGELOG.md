@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.16.3 — Click redirects under Express 4
+## 0.16.4 — Click redirects under Express 4
+
+(0.16.3 was tagged with a failing test and never published; this is the same fix.)
 
 ### Fixed
 
