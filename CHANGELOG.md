@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.8 — The events registry says how often each event really fires
+
+### Added
+
+- **`GET /api/events` returns `stats`** — per event name: `total`, `last7d`, `last30d`, `firstAt`, `lastAt`, for registered and unregistered names alike. Before, the registry could only say an event was declared and that its name had been seen at some point; whether the host still fires it — whether a flow's trigger is reachable in production this month — needed a database session. One aggregate, no per-contact data.
+
 ## 0.16.7 — Opting back in clears the opt-out; two linter false positives
 
 ### Added

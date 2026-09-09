@@ -39,12 +39,19 @@ Aggregated KPIs + recent activity.
 ## Events registry
 
 ### `GET /api/events`
-The full event registry — declared events with their dedupe policies, plus a sample of event names actually seen in the `mailer_events` collection.
+The full event registry — declared events with their dedupe policies, the event names seen in `mailer_events` that nobody registered, and per-name volume so a registered trigger can be checked against what the host really fires. A name in `registered` with no `stats` entry (or none in `last30d`) is a trigger nobody is reaching.
 
 ```ts
 → {
   registered: { name: string; dedupePolicy: 'once-per-contact' | 'once-per-day' | 'every-time' }[]
-  seen: string[]
+  seen: string[]                       // names in mailer_events that are not registered
+  stats: Record<string, {              // keyed by event name, registered or not
+    total: number                      // rows ever
+    last7d: number
+    last30d: number
+    firstAt: string                    // ISO
+    lastAt: string
+  }>
 }
 ```
 

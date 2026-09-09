@@ -46,7 +46,11 @@ export const api = {
 
   // Events registry
   events: () =>
-    json<{ registered: { name: string; dedupePolicy: string }[]; seen: string[] }>('/events'),
+    json<{
+      registered: { name: string; dedupePolicy: string }[]
+      seen: string[]
+      stats: Record<string, { total: number; last7d: number; last30d: number; firstAt: string; lastAt: string }>
+    }>('/events'),
 
   // Flows
   flows: () => json<any[]>('/flows'),

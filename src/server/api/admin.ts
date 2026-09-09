@@ -283,6 +283,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
   )
 
   // ----- Events registry ----------------------------------------------------
+  type EventStats = { total: number; last7d: number; last30d: number; firstAt: Date; lastAt: Date }
   r.get(
     '/events',
     asyncHandler(async (_req, res) => {
@@ -290,9 +291,35 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const seenNames = await c.events.distinct('name')
       const known = new Set(registered.map((r) => r.name))
       const unregistered = (seenNames as string[]).filter((n) => n && !known.has(n))
+      // Volume and recency per name, so a registry entry can be checked
+      // against what the host actually fires: a trigger that is wired in
+      // code but has no row in the last month is a flow nobody will enter.
+      const now = Date.now()
+      const d7 = new Date(now - 7 * 86_400_000)
+      const d30 = new Date(now - 30 * 86_400_000)
+      const rows = await c.events
+        .aggregate<{ _id: string; total: number; last7d: number; last30d: number; lastAt: Date; firstAt: Date }>([
+          {
+            $group: {
+              _id: '$name',
+              total: { $sum: 1 },
+              last7d: { $sum: { $cond: [{ $gte: ['$createdAt', d7] }, 1, 0] } },
+              last30d: { $sum: { $cond: [{ $gte: ['$createdAt', d30] }, 1, 0] } },
+              lastAt: { $max: '$createdAt' },
+              firstAt: { $min: '$createdAt' },
+            },
+          },
+        ])
+        .toArray()
+      const stats: Record<string, EventStats> = {}
+      for (const r of rows) {
+        if (!r._id) continue
+        stats[r._id] = { total: r.total, last7d: r.last7d, last30d: r.last30d, firstAt: r.firstAt, lastAt: r.lastAt }
+      }
       res.json({
         registered: registered.sort((a, b) => a.name.localeCompare(b.name)),
         seen: unregistered.sort(),
+        stats,
       })
     }),
   )
