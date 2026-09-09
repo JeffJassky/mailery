@@ -218,6 +218,14 @@ export interface MailerConfig {
    * Domains are case-insensitive. If unset, no enforcement happens.
    */
   senderDomains?: SenderDomainRegistry
+  /**
+   * Hosts the linter treats as your own for the `offdomain_links` warning,
+   * on top of the From domain and `publicUrl`'s host. Set it when the product
+   * lives on a different domain than the sending identity (`app.example.com`
+   * mailed from `hello@example-mail.com`), so a body that links to the
+   * product is not reported as pointing away from the sender.
+   */
+  linkDomains?: string[]
 
   // ---- Compliance -----------------------------------------------------------
   requireDoubleOptIn?: boolean

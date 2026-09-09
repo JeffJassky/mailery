@@ -68,6 +68,16 @@ What this guarantees:
 
 The check also runs at template create + draft update, so the admin UI surfaces the error immediately. If you leave `senderDomains` unset (the default), no enforcement happens — back-compatible.
 
+### `linkDomains`
+
+The linter's `offdomain_links` warning fires when most of a body's links point away from the From domain. The From domain, `publicUrl`'s host and every entry in `linkDomains` count as your own. Set `linkDomains` when the product lives somewhere other than the sending identity:
+
+```ts
+fromDefaults: { name: 'Jo', email: 'jo@example-mail.com' },
+publicUrl: 'https://app.example.com',
+linkDomains: ['example.com'],
+```
+
 Verify each declared domain separately with your email provider (SendGrid / Postmark / SES) so each gets its own DKIM signature and reputation. mailery doesn't manage the DNS side; it just enforces that you actually use the domains you set up.
 
 ## Worker behavior

@@ -93,6 +93,23 @@ upsertSubscription(input: {
 
 Creates / updates the `mailer_subscriptions` row for a contact. If `requireDoubleOptIn: true` in config, the new row is `status: 'pending_doi'`.
 
+### `resubscribe(input)`
+
+```ts
+resubscribe(input: {
+  externalId: string
+  source: string
+  scope?: 'marketing' | 'all'   // default 'marketing'
+  consentTimestamp?: Date
+  consentIp?: string
+  consentUserAgent?: string
+}): Promise<{ removedSuppressions: number }>
+```
+
+An explicit opt-in from a contact who unsubscribed before. Deletes the `reason: 'unsubscribed'` suppression rows for the contact's address (`marketing` clears the `marketing` and `all` scopes; `all` clears every scope), then calls `upsertSubscription`. Bounce, complaint, manual, list-cleaning and GDPR rows are left alone — a re-subscribed address that hard-bounced still gets nothing. Audit-logged as `contact.resubscribe` when it removed something.
+
+Use this, not `upsertSubscription`, wherever a person clicks "subscribe" again: `upsertSubscription` flips the status but the suppression check runs at enqueue time regardless, so on its own it produces a contact that reads *subscribed* while every send comes back `suppressed`. It is a separate method on purpose — a backfill that re-upserts every account must not resurrect addresses that opted out.
+
 ### `unsubscribe(email, opts)`
 
 ```ts

@@ -1451,7 +1451,12 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       const lint = lintTemplate(
         { subject, preheader, mjml, editorJson, html, plainText, kind, fromEmail },
-        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
+        {
+          senderDomains: mailer.config.senderDomains,
+          varsJsonSchema: varsSchema,
+          publicUrl: mailer.config.publicUrl,
+          linkDomains: mailer.config.linkDomains,
+        },
       )
       res.json({ ...lint, compileFailed: false })
     }),
@@ -1511,7 +1516,12 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           kind: tpl.kind,
           fromEmail: tpl.fromEmail,
         },
-        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
+        {
+          senderDomains: mailer.config.senderDomains,
+          varsJsonSchema: varsSchema,
+          publicUrl: mailer.config.publicUrl,
+          linkDomains: mailer.config.linkDomains,
+        },
       )
 
       if (lint.errors.length > 0) {

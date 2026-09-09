@@ -68,6 +68,22 @@ export const unsubscribeInputSchema = z.object({
 })
 export type UnsubscribeInput = z.infer<typeof unsubscribeInputSchema>
 
+/**
+ * An explicit opt-in from someone who previously unsubscribed. Clears only the
+ * suppression an unsubscribe wrote (`reason: 'unsubscribed'`) — a bounce or
+ * complaint row is deliverability, not preference, and survives.
+ */
+export const resubscribeInputSchema = z.object({
+  externalId: externalIdSchema,
+  /** `marketing` clears marketing + all-scope opt-outs; `all` clears every scope. */
+  scope: z.enum(['marketing', 'all']).default('marketing'),
+  source: z.string().min(1).max(256),
+  consentTimestamp: z.date().optional(),
+  consentIp: z.string().optional(),
+  consentUserAgent: z.string().optional(),
+})
+export type ResubscribeInput = z.input<typeof resubscribeInputSchema>
+
 export const suppressInputSchema = z.object({
   email: emailSchema,
   scope: unsubscribeScopeSchema,

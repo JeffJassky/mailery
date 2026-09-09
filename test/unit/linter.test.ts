@@ -225,6 +225,27 @@ describe('lintTemplate — no false positives', () => {
     expect(r.warnings.some((w) => w.rule === 'bare_url')).toBe(false)
   })
 
+  it('a URL inside an attribute value (img src) does not trigger bare_url', () => {
+    const r = lintTemplate(
+      baseInput({
+        html: '<html><body><p>Hi there, a real paragraph of copy.</p><img src="https://cdn.example.com/photo.jpg" alt="photo"><a href="{{unsubscribeUrl}}">u</a></body></html>',
+      }),
+    )
+    expect(r.warnings.some((w) => w.rule === 'bare_url')).toBe(false)
+  })
+
+  it('links to publicUrl or a configured linkDomain count as on-domain for offdomain_links', () => {
+    const html =
+      '<html><body><a href="https://app.product.io/a">a</a><a href="https://product.io/b">b</a><a href="https://help.product.io/c">c</a><a href="{{unsubscribeUrl}}">u</a></body></html>'
+    expect(lintTemplate(baseInput({ html })).warnings.some((w) => w.rule === 'offdomain_links')).toBe(true)
+    expect(
+      lintTemplate(baseInput({ html }), { publicUrl: 'https://product.io' }).warnings.some((w) => w.rule === 'offdomain_links'),
+    ).toBe(false)
+    expect(
+      lintTemplate(baseInput({ html }), { linkDomains: ['product.io'] }).warnings.some((w) => w.rule === 'offdomain_links'),
+    ).toBe(false)
+  })
+
   it('exactly 10 links does not trigger too_many_links', () => {
     const links = Array.from({ length: 10 }, (_, i) => `<a href="https://example.com/${i}">link</a>`).join('')
     const r = lintTemplate(

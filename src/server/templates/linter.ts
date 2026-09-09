@@ -51,6 +51,19 @@ export interface LintInput {
 export interface LintConfig {
   senderDomains?: SenderDomainRegistry
   /**
+   * The deployment's public URL. Its host counts as the sender's own site for
+   * the `offdomain_links` rule: click tracking rewrites every link through it
+   * anyway, so a body full of links to the host's own product is not the
+   * "links point somewhere else" signal the rule exists to catch.
+   */
+  publicUrl?: string
+  /**
+   * Extra hosts that count as the sender's own site for `offdomain_links`
+   * (`MaileryConfig.linkDomains`) — the product's domain when it differs
+   * from the From domain.
+   */
+  linkDomains?: string[]
+  /**
    * JSON Schema of the host's varsAdapter (see `varsJsonSchema`). When set,
    * `{{paths}}` in subject/preheader/MJML/editorJson that don't exist in the
    * schema (or the built-in keys) are flagged as `unknown_variable` warnings.
@@ -216,7 +229,7 @@ export function lintTemplate(rawInput: LintInput, config: LintConfig = {}): Lint
   // Mailbox providers weigh whether link domains line up with the From
   // domain. A stray off-domain link is normal (docs, social); a body whose
   // links mostly point elsewhere reads like a forwarded/spoofed template.
-  const offDomain = findOffDomainLinkHosts(input.html, input.fromEmail)
+  const offDomain = findOffDomainLinkHosts(input.html, input.fromEmail, ownHosts(config))
   if (offDomain.majority && offDomain.hosts.length > 0) {
     issues.push({
       rule: 'offdomain_links',
@@ -328,8 +341,10 @@ function hostnameOf(url: string): string | null {
 
 /**
  * Heuristic: strip anchor tags (and their contents), plus `<style>`,
- * `<script>`, and `<head>` blocks before looking for a bare URL. Otherwise
- * URLs in CSS (`@import url(...)`) or scripts trigger a false positive.
+ * `<script>`, and `<head>` blocks, then every remaining tag, before looking
+ * for a bare URL. The rule is about URLs the recipient can *see*: a URL in
+ * CSS, a script, or an attribute value (`<img src="https://…">`) is not one,
+ * and used to fire this warning on every template with a hosted image.
  */
 function hasBareUrlInVisibleText(html: string): boolean {
   const stripped = html
@@ -337,7 +352,20 @@ function hasBareUrlInVisibleText(html: string): boolean {
     .replace(/<style\b[^>]*>.*?<\/style>/gis, ' ')
     .replace(/<script\b[^>]*>.*?<\/script>/gis, ' ')
     .replace(/<head\b[^>]*>.*?<\/head>/gis, ' ')
+    .replace(/<[^>]*>/g, ' ')
   return /https?:\/\/[^\s<>"']+/i.test(stripped)
+}
+
+/** Hosts that count as the sender's own site besides the From domain. */
+function ownHosts(config: LintConfig): string[] {
+  const hosts: string[] = []
+  const publicHost = config.publicUrl ? hostnameOf(config.publicUrl) : null
+  if (publicHost) hosts.push(publicHost)
+  for (const d of config.linkDomains ?? []) {
+    const host = hostnameOf(/^https?:\/\//i.test(d) ? d : `https://${d}`)
+    if (host) hosts.push(host)
+  }
+  return hosts
 }
 
 /**
@@ -346,9 +374,14 @@ function hasBareUrlInVisibleText(html: string): boolean {
  * (`{{unsubscribeUrl}}`), mailto:/tel:, anchors, and relative URLs are
  * ignored — none of them carry a domain to compare.
  */
-function findOffDomainLinkHosts(html: string, fromEmail: string): { hosts: string[]; majority: boolean } {
+function findOffDomainLinkHosts(
+  html: string,
+  fromEmail: string,
+  extraOwnHosts: string[] = [],
+): { hosts: string[]; majority: boolean } {
   const fromDomain = fromEmail.split('@')[1]?.toLowerCase()
   if (!fromDomain) return { hosts: [], majority: false }
+  const own = [fromDomain, ...extraOwnHosts.map((h) => h.toLowerCase())]
 
   const hosts = new Set<string>()
   let total = 0
@@ -358,7 +391,7 @@ function findOffDomainLinkHosts(html: string, fromEmail: string): { hosts: strin
     const host = hostnameOf(href)
     if (!host) continue
     total++
-    if (sameSite(host, fromDomain)) continue
+    if (own.some((o) => sameSite(host, o))) continue
     off++
     hosts.add(host)
   }

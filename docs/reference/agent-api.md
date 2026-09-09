@@ -260,7 +260,7 @@ A signed one-click unsubscribe URL for the contact, so a check can `POST` it to 
 
 ### `POST /contacts/:externalId/subscribe` · `POST /contacts/:externalId/unsubscribe` — test contacts only
 
-`→ { subscription }`. Unsubscribe uses the marketing scope, reason `user_request`, source `agent`.
+`→ { subscription, removedSuppressions }` for subscribe, `→ { subscription }` for unsubscribe. Unsubscribe uses the marketing scope, reason `user_request`, source `agent`. Subscribe is an explicit opt-in (`mailer.resubscribe`): it also deletes the `reason: 'unsubscribed'` suppression rows the unsubscribe left, so a canary that unsubscribes and then subscribes a test contact gets mail again — bounce and complaint rows stay.
 
 ### `POST /contacts/:externalId/tags` — test contacts only
 

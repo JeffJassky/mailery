@@ -453,6 +453,35 @@ describe('contacts', () => {
     expect(on.body.subscription.status).toBe('subscribed')
   })
 
+  it('subscribe clears the opt-out suppression, and only that one', async () => {
+    const email = 'qa+two@test.example'
+    const suppressions = H.mailer.collections.suppressions
+    await call('POST', '/contacts/t2/unsubscribe')
+    expect(await suppressions.countDocuments({ email, reason: 'unsubscribed' })).toBe(1)
+    // A hard bounce on the same address is deliverability, not preference.
+    await H.mailer.suppress(email, { scope: 'all', reason: 'hard_bounce', source: 'test' })
+
+    const on = await call('POST', '/contacts/t2/subscribe')
+    expect(on.status).toBe(200)
+    expect(on.body.subscription.status).toBe('subscribed')
+    expect(on.body.removedSuppressions).toBe(1)
+    expect(await suppressions.countDocuments({ email, reason: 'unsubscribed' })).toBe(0)
+    expect(await suppressions.countDocuments({ email, reason: 'hard_bounce' })).toBe(1)
+
+    const audit = await H.mailer.collections.auditLog.find({ action: 'contact.resubscribe' }).toArray()
+    expect(audit.length).toBeGreaterThanOrEqual(1)
+    expect(audit.at(-1)?.diffSummary).toContain('removed 1 unsubscribed suppression')
+
+    await suppressions.deleteMany({ email })
+    expect((await call('POST', '/contacts/t2/subscribe')).body.removedSuppressions).toBe(0)
+
+    // The implicit path stays implicit: upsertSubscription flips the status
+    // and leaves the opt-out row alone (the reset test below counts on it).
+    await call('POST', '/contacts/t2/unsubscribe')
+    await H.mailer.upsertSubscription({ externalId: 't2', source: 'test' })
+    expect(await suppressions.countDocuments({ email, reason: 'unsubscribed' })).toBe(1)
+  })
+
   it('tags and untags a test contact, and refuses everything else', async () => {
     const added = await call('POST', '/contacts/t2/tags', { add: ['Canary', 'Beta'] })
     expect(added.status).toBe(200)

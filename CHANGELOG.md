@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.16.7 — Opting back in clears the opt-out; two linter false positives
+
+### Added
+
+- **`mailer.resubscribe(input)`** — an explicit opt-in for a contact who unsubscribed before. An unsubscribe writes a `mailer_suppressions` row *and* flips the subscription, but nothing removed the row: `upsertSubscription` set the status back to *subscribed* while the enqueue-time suppression check kept every send `suppressed`, with no error anywhere. `resubscribe` deletes only the `reason: 'unsubscribed'` rows for the address (bounce, complaint, manual, list-cleaning and GDPR rows are not the contact's to reverse), then upserts the subscription through the normal path. Audit-logged as `contact.resubscribe`. Kept separate from `upsertSubscription` on purpose, so a backfill cannot resurrect opted-out addresses.
+- **Agent API: `POST /contacts/:externalId/subscribe`** now goes through `resubscribe` and returns `removedSuppressions`, so an unsubscribe-then-subscribe canary gets mail again.
+- **`linkDomains` config** — extra hosts the linter treats as the sender's own.
+
+### Fixed
+
+- **Linter `bare_url`** fired on every template with a hosted image: it stripped anchors, `<style>`, `<script>` and `<head>` but not other tags, so `<img src="https://…">` counted as a URL in the body text. Attribute values are no longer visible text.
+- **Linter `offdomain_links`** fired on every body whose links go to the product when the product's domain differs from the From domain, which is exactly the setup `senderDomains` exists for. `publicUrl`'s host — where click tracking rewrites every link anyway — and `linkDomains` now count as on-domain.
+
 ## 0.16.6 — Tag a test contact over the agent API
 
 ### Added

@@ -49,6 +49,20 @@ await mailer.unsubscribe('user@example.com', {
 
 Same path as the public `/m/unsub/:token` endpoint. Idempotent — calling repeatedly is safe.
 
+## Opting back in
+
+An unsubscribe writes two things: the subscription status and a suppression row. `upsertSubscription` only reverses the first, and the suppression check runs at enqueue time regardless of status — so a contact who opts back in through `upsertSubscription` reads as subscribed while every send is suppressed. Use `resubscribe` for an explicit opt-in:
+
+```ts
+const { removedSuppressions } = await mailer.resubscribe({
+  externalId: user.id,
+  source: 'preferences:opt-in',
+  consentIp: req.ip,
+})
+```
+
+It deletes only `reason: 'unsubscribed'` rows (a bounce or complaint is not the contact's to reverse) and then upserts the subscription, double opt-in included. Keep it behind a real click: a migration that re-subscribes every account should keep calling `upsertSubscription`, which cannot resurrect an opted-out address.
+
 ## The one-click unsubscribe endpoint
 
 Every marketing email includes both headers:

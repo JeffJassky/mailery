@@ -22,6 +22,8 @@ import {
   suppressInputSchema,
   tagInputSchema,
   unsubscribeInputSchema,
+  resubscribeInputSchema,
+  type ResubscribeInput,
   upsertSubscriptionSchema,
   type FireInput,
   type RegisterEventInput,
@@ -40,7 +42,7 @@ import type { Collections } from './models/index.js'
 import { EventRegistry } from './events.js'
 import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
-import { applyUnsubscribe } from './unsubscribe.js'
+import { applyUnsubscribe, clearUnsubscribeSuppressions } from './unsubscribe.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -391,6 +393,39 @@ export class Mailer {
         console.error('mailery: DOI confirmation send failed', err)
       }
     }
+  }
+
+  /**
+   * An explicit opt-in from a contact who unsubscribed before.
+   *
+   * `upsertSubscription` alone is not enough: an unsubscribe also writes a
+   * `mailer_suppressions` row, and the suppression check runs at enqueue
+   * time regardless of subscription status — so a contact re-subscribed
+   * through `upsertSubscription` reads as subscribed while every send comes
+   * back `suppressed`. This clears the opt-out rows (only those: a bounce or
+   * complaint is not the contact's to reverse), then upserts the subscription
+   * through the normal path, double opt-in included.
+   *
+   * Deliberately a separate method rather than a side effect of
+   * `upsertSubscription`, so a backfill or a model hook that re-upserts every
+   * account cannot silently resurrect addresses that opted out.
+   */
+  async resubscribe(input: ResubscribeInput): Promise<{ removedSuppressions: number }> {
+    const parsed = resubscribeInputSchema.parse(input)
+    const contact = await this.adapter.getById(parsed.externalId)
+    if (!contact) throw new Error(`adapter has no contact for externalId ${parsed.externalId}`)
+    const removedSuppressions = await clearUnsubscribeSuppressions(this.collections, contact.email, parsed.scope)
+    const { scope: _scope, ...subscription } = parsed
+    await this.upsertSubscription(subscription)
+    if (removedSuppressions > 0) {
+      await this.audit({
+        actor: `host:${parsed.source}`,
+        action: 'contact.resubscribe',
+        resource: { collection: 'mailer_suppressions', id: parsed.externalId },
+        diffSummary: `${contact.email}: removed ${removedSuppressions} unsubscribed suppression${removedSuppressions === 1 ? '' : 's'} (${parsed.scope})`,
+      })
+    }
+    return { removedSuppressions }
   }
 
   /**

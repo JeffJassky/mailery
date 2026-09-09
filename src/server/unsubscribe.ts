@@ -17,6 +17,34 @@ import type { UnsubscribeInput } from '../shared/schemas.js'
 import { sha256Hex } from './tokens.js'
 
 /**
+ * The inverse of `applyUnsubscribe`'s first write, for an explicit opt-in.
+ *
+ * Deletes the suppression rows an unsubscribe created for this address —
+ * `reason: 'unsubscribed'` only. Bounce, complaint, manual, list-cleaning and
+ * GDPR rows are not the contact's preference to reverse, so they stay, and a
+ * re-subscribed address that hard-bounced still does not get mail. Returns
+ * the number of rows removed.
+ *
+ * Scopes: a marketing opt-in clears `marketing` and `all` opt-outs (an
+ * all-scope unsubscribe was a marketing opt-out too); an `all` opt-in clears
+ * every scope.
+ */
+export async function clearUnsubscribeSuppressions(
+  collections: Collections,
+  email: string,
+  scope: 'marketing' | 'all',
+): Promise<number> {
+  const scopes: Array<'all' | 'marketing' | 'transactional'> =
+    scope === 'all' ? ['all', 'marketing', 'transactional'] : ['marketing', 'all']
+  const result = await collections.suppressions.deleteMany({
+    email,
+    reason: 'unsubscribed',
+    scope: { $in: scopes },
+  })
+  return result.deletedCount ?? 0
+}
+
+/**
  * Apply an unsubscribe: suppression row + subscription status.
  *
  * `input` must already be parsed by `unsubscribeInputSchema` — the caller owns

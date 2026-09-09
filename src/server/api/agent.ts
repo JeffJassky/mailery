@@ -401,7 +401,12 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
           kind: input.kind,
           fromEmail: input.fromEmail,
         },
-        { senderDomains: mailer.config.senderDomains, varsJsonSchema: varsSchema },
+        {
+          senderDomains: mailer.config.senderDomains,
+          varsJsonSchema: varsSchema,
+          publicUrl: mailer.config.publicUrl,
+          linkDomains: mailer.config.linkDomains,
+        },
       )
       if (lint.errors.length > 0) {
         return res.status(422).json({
@@ -769,15 +774,17 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
       const contact = await loadContact(res, String(req.params.externalId))
       if (!contact) return
       if (!guardTestContact(res, contact)) return
-      await mailer.upsertSubscription({ externalId: contact.externalId, source: 'agent' })
+      // An explicit opt-in: clears the opt-out suppression too, or the
+      // contact reads as subscribed while every send comes back suppressed.
+      const { removedSuppressions } = await mailer.resubscribe({ externalId: contact.externalId, source: 'agent' })
       const sub = await c.subscriptions.findOne({ externalId: contact.externalId })
       await mailer.audit({
         actor: actorOf(req),
         action: 'agent.contact.subscribe',
         resource: { collection: 'mailer_subscriptions', id: sub?._id },
-        diffSummary: contact.email,
+        diffSummary: `${contact.email} (removed ${removedSuppressions} opt-out suppression${removedSuppressions === 1 ? '' : 's'})`,
       })
-      res.json({ subscription: sub })
+      res.json({ subscription: sub, removedSuppressions })
     }),
   )
 
@@ -1189,7 +1196,12 @@ export async function verifyTemplate(
       kind: tpl.kind,
       fromEmail: tpl.fromEmail,
     },
-    { senderDomains: mailer.config.senderDomains, varsJsonSchema: opts.varsSchema ?? null },
+    {
+      senderDomains: mailer.config.senderDomains,
+      varsJsonSchema: opts.varsSchema ?? null,
+      publicUrl: mailer.config.publicUrl,
+      linkDomains: mailer.config.linkDomains,
+    },
   )
   push('lint', lint.errors.length ? 'fail' : lint.warnings.length ? 'warn' : 'pass', {
     errors: lint.errors.map((i) => ({ rule: i.rule, message: i.message })),
@@ -1480,7 +1492,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'GET', path: '/contacts/:externalId', summary: 'Contact with subscription, suppressions, recent events, sends and runs.' },
   { method: 'GET', path: '/contacts/by-email/:email', summary: 'Same, looked up by email.' },
   { method: 'GET', path: '/contacts/:externalId/unsubscribe-url', summary: 'A signed one-click unsubscribe URL for a test contact, to exercise POST /m/unsub/:token.', testContactsOnly: true },
-  { method: 'POST', path: '/contacts/:externalId/subscribe', summary: 'Subscribe a test contact.', testContactsOnly: true },
+  { method: 'POST', path: '/contacts/:externalId/subscribe', summary: 'Subscribe a test contact, clearing any opt-out suppression it has (never bounce/complaint rows).', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/unsubscribe', summary: 'Unsubscribe a test contact (marketing scope).', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/tags', summary: 'Add or remove tags on a test contact ({add: [...], remove: [...]}), so a gated flow lets it through.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/reset', summary: 'Delete a test contact\'s runs, sends, events ({events: [names]} to narrow) and suppressions, then resubscribe. Each part can be turned off with false.', testContactsOnly: true },
