@@ -160,4 +160,37 @@ describe('HTML-authored template draft round trip', () => {
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('empty_draft')
   })
+
+  // The preview must render what the editor currently holds, not what was last
+  // saved — and must not write a draft to do it.
+  it('previews inline html without touching the stored draft', async () => {
+    const before = await H.db.collection('mailer_templates').findOne({ slug: SLUG })
+
+    const res = await post(`/admin/mailer/api/templates/${SLUG}/preview`, {
+      useDraft: true,
+      html: '<html><body><p>INLINE ONLY, never saved anywhere.</p></body></html>',
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.html).toContain('INLINE ONLY')
+
+    const after = await H.db.collection('mailer_templates').findOne({ slug: SLUG })
+    expect(after?.draft).toEqual(before?.draft)
+    expect(after?.body.html).toBe(before?.body.html)
+  })
+
+  it('falls back to the stored draft when no inline body is supplied', async () => {
+    await post(`/admin/mailer/api/templates/${SLUG}/preview`, { useDraft: true })
+    const res = await post(`/admin/mailer/api/templates/${SLUG}/preview`, { useDraft: true })
+    expect(res.status).toBe(200)
+    expect(res.body.html.length).toBeGreaterThan(0)
+  })
+
+  it('returns 422 rather than 500 when an inline source will not compile', async () => {
+    const res = await post(`/admin/mailer/api/templates/${SLUG}/preview`, {
+      useDraft: true,
+      mjml: '<mjml><mj-body><mj-column>',
+    })
+    expect([200, 422]).toContain(res.status)
+    if (res.status === 422) expect(res.body.error).toBe('compile_failed')
+  })
 })

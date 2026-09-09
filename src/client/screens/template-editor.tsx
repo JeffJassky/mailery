@@ -36,7 +36,7 @@ export function TemplateEditor({ slug }: any) {
 }
 
 function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => void }) {
-  const [view, setView] = React.useState<'design' | 'source' | 'html' | 'plaintext'>('design')
+  const [view, setView] = React.useState<'design' | 'source' | 'html' | 'plaintext' | 'preview'>('design')
   const [editorJson, setEditorJson] = React.useState<JSONContent>(EMPTY_DOC)
   const [subject, setSubject] = React.useState<string>(tpl.draft?.subject ?? tpl.subject ?? '')
   const [preheader, setPreheader] = React.useState<string>(tpl.draft?.preheader ?? tpl.preheader ?? '')
@@ -84,10 +84,19 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const [testStatus, setTestStatus] = React.useState<string | null>(null)
   const [testBusy, setTestBusy] = React.useState(false)
 
+  // The one place that decides which of the three authoring sources is the
+  // template's body. saveDraft, the preview pane and the modal all read it,
+  // so a preview can never disagree with what a publish would store.
+  function bodySource(): { editorJson?: any; html?: string; mjml?: string } {
+    if (isMailyAuthored) return { editorJson }
+    if (isHtmlAuthored) return { html: htmlSource }
+    return mjmlSource ? { mjml: mjmlSource } : {}
+  }
+
   async function renderPreview(contactId?: string) {
     setPreviewBusy(true)
     try {
-      const out = await api.previewTemplate(slug, { useDraft: true, contactId })
+      const out = await api.previewTemplate(slug, { useDraft: true, contactId, ...bodySource() })
       setPreviewing(out)
       setPreviewErr(null)
     } catch (e: any) {
@@ -201,6 +210,14 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   })
   const hasErrors = (lint.data?.errors.length ?? 0) > 0
 
+  // Live preview for the Preview tab. Keyed on the same content the publish
+  // would compile, so what the pane shows is what would ship.
+  const pane = useLivePreview(slug, view === 'preview', {
+    subject,
+    preheader,
+    ...bodySource(),
+  })
+
   React.useEffect(() => {
     if (hydratedRef.current) return
     hydratedRef.current = true
@@ -221,13 +238,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       // source forward instead so publish recompiles the real content; an
       // HTML-authored template saves its raw source, so publish stores it
       // verbatim.
-      ...(isMailyAuthored
-        ? { editorJson }
-        : isHtmlAuthored
-        ? { html: htmlSource }
-        : mjmlSource
-        ? { mjml: mjmlSource }
-        : {}),
+      ...bodySource(),
       fromName: fromName || undefined,
       fromEmail: fromEmail || undefined,
       replyTo: replyTo || undefined,
@@ -286,6 +297,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
               <span className={'seg-item' + (view === 'source' ? ' active' : '')} onClick={() => setView('source')}>MJML</span>
               <span className={'seg-item' + (view === 'html' ? ' active' : '')} onClick={() => setView('html')}>HTML</span>
               <span className={'seg-item' + (view === 'plaintext' ? ' active' : '')} onClick={() => setView('plaintext')}>Plain text</span>
+              <span className={'seg-item' + (view === 'preview' ? ' active' : '')} onClick={() => setView('preview')}>Preview</span>
             </div>
             <div className="card-actions">
               <span className="text-xs subtle">{dirty ? 'Unsaved changes' : status.startsWith('Published') || status === 'Saved' ? status : ''}</span>
@@ -349,6 +361,8 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
               </React.Suspense>
             </div>
           )}
+
+          {view === 'preview' && <PreviewPane pane={pane} />}
 
           {view === 'plaintext' && (
             <pre className="code" style={{ margin: 16, padding: 16, maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
@@ -522,6 +536,86 @@ function useLiveLint(slug: string, input: LiveLintInput): LiveLintState {
   }, [key, slug])
 
   return state
+}
+
+interface LivePreviewState {
+  data: PreviewResponse | null
+  loading: boolean
+  error: string | null
+}
+
+/**
+ * Debounced live preview for the Preview tab. Only runs while that tab is
+ * open — the pane costs a render on the server, and there is no reason to pay
+ * it for an operator who is editing with the tab closed.
+ *
+ * The body source is sent inline rather than saved first: a preview must not
+ * mutate the draft, or simply looking at your work would write an audit-log
+ * entry on every pause in typing.
+ */
+function useLivePreview(slug: string, active: boolean, input: Record<string, unknown>): LivePreviewState {
+  const [state, setState] = React.useState<LivePreviewState>({ data: null, loading: false, error: null })
+
+  // Same reasoning as useLiveLint: the body source is a fresh object on every
+  // keystroke, so serialize it and use the string as the effect key.
+  const key = JSON.stringify(input)
+  const inputRef = React.useRef(input)
+  inputRef.current = input
+
+  React.useEffect(() => {
+    if (!active) return
+    const controller = new AbortController()
+    setState((s) => ({ ...s, loading: true }))
+
+    const t = setTimeout(async () => {
+      try {
+        const data = await api.previewTemplate(slug, { useDraft: true, ...inputRef.current })
+        if (controller.signal.aborted) return
+        setState({ data, loading: false, error: null })
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || controller.signal.aborted) return
+        // Keep the last good render on screen — a transient compile error
+        // while typing should not blank the pane.
+        setState((s) => ({ data: s.data, loading: false, error: String(err?.message ?? err) }))
+      }
+    }, 600)
+
+    return () => {
+      controller.abort()
+      clearTimeout(t)
+    }
+  }, [key, slug, active])
+
+  return state
+}
+
+function PreviewPane({ pane }: { pane: LivePreviewState }) {
+  const { data, loading, error } = pane
+  return (
+    <div style={{ padding: 16 }}>
+      <div className="hstack" style={{ gap: 8, alignItems: 'baseline', marginBottom: 8 }}>
+        <div className="text-sm f500">{data?.subject || <span className="subtle">(no subject)</span>}</div>
+        <span className="grow" />
+        <span className="text-xs subtle">{loading ? 'Rendering…' : 'Rendered as a sample contact'}</span>
+      </div>
+      {data?.preheader && <div className="text-xs subtle" style={{ marginBottom: 8 }}>{data.preheader}</div>}
+      {error && (
+        <div className="text-xs" style={{ marginBottom: 8, color: 'var(--red-fg)' }}>{error}</div>
+      )}
+      {data ? (
+        <iframe
+          title="live preview"
+          sandbox=""
+          srcDoc={data.html}
+          style={{ width: '100%', minHeight: 520, border: '1px solid var(--border)', borderRadius: 6, background: '#fff' }}
+        />
+      ) : (
+        <div className="text-xs subtle" style={{ padding: 24 }}>
+          {loading ? 'Rendering preview…' : error ? 'Nothing to render.' : 'Preview will appear here.'}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function VariablesCard({ paths, hasSchema }: { paths: VarPathEntry[]; hasSchema: boolean }) {

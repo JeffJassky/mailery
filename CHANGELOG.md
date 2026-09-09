@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.1 — A Preview tab, and previews that show your unsaved edits
+
+### Added
+
+- **A Preview tab in the template editor**, alongside Design / MJML / HTML / Plain text. It renders the message at full card width against a sample contact with variables resolved, and re-renders as you type, so editing HTML no longer means bouncing through a modal after every change to see what you did.
+
+### Fixed
+
+- **The preview showed stale content.** Edits live in the editor's local state until you publish, but `POST /api/templates/:slug/preview` rendered the *saved* draft — so after typing, the preview showed the last saved draft, or for a never-drafted template the published body, and looked simply broken. The endpoint now accepts `html`, `mjml` or `editorJson` inline, resolved in the usual authoring precedence, and the editor sends whatever it currently has. Doing it this way rather than saving first is deliberate: a preview is a read, and a live one that wrote a draft would mean an audit-logged mutation on every pause in typing. A source that fails to compile now returns 422 `compile_failed` instead of a 500, so a half-typed document leaves the last good render on screen.
+
 ## 0.17.0 — HTML-only templates are editable in the admin UI
 
 ### Added

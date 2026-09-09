@@ -19,6 +19,7 @@ import {
   applyTracking,
   compileDraftBody,
   renderTemplate,
+  type DraftBodySource,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { lintTemplate, type LintResult } from '../templates/linter.js'
@@ -1669,9 +1670,32 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (!tpl) return res.status(404).json({ error: 'not_found' })
 
       const useDraft = req.body?.useDraft !== false
+
+      // Inline body overrides, same tolerance as the lint endpoint. The editor
+      // holds unsaved edits in local state; without this the only way to see
+      // them rendered would be to write a draft — an audit-logged mutation —
+      // on every preview, so a live preview would mean a write per keystroke
+      // pause. Supplied fields win over the stored draft; anything absent
+      // falls back to it.
+      const inline: DraftBodySource = {}
+      let hasInline = false
+      if (typeof req.body?.html === 'string') { inline.html = req.body.html; hasInline = true }
+      if (typeof req.body?.mjml === 'string') { inline.mjml = req.body.mjml; hasInline = true }
+      if (req.body?.editorJson !== undefined) { inline.editorJson = req.body.editorJson; hasInline = true }
+
+      const source: DraftBodySource | null = hasInline ? inline : tpl.draft
       let html = ''
       let plainText = ''
-      const compiled = useDraft && tpl.draft ? await compileDraftBody(tpl.draft) : null
+      let compiled: Awaited<ReturnType<typeof compileDraftBody>> = null
+      if (useDraft && source) {
+        try {
+          compiled = await compileDraftBody(source)
+        } catch (err: any) {
+          // A half-typed MJML/Maily document must not 500 the preview pane —
+          // the editor renders this as a message where the email would be.
+          return res.status(422).json({ error: 'compile_failed', message: String(err?.message ?? err) })
+        }
+      }
       if (compiled) {
         html = compiled.html
         plainText = compiled.plainText

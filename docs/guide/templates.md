@@ -54,6 +54,8 @@ Such a template is edited in the admin UI's **HTML** tab: a Monaco source editor
 
 The HTML tab is editable only when raw HTML is the template's actual source of truth. For a template authored in Design or MJML, the tab still renders the compiled `body.html` so you can see what will send, but it's read-only, with a note pointing at the real source tab: hand-edits to compiler output would simply be discarded the next time that template is published from its MJML or Design document.
 
+The editor's **Preview** tab renders the message beside those source tabs, against a sample contact with variables resolved, and re-renders as you type. It previews what you have on screen rather than what was last saved — the body source travels with the request, so looking at your work never writes a draft.
+
 This does not convert an HTML-only template into MJML or into the Design editor's format, and it does not resolve how a deploy-script pipeline and admin-UI editing should coexist long-term for the same template. It solves a narrower problem — making HTML-only templates viewable and editable in the UI at all.
 
 ## Variables

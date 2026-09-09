@@ -83,7 +83,7 @@ test('edit and publish an HTML-only template through the HTML tab', async ({ pag
 
   // The HTML tab exists and shows the stored source — the regression this
   // whole feature exists to fix.
-  await page.getByText('HTML', { exact: true }).first().click()
+  await page.locator('.seg .seg-item', { hasText: /^HTML$/ }).click()
   const editor = page.locator('.monaco-editor').first()
   await expect(editor).toBeVisible({ timeout: 20_000 })
   await expect(editor).toContainText('Original')
@@ -124,9 +124,48 @@ test('the HTML tab is read-only for an MJML-authored template', async ({ page, r
   await page.getByText('MJML Authored').first().click()
   await expect(page.getByRole('heading', { name: 'MJML Authored' })).toBeVisible({ timeout: 15_000 })
 
-  await page.getByText('HTML', { exact: true }).first().click()
+  await page.locator('.seg .seg-item', { hasText: /^HTML$/ }).click()
   await expect(page.locator('.monaco-editor').first()).toBeVisible({ timeout: 20_000 })
   // Compiler output, not a source of truth — the tab says so rather than
   // letting an operator make edits the next publish would throw away.
   await expect(page.getByText(/compiled\s+output, shown read-only/)).toBeVisible()
+})
+
+/**
+ * The reported bug: edits live in the editor's local state, but the preview
+ * rendered server-side from the *saved* draft, so it showed stale content and
+ * looked broken. The body source now travels with the preview request.
+ */
+test('the Preview tab renders unsaved HTML edits', async ({ page, request }) => {
+  const seeded =
+    '<html><body><p>Original body text, long enough that the linter is satisfied. <a href="https://app.example.com/go">Open the app</a>.</p></body></html>'
+
+  await request.post('/admin/mailer/api/templates', {
+    data: { slug: 'live-preview', name: 'Live Preview', kind: 'transactional', subject: 'Your report is ready' },
+  })
+  await request.patch('/admin/mailer/api/templates/live-preview/draft', { data: { html: seeded } })
+  expect((await request.post('/admin/mailer/api/templates/live-preview/publish')).status()).toBe(200)
+
+  await page.goto('/admin/mailer/')
+  await page.getByText('Templates', { exact: true }).click()
+  await page.getByText('Live Preview').first().click()
+  await expect(page.getByRole('heading', { name: 'Live Preview' })).toBeVisible({ timeout: 15_000 })
+
+  await page.locator('.seg .seg-item', { hasText: /^HTML$/ }).click()
+  const editor = page.locator('.monaco-editor').first()
+  await expect(editor).toBeVisible({ timeout: 20_000 })
+  await editor.click()
+  await page.keyboard.press('ControlOrMeta+End')
+  await page.keyboard.type(' UNSAVEDMARKER')
+
+  // Switch to Preview without saving or publishing.
+  // Scope to the tab strip — the page header has a Preview button too.
+  await page.locator('.seg .seg-item', { hasText: /^Preview$/ }).click()
+  const frame = page.frameLocator('iframe[title="live preview"]')
+  await expect(frame.locator('body')).toContainText('UNSAVEDMARKER', { timeout: 20_000 })
+
+  // And the draft really was not written — a preview must not mutate.
+  const tpl = await (await request.get('/admin/mailer/api/templates/live-preview')).json()
+  expect(tpl.draft).toBeNull()
+  expect(tpl.body.html).not.toContain('UNSAVEDMARKER')
 })

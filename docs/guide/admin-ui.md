@@ -40,7 +40,7 @@ The SPA has 15 screens organized in four sidebar sections:
 
 **Compose**
 - Flows — list + detail with step editor
-- Templates — list + Maily WYSIWYG editor (Design / MJML / HTML / Plain text tabs) with live content linter + Mail-Tester deliverability check
+- Templates — list + Maily WYSIWYG editor (Design / MJML / HTML / Plain text / Preview tabs) with live content linter + Mail-Tester deliverability check
 - Broadcasts — list + composer with segment builder + confirmation gate
 
 **Audience**

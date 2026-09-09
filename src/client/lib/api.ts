@@ -76,7 +76,9 @@ export const api = {
       method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     }),
-  previewTemplate: (slug: string, body: { useDraft?: boolean; sampleContact?: any; vars?: any; contactId?: string; eventProperties?: Record<string, unknown> }) =>
+  // html / mjml / editorJson override the stored draft, so the editor can
+  // preview unsaved edits without writing one.
+  previewTemplate: (slug: string, body: { useDraft?: boolean; sampleContact?: any; vars?: any; contactId?: string; eventProperties?: Record<string, unknown>; html?: string; mjml?: string; editorJson?: Record<string, unknown> | null }) =>
     json<PreviewResponse>(`/templates/${slug}/preview`, { method: 'POST', body: JSON.stringify(body) }),
   sendTestTemplate: (slug: string, body: { to: string; sampleData?: any; contactId?: string; eventProperties?: Record<string, unknown> }) =>
     json<{ ok: boolean; providerId: string }>(`/templates/${slug}/send-test`, { method: 'POST', body: JSON.stringify(body) }),

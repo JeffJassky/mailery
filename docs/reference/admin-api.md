@@ -188,12 +188,25 @@ The host's `varsAdapter` schema as JSON Schema (drives editor autocomplete and t
 ### `POST /api/templates/:slug/preview`
 Render the draft (or published body with `useDraft: false`). Pass `contactId` to render as a real contact — the contact is loaded through the adapter and the `varsAdapter` resolver runs (`reason: 'preview'`). Without it, a sample contact and empty host vars are used.
 
+Pass `html`, `mjml` or `editorJson` to render that content instead of the stored draft, resolved in the usual authoring precedence. This is how the editor previews unsaved edits: a preview is a read, and making one should not write a draft — which is an audit-logged mutation — just to see the result.
+
 Pass `eventProperties` to simulate a trigger event — both `{{event.*}}` and the resolver's `info.eventProperties` receive it.
 
 ```ts
-body: { useDraft?: boolean; contactId?: string; sampleContact?: Contact; vars?: Record<string, unknown>; eventProperties?: Record<string, unknown> }
+body: {
+  useDraft?: boolean
+  contactId?: string
+  sampleContact?: Contact
+  vars?: Record<string, unknown>
+  eventProperties?: Record<string, unknown>
+  html?: string
+  mjml?: string
+  editorJson?: Record<string, unknown> | null
+}
 → { subject, preheader, html, plainText, contact: { externalId, email } }
 → 404 { error: 'contact_not_found', contactId }
+→ 409 { error: 'not_published', message }
+→ 422 { error: 'compile_failed', message }
 → 502 { error: 'vars_resolve_failed', message }
 ```
 
