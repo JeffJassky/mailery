@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0 — HTML-only templates are editable in the admin UI
+
+### Added
+
+- **A fourth editor tab, HTML**, sitting between MJML and Plain text. Templates published as raw compiled HTML — via a deploy script writing `body.html` directly, or the agent API's `PUT /templates/:slug` — had `body.mjml === ''` and `body.editorJson === null`, but the other three tabs read exactly those fields: Design showed a blank canvas, MJML said nothing was stored, and there was no way to see, let alone edit, what such a template actually sent. The HTML tab is a Monaco editor over `body.html` — syntax highlighting, folding, find/replace — and is editable only when raw HTML is the template's actual source of truth; for a Design- or MJML-authored template it shows the compiled output read-only, with a note pointing at the real source tab, because hand-edits to compiler output would be silently discarded on the next publish.
+- **`TemplateDraft` gains `html?: string`**, and `PATCH /api/templates/:slug/draft` accepts it. Body sources now resolve everywhere — lint, publish, preview, and the Mail-Tester fingerprint — in one authoring precedence: `editorJson` → `mjml` → raw `html`. Raw HTML is a pass-through, since it's already the compiled artefact; its plain-text alternative is derived from it like any other source.
+- **`POST /api/templates/:slug/lint` accepts `html?: string`.** When the effective source is raw HTML, the response's existing `errors` / `warnings` arrays also carry a markup check, so the HTML tab isn't a validation blind spot next to MJML (which gets compiler errors for free): `html_empty` and `html_unclosed_comment` and `html_unbalanced_tags` as errors, `html_script_tag` (every client strips it, and it raises spam scores) and `html_missing_body` as warnings. The full content linter — bare URLs, off-domain links, unknown variables, the unsubscribe tag — still runs against rendered HTML regardless of source.
+- **`POST /api/templates/:slug/publish` accepts an HTML-only draft.** `body.html` is stored verbatim, `body.mjml` becomes `''`, `body.editorJson` becomes `null`, and plain text is derived. Previously any draft without `mjml` or `editorJson` was rejected outright as `empty_draft`; that check now widens to require HTML, MJML or editorJson, and its message reads `'draft has no HTML, MJML or editorJson content'`.
+
+This makes HTML-only templates viewable and editable from the admin UI. It does not convert them to MJML or to the Design editor's format, and it does not resolve how a deploy-script pipeline and admin-UI editing should coexist long-term for the same template.
+
 ## 0.16.8 — The events registry says how often each event really fires
 
 ### Added

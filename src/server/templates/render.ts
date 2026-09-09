@@ -49,6 +49,31 @@ export async function compileMailyTemplate(content: unknown): Promise<CompileRes
   return { html, plainText, errors: [] }
 }
 
+export interface DraftBodySource {
+  editorJson?: Record<string, unknown> | null
+  mjml?: string
+  html?: string
+}
+
+/**
+ * Compile whatever body source a draft carries into { html, plainText }.
+ *
+ * Precedence is authoring precedence: a Maily doc beats MJML, MJML beats raw
+ * HTML. Raw HTML is a pass-through — it is already the compiled artefact —
+ * with the plain-text alternative derived from it.
+ *
+ * Returns null when the draft carries no body source at all, so callers can
+ * fall back to the last published body instead of compiling an empty document.
+ */
+export async function compileDraftBody(draft: DraftBodySource): Promise<CompileResult | null> {
+  if (draft.editorJson) return compileMailyTemplate(draft.editorJson)
+  if (draft.mjml && draft.mjml.trim()) return compileTemplate(draft.mjml)
+  if (draft.html && draft.html.trim()) {
+    return { html: draft.html, plainText: derivePlaintext(draft.html), errors: [] }
+  }
+  return null
+}
+
 /** Auto-derive plain text from compiled HTML. */
 export function derivePlaintext(html: string): string {
   return htmlToText(html, {

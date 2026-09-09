@@ -275,6 +275,7 @@ export interface LintRequestBody {
   subject?: string
   preheader?: string
   mjml?: string
+  html?: string // raw HTML source, for HTML-authored templates
   editorJson?: Record<string, unknown> | null
   fromEmail?: string
   kind?: 'marketing' | 'transactional'

@@ -77,6 +77,34 @@ List all templates, newest-updated first.
 ### `GET /api/templates/:slug`
 Single template's full definition.
 
+### `PATCH /api/templates/:slug/draft`
+Stage changes on the template's unpublished draft. Every field is optional; only the ones present are written, so the editor can save one field without round-tripping the rest. A template with no draft yet gets one seeded from its published values first.
+
+Exactly one of `html`, `mjml` or `editorJson` describes the body, and publish resolves them in that authoring precedence (`editorJson` → `mjml` → raw `html`). Sending `mjml: ''` or `editorJson: null` clears that source, which is how a template changes authoring mode.
+
+`fromEmail` and `kind` are validated against the `senderDomains` registry as a pair, whether one or both are supplied.
+
+```ts
+body: {
+  subject?: string
+  preheader?: string
+  html?: string
+  mjml?: string
+  editorJson?: Record<string, unknown> | null
+  notes?: string
+  name?: string
+  fromName?: string
+  fromEmail?: string
+  replyTo?: string | null
+  kind?: 'marketing' | 'transactional'
+  bodyFormat?: 'multipart' | 'text_only'
+  trackOpens?: boolean
+  trackClicks?: boolean
+}
+→ { ok: true }
+→ 400 { error: 'sender_domain_invalid', code: string, message: string }
+```
+
 ## Broadcasts
 
 ### `GET /api/broadcasts`
@@ -180,13 +208,14 @@ body: { to: string; contactId?: string; sampleData?: { contact?: Contact; vars?:
 ## Templates — content linter + Mail-Tester
 
 ### `POST /api/templates/:slug/lint`
-Run the content linter against a draft. Body fields are all optional — missing fields fall back to the saved draft, then to the last published values.
+Run the content linter against a draft. Body fields are all optional — missing fields fall back to the saved draft, then to the last published values. When the effective source resolves to raw HTML (see [Templates → Hand-written HTML](/guide/templates#hand-written-html)), the response's `errors` / `warnings` arrays also carry markup issues (unclosed tags, a `<script>` tag, a missing `<html>`/`<body>` wrapper, and the like) alongside the usual content rules.
 
 ```ts
 body: {
   subject?: string
   preheader?: string
   mjml?: string
+  html?: string
   editorJson?: Record<string, unknown> | null
   fromEmail?: string
   kind?: 'marketing' | 'transactional'
@@ -200,7 +229,7 @@ body: {
 ```
 
 ### `POST /api/templates/:slug/publish`
-Publish the saved draft. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` when a cached Mail-Tester score is below `minScore` (`code: 'low_score'`), or — with `mailTester.requireScore` enabled — when the content has no score at all (`code: 'no_score'`, `score: null`). Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
+Publish the saved draft — its content may live in `html`, `mjml` or `editorJson`, resolved in that authoring precedence (`editorJson` → `mjml` → raw `html`); an HTML-only draft is stored verbatim with plain text derived. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` when a cached Mail-Tester score is below `minScore` (`code: 'low_score'`), or — with `mailTester.requireScore` enabled — when the content has no score at all (`code: 'no_score'`, `score: null`). Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
 
 ```ts
 body?: { bypassMailTester?: boolean }

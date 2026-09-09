@@ -181,6 +181,8 @@ export interface TemplateDraft {
   preheader: string
   /** MJML source (when template is authored as MJML). Empty string if Maily-authored. */
   mjml: string
+  /** Raw HTML source (when the template is authored as hand-written HTML). Absent otherwise. */
+  html?: string
   /** Maily editor JSON (when template is authored via the WYSIWYG editor). null otherwise. */
   editorJson: Record<string, unknown> | null
   notes: string

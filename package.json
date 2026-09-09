@@ -1,6 +1,6 @@
 {
   "name": "mailery",
-  "version": "0.16.8",
+  "version": "0.17.0",
   "description": "Embedded, MongoDB-backed email automation for Node.js. Triggered flows, broadcasts, tracking, suppression, and an admin UI you mount inside your Express app.",
   "license": "MIT",
   "author": "Jeff Jassky <jeff@jeffjassky.com>",
@@ -118,6 +118,7 @@
     "imapflow": "^1.6.6",
     "ioredis": "^5.10.1",
     "ioredis-mock": "^8.13.1",
+    "monaco-editor": "^0.55.0",
     "mongodb-memory-server": "^11.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",

@@ -19,6 +19,10 @@ import { BUILTIN_VAR_PATHS, flattenVarPaths, type VarPathEntry } from '../lib/va
 import { useLive } from '../lib/use-live'
 import { LoadState } from '../lib/load-state'
 
+// Monaco is ~1MB of editor; keep it out of the initial admin bundle — most
+// screens never open a template, and most templates are not HTML-authored.
+const CodeEditor = React.lazy(() => import('../components/code-editor'))
+
 const EMPTY_DOC: JSONContent = { type: 'doc', content: [{ type: 'paragraph' }] }
 
 export function TemplateEditor({ slug }: any) {
@@ -32,7 +36,7 @@ export function TemplateEditor({ slug }: any) {
 }
 
 function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => void }) {
-  const [view, setView] = React.useState<'design' | 'source' | 'plaintext'>('design')
+  const [view, setView] = React.useState<'design' | 'source' | 'html' | 'plaintext'>('design')
   const [editorJson, setEditorJson] = React.useState<JSONContent>(EMPTY_DOC)
   const [subject, setSubject] = React.useState<string>(tpl.draft?.subject ?? tpl.subject ?? '')
   const [preheader, setPreheader] = React.useState<string>(tpl.draft?.preheader ?? tpl.preheader ?? '')
@@ -53,6 +57,11 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   // falling back to the MJML / stored body, breaking lint and, worse,
   // clobbering the body on publish.
   const [isMailyAuthored, setIsMailyAuthored] = React.useState(false)
+  const [htmlSource, setHtmlSource] = React.useState<string>('')
+  // Mirrors isMailyAuthored: becomes true only when the operator actually
+  // edits in the HTML tab, so a template that was merely viewed there never
+  // has its body rewritten on save.
+  const [isHtmlAuthored, setIsHtmlAuthored] = React.useState(false)
 
   // Vars schema — drives subject/preheader autocomplete + the Variables card.
   const { data: varsData } = useLive(() => api.varsSchema(), [])
@@ -174,11 +183,19 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const tplSlug = tpl.slug ?? slug
   const mjmlSource = tpl.body?.mjml ?? tpl.draft?.mjml ?? ''
   const plainText = tpl.body?.plainText ?? ''
+  const hasEditorJson = !!(tpl.draft?.editorJson ?? tpl.body?.editorJson)
+  const hasMjml = !!(tpl.draft?.mjml ?? tpl.body?.mjml)
+  // The HTML tab edits the source of truth only when HTML *is* the source of
+  // truth. For a Maily- or MJML-authored template body.html is compiler output:
+  // hand-edits there would be silently discarded on the next publish, so the
+  // tab shows it read-only instead.
+  const htmlEditable = !hasEditorJson && !hasMjml
 
   const lint = useLiveLint(slug, {
     subject,
     preheader,
     editorJson: isMailyAuthored ? (editorJson as Record<string, unknown>) : null,
+    html: isHtmlAuthored ? htmlSource : null,
     fromEmail: fromEmail || tpl.fromEmail,
     kind: tplKind,
   })
@@ -192,6 +209,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       setEditorJson(incoming)
       setIsMailyAuthored(true)
     }
+    setHtmlSource(tpl.draft?.html ?? tpl.body?.html ?? '')
   }, [tpl])
 
   async function saveDraft() {
@@ -200,8 +218,16 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       subject,
       preheader,
       // Maily templates save the doc; MJML/seeded templates carry their MJML
-      // source forward instead so publish recompiles the real content.
-      ...(isMailyAuthored ? { editorJson } : mjmlSource ? { mjml: mjmlSource } : {}),
+      // source forward instead so publish recompiles the real content; an
+      // HTML-authored template saves its raw source, so publish stores it
+      // verbatim.
+      ...(isMailyAuthored
+        ? { editorJson }
+        : isHtmlAuthored
+        ? { html: htmlSource }
+        : mjmlSource
+        ? { mjml: mjmlSource }
+        : {}),
       fromName: fromName || undefined,
       fromEmail: fromEmail || undefined,
       replyTo: replyTo || undefined,
@@ -258,6 +284,7 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
             <div className="seg">
               <span className={'seg-item' + (view === 'design' ? ' active' : '')} onClick={() => setView('design')}>Design</span>
               <span className={'seg-item' + (view === 'source' ? ' active' : '')} onClick={() => setView('source')}>MJML</span>
+              <span className={'seg-item' + (view === 'html' ? ' active' : '')} onClick={() => setView('html')}>HTML</span>
               <span className={'seg-item' + (view === 'plaintext' ? ' active' : '')} onClick={() => setView('plaintext')}>Plain text</span>
             </div>
             <div className="card-actions">
@@ -302,6 +329,25 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
             <pre className="code" style={{ margin: 16, padding: 16, maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
               {mjmlSource || '/* No MJML stored for this template (Maily-authored). Switch to Design to edit. */'}
             </pre>
+          )}
+
+          {view === 'html' && (
+            <div style={{ padding: 16 }}>
+              {!htmlEditable && (
+                <div className="text-xs subtle" style={{ marginBottom: 8 }}>
+                  This template is authored in {hasEditorJson ? 'Design' : 'MJML'} — the HTML below is compiled
+                  output, shown read-only. Edit it in the {hasEditorJson ? 'Design' : 'MJML'} tab.
+                </div>
+              )}
+              <React.Suspense fallback={<div className="text-xs subtle">Loading editor…</div>}>
+                <CodeEditor
+                  language="html"
+                  value={htmlSource}
+                  readOnly={!htmlEditable}
+                  onChange={(v) => { setHtmlSource(v); setIsHtmlAuthored(true); setDirty(true) }}
+                />
+              </React.Suspense>
+            </div>
           )}
 
           {view === 'plaintext' && (
@@ -429,6 +475,7 @@ interface LiveLintInput {
   subject: string
   preheader: string
   editorJson: Record<string, unknown> | null
+  html: string | null
   fromEmail: string
   kind: 'marketing' | 'transactional'
 }
@@ -455,7 +502,12 @@ function useLiveLint(slug: string, input: LiveLintInput): LiveLintState {
 
     const t = setTimeout(async () => {
       try {
-        const data = await api.lintTemplate(slug, inputRef.current, controller.signal)
+        // A missing `html` means "use the saved draft" to the endpoint —
+        // exactly what an unedited HTML tab should mean — so strip the null
+        // rather than sending it through.
+        const { html, ...rest } = inputRef.current
+        const body = html != null ? { ...rest, html } : rest
+        const data = await api.lintTemplate(slug, body, controller.signal)
         setState({ data, loading: false, error: null })
       } catch (err: any) {
         if (err?.name === 'AbortError') return

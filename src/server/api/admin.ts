@@ -17,12 +17,12 @@ import { ObjectId } from 'mongodb'
 import type { Mailer } from '../mailer.js'
 import {
   applyTracking,
-  compileMailyTemplate,
-  compileTemplate,
+  compileDraftBody,
   renderTemplate,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
-import { lintTemplate } from '../templates/linter.js'
+import { lintTemplate, type LintResult } from '../templates/linter.js'
+import { validateHtmlSource, type HtmlSourceIssue } from '../templates/html-source.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
 import type { Contact } from '../../shared/types.js'
 import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
@@ -1199,7 +1199,30 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const tpl = await c.templates.findOne({ slug: req.params.slug })
       if (!tpl) return res.status(404).json({ error: 'not_found' })
 
-      const { subject, preheader, mjml, editorJson, notes, name, fromName, fromEmail, replyTo, kind, bodyFormat, trackOpens, trackClicks } = req.body ?? {}
+      const { subject, preheader, mjml, html, editorJson, notes, name, fromName, fromEmail, replyTo, kind, bodyFormat, trackOpens, trackClicks } = req.body ?? {}
+
+      // Mongo refuses to $set a dotted 'draft.xxx' path when 'draft' is
+      // currently null (script-seeded / never-drafted templates land here) —
+      // seed a base draft object first so the dot-path $set below has
+      // somewhere to write.
+      if (!tpl.draft) {
+        await c.templates.updateOne(
+          { _id: tpl._id, draft: null },
+          {
+            $set: {
+              draft: {
+                subject: tpl.subject,
+                preheader: tpl.preheader,
+                mjml: tpl.body?.mjml ?? '',
+                editorJson: tpl.body?.editorJson ?? null,
+                notes: '',
+                lastModifiedBy: (req as any).actor,
+                lastModifiedAt: new Date(),
+              },
+            },
+          },
+        )
+      }
 
       const set: Record<string, unknown> = {
         'draft.lastModifiedBy': (req as any).actor,
@@ -1209,6 +1232,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (typeof subject === 'string') set['draft.subject'] = subject
       if (typeof preheader === 'string') set['draft.preheader'] = preheader
       if (typeof mjml === 'string') set['draft.mjml'] = mjml
+      if (typeof html === 'string') set['draft.html'] = html
       if (editorJson !== undefined) set['draft.editorJson'] = editorJson
       if (typeof notes === 'string') set['draft.notes'] = notes
       if (typeof name === 'string') set.name = name
@@ -1263,11 +1287,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       let subject = tpl.subject ?? ''
       if (tpl.draft) {
         try {
-          const compiled = tpl.draft.editorJson
-            ? await compileMailyTemplate(tpl.draft.editorJson)
-            : tpl.draft.mjml
-            ? await compileTemplate(tpl.draft.mjml)
-            : null
+          const compiled = await compileDraftBody(tpl.draft)
           if (compiled) {
             bodyHash = sha256Hex(compiled.html)
             subject = tpl.draft.subject || subject
@@ -1310,9 +1330,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       let compiled: { html: string; plainText: string }
       try {
-        if (draft.editorJson) compiled = await compileMailyTemplate(draft.editorJson)
-        else if (draft.mjml) compiled = await compileTemplate(draft.mjml)
-        else return res.status(400).json({ error: 'empty_draft' })
+        const result = await compileDraftBody(draft)
+        if (!result) return res.status(400).json({ error: 'empty_draft' })
+        compiled = result
       } catch (err: any) {
         return res.status(400).json({ error: 'compile_failed', message: String(err?.message ?? err) })
       }
@@ -1392,9 +1412,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       // the publish gate. We must recompile to recompute bodyHash.
       let compiled: { html: string; plainText: string }
       try {
-        if (draft.editorJson) compiled = await compileMailyTemplate(draft.editorJson)
-        else if (draft.mjml) compiled = await compileTemplate(draft.mjml)
-        else return res.status(400).json({ error: 'empty_draft' })
+        const result = await compileDraftBody(draft)
+        if (!result) return res.status(400).json({ error: 'empty_draft' })
+        compiled = result
       } catch (err: any) {
         return res.status(400).json({ error: 'compile_failed', message: String(err?.message ?? err) })
       }
@@ -1434,6 +1454,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         subject?: string
         preheader?: string
         mjml?: string
+        html?: string
         editorJson?: Record<string, unknown> | null
         fromEmail?: string
         kind?: 'marketing' | 'transactional'
@@ -1442,6 +1463,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const subject = body.subject ?? tpl.draft?.subject ?? tpl.subject ?? ''
       const preheader = body.preheader ?? tpl.draft?.preheader ?? tpl.preheader ?? ''
       const mjml = body.mjml ?? tpl.draft?.mjml ?? tpl.body?.mjml ?? ''
+      const draftHtml = typeof body.html === 'string' ? body.html : (tpl.draft?.html ?? '')
       const editorJson = body.editorJson !== undefined ? body.editorJson : (tpl.draft?.editorJson ?? tpl.body?.editorJson ?? null)
       const fromEmail = body.fromEmail ?? tpl.fromEmail
       // Whitelist kind — otherwise body.kind:'foo' bypasses the marketing-
@@ -1451,12 +1473,8 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       let html = ''
       let plainText = ''
       try {
-        if (editorJson) {
-          const compiled = await compileMailyTemplate(editorJson)
-          html = compiled.html
-          plainText = compiled.plainText
-        } else if (mjml) {
-          const compiled = await compileTemplate(mjml)
+        const compiled = await compileDraftBody({ editorJson, mjml, html: draftHtml })
+        if (compiled) {
           html = compiled.html
           plainText = compiled.plainText
         }
@@ -1485,7 +1503,13 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           linkDomains: mailer.config.linkDomains,
         },
       )
-      res.json({ ...lint, compileFailed: false })
+
+      // Raw HTML has no compiler standing between author and send, so run the
+      // HTML-source checks too when that was the effective body source.
+      const merged = !editorJson && !mjml.trim() && draftHtml.trim()
+        ? withHtmlSourceIssues(lint, validateHtmlSource(draftHtml))
+        : lint
+      res.json({ ...merged, compileFailed: false })
     }),
   )
 
@@ -1511,13 +1535,11 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       let compiled: { html: string; plainText: string; errors: any[] }
       try {
-        if (draft.editorJson) {
-          compiled = await compileMailyTemplate(draft.editorJson)
-        } else if (draft.mjml) {
-          compiled = await compileTemplate(draft.mjml)
-        } else {
-          return res.status(400).json({ error: 'empty_draft', message: 'draft has no MJML or editorJson content' })
+        const result = await compileDraftBody(draft)
+        if (!result) {
+          return res.status(400).json({ error: 'empty_draft', message: 'draft has no HTML, MJML or editorJson content' })
         }
+        compiled = result
       } catch (err: any) {
         // Same shape as the lint endpoint's compileFailed branch so the UI
         // can surface compile errors uniformly with lint errors.
@@ -1551,11 +1573,18 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         },
       )
 
-      if (lint.errors.length > 0) {
+      // Raw HTML has no compiler standing between author and send, so run the
+      // HTML-source checks too when that was the effective body source, before
+      // the publish gate below gets a look at the merged result.
+      const effectiveLint = !draft.editorJson && !(draft.mjml ?? '').trim() && (draft.html ?? '').trim()
+        ? withHtmlSourceIssues(lint, validateHtmlSource(draft.html ?? ''))
+        : lint
+
+      if (effectiveLint.errors.length > 0) {
         return res.status(422).json({
           error: 'lint_failed',
-          message: `Template publish blocked by ${lint.errors.length} content issue(s).`,
-          lint,
+          message: `Template publish blocked by ${effectiveLint.errors.length} content issue(s).`,
+          lint: effectiveLint,
         })
       }
 
@@ -1589,7 +1618,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       await c.templateVersions.insertOne({
         templateId: tpl._id!,
         version: nextVersion,
-        mjml: draft.mjml,
+        mjml: draft.mjml ?? '',
         html: compiled.html,
         plainText: compiled.plainText,
         subject: draft.subject,
@@ -1605,8 +1634,8 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
             subject: draft.subject,
             preheader: draft.preheader,
             body: {
-              mjml: draft.mjml,
-              editorJson: draft.editorJson,
+              mjml: draft.mjml ?? '',
+              editorJson: draft.editorJson ?? null,
               html: compiled.html,
               plainText: compiled.plainText,
               compiledAt: now,
@@ -1628,7 +1657,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         ok: true,
         version: nextVersion,
         warnings: compiled.errors,
-        lint, // warnings + infos for UI
+        lint: effectiveLint, // warnings + infos for UI, HTML-source ones included
       })
     }),
   )
@@ -1642,10 +1671,8 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const useDraft = req.body?.useDraft !== false
       let html = ''
       let plainText = ''
-      if (useDraft && tpl.draft) {
-        const compiled = tpl.draft.editorJson
-          ? await compileMailyTemplate(tpl.draft.editorJson)
-          : await compileTemplate(tpl.draft.mjml || '<mjml><mj-body></mj-body></mjml>')
+      const compiled = useDraft && tpl.draft ? await compileDraftBody(tpl.draft) : null
+      if (compiled) {
         html = compiled.html
         plainText = compiled.plainText
       } else {
@@ -1953,6 +1980,16 @@ function asyncHandler(fn: AsyncHandler) {
   return (req: Request, res: Response, next: NextFunction) => {
     fn(req, res, next).catch(next)
   }
+}
+
+/** Fold HTML-source issues into a lint result, so the editor renders them in one list. */
+function withHtmlSourceIssues(lint: LintResult, extra: HtmlSourceIssue[]): LintResult {
+  const out: LintResult = { errors: [...lint.errors], warnings: [...lint.warnings], infos: [...lint.infos] }
+  for (const i of extra) {
+    if (i.severity === 'error') out.errors.push(i)
+    else out.warnings.push(i)
+  }
+  return out
 }
 
 /**

@@ -46,6 +46,16 @@ await db.collection('mailer_templates').updateOne(
 )
 ```
 
+### Hand-written HTML
+
+A template can also arrive as compiled HTML rather than MJML — written by a deploy script as above, or pushed through the agent API's `PUT /templates/:slug`. Either way `body.html` is set directly and there's no MJML or Design-editor document behind it.
+
+Such a template is edited in the admin UI's **HTML** tab: a Monaco source editor over `body.html`, with syntax highlighting, folding and find/replace. Saving stages the content as `draft.html`, and publishing stores it verbatim — `body.html` unchanged, `body.mjml` `''`, `body.editorJson` `null` — with plain text derived from it unless you override it.
+
+The HTML tab is editable only when raw HTML is the template's actual source of truth. For a template authored in Design or MJML, the tab still renders the compiled `body.html` so you can see what will send, but it's read-only, with a note pointing at the real source tab: hand-edits to compiler output would simply be discarded the next time that template is published from its MJML or Design document.
+
+This does not convert an HTML-only template into MJML or into the Design editor's format, and it does not resolve how a deploy-script pipeline and admin-UI editing should coexist long-term for the same template. It solves a narrower problem — making HTML-only templates viewable and editable in the UI at all.
+
 ## Variables
 
 Handlebars syntax. Three sources:
@@ -188,6 +198,20 @@ When you publish a template, mailery runs lint checks:
 - **Sender address present** (marketing only) — fails if the configured postal address isn't found.
 - **No broken merge tags** — Handlebars compile must succeed.
 - **Open tracking warning** — if `trackOpens` is on, flag it (Apple MPP inflates opens).
+
+For an HTML-authored template (see [Hand-written HTML](#hand-written-html)), the effective source is raw markup rather than compiled MJML, so a markup check runs alongside the checks above:
+
+| Rule | Severity | Catches |
+|---|---|---|
+| `html_empty` | error | The source is empty |
+| `html_unclosed_comment` | error | A `<!--` with no matching `-->` |
+| `html_unbalanced_tags` | error | An unclosed tag, a stray closing tag, or a mismatched pair |
+| `html_script_tag` | warning | A `<script>` tag — every client strips it, and it raises spam scores |
+| `html_missing_body` | warning | No `<html>`/`<body>` wrapper |
+
+HTML's implicit end tags are honoured, so the table markup email leans on — a row of `<td>` cells with no `</td>`, a `<p>` closed only by the next one — is not reported as unbalanced.
+
+The full content linter above — bare URLs, off-domain links, unknown variables, the unsubscribe tag, and the rest — runs against the rendered HTML regardless of source, so the HTML tab gets the same content rules as Design and MJML.
 
 ## Plain text
 
