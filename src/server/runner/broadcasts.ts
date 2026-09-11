@@ -29,6 +29,8 @@ import type { TemplateKind } from '../../shared/enums.js'
 import type { BroadcastDoc, SendDoc, TemplateDoc } from '../models/index.js'
 import { suppressedEmails } from './suppression.js'
 import { applyPostFilters, planSegment } from './segment.js'
+import { getBucketStatus } from './health.js'
+import { pauseBroadcast } from './broadcast-control.js'
 import type { RunnerContext } from './index.js'
 
 /**
@@ -299,6 +301,18 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
   try {
     for await (const eligible of eligibleRecipientPages(b, template.kind, ctx)) {
       if (!(await holdsLease())) return
+      // Enqueueing into a tripped breaker only builds a backlog that fires
+      // the moment someone resets it. Pause instead, and let resume decide.
+      const bucket = await getBucketStatus(ctx, template.fromEmail, template.kind)
+      if (bucket?.status === 'tripped') {
+        await pauseBroadcast(ctx, b._id!, {
+          code: 'circuit_breaker',
+          message: `the ${bucket.senderDomain ?? 'sender'} ${template.kind} circuit breaker is tripped: ${bucket.trippedReason ?? 'no reason recorded'}`,
+          at: new Date(),
+          details: { bucket: bucket._id },
+        })
+        return
+      }
       const seen = await alreadyDispatched(ctx, b._id!, eligible)
       let fresh = eligible.filter((c) => !seen.has(broadcastDedupeKey(b._id!, c.externalId)))
       if (fresh.length === 0) continue
@@ -442,6 +456,7 @@ function buildSendDoc(
     updatedAt: new Date(),
     sentAt: null,
     deliveredAt: null,
+    notBefore: new Date(Date.now() + delayMs),
   }
   return { doc, delayMs }
 }

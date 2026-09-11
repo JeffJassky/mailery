@@ -21,6 +21,7 @@ import { resolveVars } from '../adapters/vars.js'
 import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
 import { getBucketStatus, recordHealthCounter } from './health.js'
+import { pauseBroadcast } from './broadcast-control.js'
 import type { RunnerContext } from './index.js'
 
 export async function handleSend(
@@ -128,6 +129,33 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     return
   }
 
+  // A broadcast send follows its broadcast: nothing leaves while it is
+  // paused (stop rule, circuit breaker, operator) or after it is cancelled.
+  // Closes the race between a pause/cancel and a job already in the queue.
+  // A wave parked at its cap is NOT a hold: its sends are the wave, queued
+  // a moment before the broadcast parked, and they go out.
+  if (send.broadcastId) {
+    const broadcast = await ctx.collections.broadcasts.findOne(
+      { _id: send.broadcastId },
+      { projection: { status: 1, pauseReason: 1 } },
+    )
+    const holding = broadcast?.status === 'paused' && broadcast.pauseReason?.code !== 'cap_reached'
+    if (holding || broadcast?.status === 'cancelled') {
+      const held = holding
+      await ctx.collections.sends.updateOne(
+        { _id: send._id },
+        {
+          $set: {
+            status: held ? 'held' : 'cancelled',
+            errorMessage: held ? `held: broadcast paused (${broadcast.pauseReason?.code ?? 'unknown'})` : 'cancelled: broadcast cancelled',
+            updatedAt: new Date(),
+          },
+        },
+      )
+      return
+    }
+  }
+
   // 1. Suppression check (INVARIANT 3: always re-checked at send time).
   const supp = await isSuppressed(ctx.collections, send.emailAtSend, send.kind)
   if (supp.suppressed) {
@@ -143,6 +171,23 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   // the others.
   if (send.kind === 'marketing') {
     const bucket = await getBucketStatus(ctx, send.fromEmail, send.kind)
+    if (bucket?.status === 'tripped' && send.broadcastId) {
+      // A broadcast send does not loop on a 60s retry for as long as the
+      // breaker stays tripped (for a large broadcast, thousands of jobs that
+      // all fire the moment it is reset). Its broadcast pauses, the send is
+      // held with the rest, and an explicit resume re-queues them.
+      await ctx.collections.sends.updateOne(
+        { _id: send._id },
+        { $set: { status: 'held', errorMessage: 'held: circuit breaker tripped', updatedAt: new Date() } },
+      )
+      await pauseBroadcast(ctx, send.broadcastId, {
+        code: 'circuit_breaker',
+        message: `the ${bucket.senderDomain ?? 'sender'} ${send.kind} circuit breaker is tripped: ${bucket.trippedReason ?? 'no reason recorded'}`,
+        at: new Date(),
+        details: { bucket: bucket._id },
+      })
+      return
+    }
     if (bucket?.status === 'tripped') {
       // Release the claim so the delayed retry can re-claim it.
       await ctx.collections.sends.updateOne(
@@ -187,7 +232,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       eventName: run?.triggerEvent?.name,
       eventProperties: run?.triggerEvent?.properties,
     })
-    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved)
+    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id))
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
   } catch (err: any) {
     await markFailed(send._id!, `render error: ${String(err?.message ?? err)}`, ctx)
@@ -334,11 +379,14 @@ function buildRenderContext(
   vars: Record<string, unknown>,
   ctx: RunnerContext,
   resolved: Record<string, unknown> = {},
+  sendId?: string,
 ): RenderContext {
   const scope = 'marketing'
   const expiresAt = new Date(Date.now() + ctx.config.unsubscribeTokenLifetimeDays * 24 * 60 * 60 * 1000)
+  // The send id lets the one-click unsubscribe be attributed to this send
+  // (and so to its broadcast's unsubscribe count and stop rule).
   const token = signUnsubscribeToken(
-    { email: contact.email, scope, expiresAt },
+    { email: contact.email, scope, expiresAt, ...(sendId ? { sendId } : {}) },
     ctx.config.unsubscribeSecret,
   )
   const unsubscribeUrl = `${ctx.config.publicUrl}/m/unsub/${token}`

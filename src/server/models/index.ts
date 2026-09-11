@@ -303,6 +303,12 @@ export interface SendDoc {
   updatedAt: Date
   sentAt: Date | null
   deliveredAt: Date | null
+  /**
+   * Broadcast sends: the moment the send was meant to go (scheduledAt, or
+   * the recipient-local slot). A held send is re-queued with the delay that
+   * remains until then.
+   */
+  notBefore?: Date | null
 }
 
 export interface SuppressionDoc {
@@ -351,6 +357,20 @@ export interface BroadcastDoc {
   dispatchLeaseId?: string | null
   /** Bumped on every (re)start of dispatch; part of the dispatch job id. */
   dispatchGeneration?: number
+  /** Per-broadcast overrides of `MailerConfig.broadcastStopRules`. */
+  stopRules?: Partial<{
+    enabled: boolean
+    hardBounceRatePct: number
+    complaintRatePct: number
+    unsubscribeRatePct: number
+    minSample: number
+  }> | null
+  /**
+   * First stop-rule breach seen after the broadcast had nothing left to
+   * hold (status 'sent', no queued sends) — recorded, since there was
+   * nothing to pause.
+   */
+  stopRuleBreach?: { at: Date; sample: number; breaches: StopRuleBreach[] } | null
   stats: {
     sent: number
     delivered: number
@@ -369,6 +389,13 @@ export interface BroadcastOrder {
   /** A host field, e.g. `updatedAt` for "most recently active first" with `direction: 'desc'`. */
   field: string
   direction: 'asc' | 'desc'
+}
+
+export interface StopRuleBreach {
+  rule: 'hardBounceRatePct' | 'complaintRatePct' | 'unsubscribeRatePct'
+  count: number
+  ratePct: number
+  thresholdPct: number
 }
 
 export interface BroadcastPauseReason {

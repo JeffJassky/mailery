@@ -37,6 +37,7 @@ import type { Mailer } from '../mailer.js'
 import type { SendDoc } from '../models/index.js'
 import { resolveProvider } from '../provider-lookup.js'
 import { appendPendingUnsub } from '../unsub-journal.js'
+import { attributeUnsubscribeToSend } from '../runner/broadcast-control.js'
 import { mountDmarcInbound, type DmarcInboundOptions } from './dmarc-inbound.js'
 import { consoleRouteLogger, wrap, type RouteLogger } from './wrap.js'
 
@@ -371,6 +372,15 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     }
 
     res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
+
+    // Best effort, after the answer: attribute the opt-out to the send the
+    // link came from, so its broadcast's unsubscribe count (and stop rule)
+    // sees it. Skipped when the write was journaled — Mongo is down.
+    if (!dbError && decoded.sendId) {
+      void attributeUnsubscribeToSend(mailer.getRunnerContext(), decoded.sendId, decoded.email).catch((err) => {
+        logger.warn?.({ err, sendId: decoded.sendId }, 'mailery: unsubscribe attribution failed')
+      })
+    }
   }))
 
   // -------------------------------------------------------------------------

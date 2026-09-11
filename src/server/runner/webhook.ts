@@ -10,6 +10,7 @@ import type { SendDoc, WebhookEventDoc } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 import { sha256Hex } from '../tokens.js'
 import { recordHealthCounter, type HealthDims } from './health.js'
+import { evaluateBroadcastStopRules } from './broadcast-control.js'
 
 function dimsFromSend(send: SendDoc | null | undefined): HealthDims | null {
   if (!send) return null
@@ -205,6 +206,17 @@ export async function applyWebhookEvent(event: NormalizedEvent, ctx: RunnerConte
         },
       )
       break
+  }
+
+  // The events that can push a broadcast over a stop rule. Delivered events
+  // only grow the sample; the tick catches a rate that crosses minSample.
+  if (
+    send?.broadcastId &&
+    (event.type === 'bounce' || event.type === 'complaint' || event.type === 'spam_report' || event.type === 'unsubscribe')
+  ) {
+    await evaluateBroadcastStopRules(ctx, send.broadcastId).catch((err) => {
+      console.error('mailery: broadcast stop-rule evaluation failed', { id: String(send.broadcastId), err })
+    })
   }
 }
 

@@ -2,10 +2,12 @@
  * HMAC-signed tokens for unsubscribe + preference-center URLs.
  *
  * Format:  base64url(payload) '.' base64url(hmac)
- *   payload  = JSON.stringify({ e: email, s: scope, x: expiresAtMs })
+ *   payload  = JSON.stringify({ e: email, s: scope, x: expiresAtMs, i?: sendId })
  *   hmac     = HMAC-SHA256(secret, payload)
  *
- * Tokens expire because long-lived signed URLs are a liability.
+ * Tokens expire because long-lived signed URLs are a liability. `i` (0.18+)
+ * names the send the link was rendered into, so an unsubscribe can be
+ * attributed to it; tokens without it verify exactly as before.
  */
 
 import crypto from 'node:crypto'
@@ -15,7 +17,11 @@ export interface UnsubscribeTokenPayload {
   email: string
   scope: SuppressionScope
   expiresAt: Date
+  /** The send the link was rendered into (24 hex chars). Optional. */
+  sendId?: string
 }
+
+const SEND_ID_RE = /^[a-f0-9]{24}$/i
 
 export function signUnsubscribeToken(
   payload: UnsubscribeTokenPayload,
@@ -25,6 +31,7 @@ export function signUnsubscribeToken(
     e: payload.email.toLowerCase(),
     s: payload.scope,
     x: payload.expiresAt.getTime(),
+    ...(payload.sendId && SEND_ID_RE.test(payload.sendId) ? { i: payload.sendId } : {}),
   })
   const bodyB64 = b64url(Buffer.from(body, 'utf8'))
   const hmac = crypto.createHmac('sha256', secret).update(bodyB64).digest()
@@ -50,7 +57,7 @@ export function verifyUnsubscribeToken(
   if (expected.length !== actual.length) return null
   if (!crypto.timingSafeEqual(expected, actual)) return null
 
-  let body: { e?: string; s?: string; x?: number }
+  let body: { e?: string; s?: string; x?: number; i?: unknown }
   try {
     body = JSON.parse(b64urlDecode(bodyB64).toString('utf8'))
   } catch {
@@ -64,6 +71,7 @@ export function verifyUnsubscribeToken(
     email: body.e,
     scope: body.s,
     expiresAt: new Date(body.x),
+    ...(typeof body.i === 'string' && SEND_ID_RE.test(body.i) ? { sendId: body.i } : {}),
   }
 }
 

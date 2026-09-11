@@ -8,6 +8,7 @@ import { processNewlyFiredEventTriggers } from './triggers.js'
 import { processWebhookBacklog } from './webhook.js'
 import { sweepStrandedFlowRuns } from './sweep.js'
 import { processScheduledBroadcasts as dispatchScheduled, resumeStalledBroadcasts } from './broadcasts.js'
+import { evaluateActiveBroadcastStopRules } from './broadcast-control.js'
 import { evaluateHealth } from './health.js'
 import { promoteSoftBounces } from './bounce-promotion.js'
 import { runDnsblChecks } from './dnsbl.js'
@@ -90,6 +91,9 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await resumeStalledBroadcasts(ctx).catch((err) => {
     console.error('mailery: stalled-broadcast resume failed', err)
+  })
+  await evaluateActiveBroadcastStopRules(ctx).catch((err) => {
+    console.error('mailery: broadcast stop-rule sweep failed', err)
   })
   await evaluateHealth(ctx).catch((err) => {
     console.error('mailery: health evaluation failed', err)

@@ -21,7 +21,19 @@ import {
   startBroadcastDispatch,
   type BroadcastRecipientCount,
 } from '../runner/broadcasts.js'
-import { aggregateBroadcastStats, emptyBroadcastStats, type BroadcastStats } from '../runner/broadcast-control.js'
+import {
+  aggregateBroadcastStats,
+  broadcastStatsFor,
+  effectiveStopRules,
+  emptyBroadcastStats,
+  evaluateStopRules,
+  pauseBroadcast,
+  releaseHeldSends,
+  type BroadcastStats,
+  type StopRuleEvaluation,
+} from '../runner/broadcast-control.js'
+import { getBucketStatus } from '../runner/health.js'
+import type { BroadcastStopRules } from '../config.js'
 
 /** A typed failure the HTTP layer can map to a status code without guessing. */
 export class BroadcastOperationError extends Error {
@@ -52,6 +64,7 @@ export interface CreateBroadcastInput {
   respectRecipientTimezone?: boolean
   recipientCap?: number | null
   order?: BroadcastOrder | null
+  stopRules?: Partial<BroadcastStopRules> | null
 }
 
 export interface PatchBroadcastInput {
@@ -61,11 +74,14 @@ export interface PatchBroadcastInput {
   respectRecipientTimezone?: boolean
   recipientCap?: number | null
   order?: BroadcastOrder | null
+  stopRules?: Partial<BroadcastStopRules> | null
 }
 
 export interface ResumeBroadcastInput {
   /** New cap. Omit to keep the current one; null removes the cap. */
   recipientCap?: number | null
+  /** Merged onto the broadcast's stop-rule overrides; null resets them to the config defaults. */
+  stopRules?: Partial<BroadcastStopRules> | null
   confirmedCount?: number
 }
 
@@ -78,6 +94,17 @@ const orderSchema = z
     field: z.string().max(128).regex(ORDER_FIELD_RE, 'must be a plain field path, e.g. updatedAt'),
     direction: z.enum(['asc', 'desc']),
   })
+  .nullable()
+const pctSchema = z.number().min(0).max(100)
+const stopRulesSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    hardBounceRatePct: pctSchema.optional(),
+    complaintRatePct: pctSchema.optional(),
+    unsubscribeRatePct: pctSchema.optional(),
+    minSample: z.number().int().min(1).max(1_000_000).optional(),
+  })
+  .strict()
   .nullable()
 
 export interface ScheduleBroadcastInput {
@@ -95,6 +122,7 @@ export const agentCreateBroadcastSchema = z.object({
   respectRecipientTimezone: z.boolean().optional(),
   recipientCap: recipientCapSchema.optional(),
   order: orderSchema.optional(),
+  stopRules: stopRulesSchema.optional(),
 })
 
 export const agentPatchBroadcastSchema = z.object({
@@ -104,18 +132,30 @@ export const agentPatchBroadcastSchema = z.object({
   respectRecipientTimezone: z.boolean().optional(),
   recipientCap: recipientCapSchema.optional(),
   order: orderSchema.optional(),
+  stopRules: stopRulesSchema.optional(),
 })
 
 export const agentResumeBroadcastSchema = z.object({
   recipientCap: recipientCapSchema.optional(),
+  stopRules: stopRulesSchema.optional(),
   confirmedCount: z.number().int().nonnegative(),
+})
+
+export const agentPauseBroadcastSchema = z.object({
+  reason: z.string().max(500).optional(),
 })
 
 /**
  * Validate the wave settings. The admin routes pass bodies through without a
  * schema, so this runs on every path.
  */
-function checkWaveSettings(mailer: Mailer, input: { recipientCap?: unknown; order?: unknown }): void {
+function checkWaveSettings(mailer: Mailer, input: { recipientCap?: unknown; order?: unknown; stopRules?: unknown }): void {
+  if (input.stopRules !== undefined && !stopRulesSchema.safeParse(input.stopRules).success) {
+    throw new BroadcastOperationError(
+      'invalid_stop_rules',
+      'stopRules must be {enabled?, hardBounceRatePct?, complaintRatePct?, unsubscribeRatePct?, minSample?} (percentages 0-100), or null',
+    )
+  }
   if (input.recipientCap !== undefined && !recipientCapSchema.safeParse(input.recipientCap).success) {
     throw new BroadcastOperationError('invalid_recipient_cap', `recipientCap must be a positive integer up to ${MAX_RECIPIENT_CAP}, or null`)
   }
@@ -224,7 +264,7 @@ export async function countRecipients(
   b: BroadcastDoc,
   segment?: SegmentDefinition,
   overrides: { recipientCap?: number | null } = {},
-): Promise<BroadcastRecipientCount & { templateKind: TemplateDoc['kind'] }> {
+): Promise<BroadcastRecipientCount & { heldSends: number; templateKind: TemplateDoc['kind'] }> {
   const tpl = await loadBroadcastTemplate(mailer, b)
   const count = await countBroadcastRecipients(
     {
@@ -236,7 +276,36 @@ export async function countRecipients(
     tpl.kind,
     mailer.getRunnerContext(),
   )
-  return { ...count, templateKind: tpl.kind }
+  // Held sends are rows already (a paused broadcast's queued sends); resuming
+  // re-queues them on top of `recipientCount` new ones.
+  const heldSends = b._id ? await mailer.collections.sends.countDocuments({ broadcastId: b._id, status: 'held' }) : 0
+  return { ...count, heldSends, templateKind: tpl.kind }
+}
+
+/** The broadcast's stop rules as they stand: effective thresholds, sample, breaches. */
+export function stopRuleStatus(mailer: Mailer, b: BroadcastDoc, stats: BroadcastStats): StopRuleEvaluation {
+  return evaluateStopRules(stats, effectiveStopRules(mailer.config, b))
+}
+
+/** Pause a live broadcast by hand; its queued sends are held until resume. */
+export async function pauseBroadcastByOperator(
+  mailer: Mailer,
+  slug: string,
+  input: { reason?: string },
+  actor: string,
+): Promise<{ broadcast: BroadcastDoc; heldSends: number }> {
+  const b = await loadBroadcast(mailer, slug)
+  if (b.status !== 'sending' && b.status !== 'sent') {
+    throw new BroadcastOperationError('not_pausable', `broadcast is ${b.status}; only a sending or sent broadcast can be paused (cancel a draft or scheduled one)`, 409)
+  }
+  const out = await pauseBroadcast(
+    mailer.getRunnerContext(),
+    b._id!,
+    { code: 'manual', message: input.reason?.trim() || `paused by ${actor}`, at: new Date(), details: { actor } },
+    actor,
+  )
+  if (!out.paused) throw new BroadcastOperationError('not_pausable', 'broadcast changed state while being paused', 409)
+  return { broadcast: (await mailer.collections.broadcasts.findOne({ _id: b._id })) ?? b, heldSends: out.heldSends }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +350,7 @@ export async function createBroadcast(
   if (input.respectRecipientTimezone) doc.respectRecipientTimezone = true
   if (input.recipientCap !== undefined) doc.recipientCap = input.recipientCap
   if (input.order !== undefined) doc.order = input.order
+  if (input.stopRules !== undefined) doc.stopRules = input.stopRules
   try {
     const res = await mailer.collections.broadcasts.insertOne(doc)
     doc._id = res.insertedId
@@ -315,6 +385,7 @@ export async function patchBroadcast(
   const set: Record<string, unknown> = { updatedAt: new Date() }
   if (patch.recipientCap !== undefined) set.recipientCap = patch.recipientCap
   if (patch.order !== undefined) set.order = patch.order
+  if (patch.stopRules !== undefined) set.stopRules = patch.stopRules
   if (typeof patch.name === 'string') set.name = patch.name
   if (typeof patch.templateSlug === 'string') set.templateSlug = patch.templateSlug
   if (segmentDefinition) set.segmentDefinition = segmentDefinition
@@ -417,8 +488,44 @@ export async function resumeBroadcast(
     throw new BroadcastOperationError('not_paused', `broadcast is ${b.status}; only a paused broadcast can be resumed`, 409)
   }
   if (opts.requireSubscribed) assertSubscribedSegment(b.segmentDefinition)
-  checkWaveSettings(mailer, { recipientCap: input.recipientCap })
+  checkWaveSettings(mailer, { recipientCap: input.recipientCap, stopRules: input.stopRules })
   const cap = input.recipientCap !== undefined ? input.recipientCap : (b.recipientCap ?? null)
+  const stopRules =
+    input.stopRules === undefined
+      ? (b.stopRules ?? null)
+      : input.stopRules === null
+        ? null
+        : { ...(b.stopRules ?? {}), ...input.stopRules }
+
+  // A stop-rule pause re-opens only once the rules — as they will stand
+  // after this call — no longer fire; otherwise the next event re-pauses it.
+  // Raise a threshold (or disable the rules) in the same call to override.
+  if (b.pauseReason?.code === 'stop_rule') {
+    const evaluation = evaluateStopRules(
+      await broadcastStatsFor(mailer.collections, b._id!),
+      effectiveStopRules(mailer.config, { stopRules }),
+    )
+    if (evaluation.breaches.length > 0) {
+      throw new BroadcastOperationError(
+        'stop_rule_still_breached',
+        `the stop rules still fire (${evaluation.breaches.map((x) => `${x.rule} ${x.ratePct}% > ${x.thresholdPct}%`).join(', ')}); investigate, then resume with adjusted stopRules to override`,
+        409,
+        { evaluation },
+      )
+    }
+  }
+  if (b.pauseReason?.code === 'circuit_breaker') {
+    const tpl = await loadBroadcastTemplate(mailer, b)
+    const bucket = await getBucketStatus(mailer.getRunnerContext(), tpl.fromEmail, tpl.kind)
+    if (bucket?.status === 'tripped') {
+      throw new BroadcastOperationError(
+        'circuit_breaker_tripped',
+        `the ${bucket.senderDomain ?? 'sender'} ${tpl.kind} circuit breaker is still tripped (${bucket.trippedReason ?? 'no reason recorded'}); resume it first (POST /api/health/resume)`,
+        409,
+        { bucket: bucket._id, trippedReason: bucket.trippedReason },
+      )
+    }
+  }
   const sendsSoFar = await mailer.collections.sends.countDocuments({ broadcastId: b._id })
   if (cap !== null && cap <= sendsSoFar && b.pauseReason?.code === 'cap_reached') {
     throw new BroadcastOperationError(
@@ -436,13 +543,14 @@ export async function resumeBroadcast(
     if (typeof input.confirmedCount !== 'number') {
       throw new BroadcastOperationError('confirmedCount_required', 'confirmedCount (number) is required')
     }
-    expected = (await countRecipients(mailer, b, undefined, { recipientCap: cap })).recipientCount
+    const count = await countRecipients(mailer, b, undefined, { recipientCap: cap })
+    expected = count.recipientCount + count.heldSends
     if (input.confirmedCount !== expected) {
       throw new BroadcastOperationError(
         'count_mismatch',
-        `confirmedCount ${input.confirmedCount} does not match the ${expected} recipient(s) resuming would send to now`,
+        `confirmedCount ${input.confirmedCount} does not match the ${expected} send(s) resuming would release now (${count.recipientCount} new + ${count.heldSends} held)`,
         409,
-        { expected, confirmedCount: input.confirmedCount },
+        { expected, recipientCount: count.recipientCount, heldSends: count.heldSends, confirmedCount: input.confirmedCount },
       )
     }
   }
@@ -454,6 +562,7 @@ export async function resumeBroadcast(
       $set: {
         status: 'sending',
         recipientCap: cap,
+        stopRules,
         pausedAt: null,
         pauseReason: null,
         dispatchLeaseId: null,
@@ -474,7 +583,9 @@ export async function resumeBroadcast(
       expected !== null ? ` · confirmedCount=${expected}` : ''
     }`,
   })
-  await startBroadcastDispatch(resumed, mailer.getRunnerContext())
+  const ctx = mailer.getRunnerContext()
+  await releaseHeldSends(ctx, b._id!)
+  await startBroadcastDispatch(resumed, ctx)
   return (await mailer.collections.broadcasts.findOne({ _id: b._id })) ?? resumed
 }
 
@@ -548,6 +659,8 @@ export function broadcastSummary(b: BroadcastDoc) {
     order: b.order ?? null,
     pausedAt: b.pausedAt ?? null,
     pauseReason: b.pauseReason ?? null,
+    stopRules: b.stopRules ?? null,
+    stopRuleBreach: b.stopRuleBreach ?? null,
     scheduledAt: b.scheduledAt,
     startedAt: b.startedAt,
     completedAt: b.completedAt,

@@ -16,6 +16,12 @@ export type SendStatus =
   | 'failed'
   | 'suppressed'
   | 'cancelled'
+  /**
+   * A broadcast send parked because its broadcast is paused (stop rule,
+   * circuit breaker, operator). Never dispatched while held; resuming the
+   * broadcast re-queues it.
+   */
+  | 'held'
 
 export type TemplateKind = 'transactional' | 'marketing'
 

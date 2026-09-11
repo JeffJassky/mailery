@@ -150,6 +150,26 @@ export interface CircuitBreakerThresholds {
   minSendsBeforeEval: number
 }
 
+/**
+ * Automatic stop rules for one broadcast. A breach pauses the broadcast
+ * (`pauseReason.code: 'stop_rule'`): no more enqueues, and its queued sends
+ * are held until an explicit resume. Rates are measured over the
+ * broadcast's sends with a known outcome (delivered or bounced) and only
+ * once `minSample` of them are in. A breach is `rate > threshold`.
+ */
+export interface BroadcastStopRules {
+  /** Default true. */
+  enabled: boolean
+  /** Hard bounces, % of outcomes. Default 2. */
+  hardBounceRatePct: number
+  /** Complaints (spam reports), % of outcomes. Default 0.1. */
+  complaintRatePct: number
+  /** Unsubscribes attributed to the broadcast, % of outcomes. Default 1. */
+  unsubscribeRatePct: number
+  /** Outcomes required before any rule is evaluated. Default 100. */
+  minSample: number
+}
+
 export interface BotFilterConfig {
   /**
    * User agents matching this pattern are treated as automated. Applied to
@@ -330,6 +350,12 @@ export interface MailerConfig {
   broadcastConfirmationThreshold?: number
   broadcastEnqueueBatchSize?: number
   broadcastEnqueueMaxWaiting?: number
+  /**
+   * Defaults for every broadcast's automatic stop rules; a broadcast can
+   * override any of them (`stopRules` on create/patch/resume). See
+   * `BroadcastStopRules`.
+   */
+  broadcastStopRules?: Partial<BroadcastStopRules>
 
   // ---- Worker behavior ------------------------------------------------------
   workerless?: boolean
@@ -380,6 +406,17 @@ export interface MailerConfig {
   getAdminActor?: (req: any) => string
   onCircuitBreakerTrip?: (info: { reason: string; rates: Record<string, number> }) => Promise<void> | void
   onSendFailure?: (info: { send: any; error: Error }) => Promise<void> | void
+  /**
+   * Called when a broadcast is paused by a stop rule, the circuit breaker, a
+   * reached cap, or an operator. Alerting belongs here: a stop-rule pause
+   * waits for a human.
+   */
+  onBroadcastPaused?: (info: {
+    broadcastId: string
+    slug: string
+    reason: { code: string; message: string; at: Date; details?: Record<string, unknown> }
+    heldSends: number
+  }) => Promise<void> | void
   handlebarsHelpers?: Record<string, Handlebars.HelperDelegate>
 }
 
@@ -413,6 +450,7 @@ export type ResolvedConfig = Required<
   >
 > & {
   circuitBreaker: CircuitBreakerThresholds
+  broadcastStopRules: BroadcastStopRules
 } & MailerConfig
 
 export const DEFAULTS = {
@@ -451,6 +489,14 @@ export const CIRCUIT_BREAKER_DEFAULTS: CircuitBreakerThresholds = {
   minSendsBeforeEval: 100,
 }
 
+export const BROADCAST_STOP_RULE_DEFAULTS: BroadcastStopRules = {
+  enabled: true,
+  hardBounceRatePct: 2,
+  complaintRatePct: 0.1,
+  unsubscribeRatePct: 1,
+  minSample: 100,
+}
+
 export function resolveConfig(c: MailerConfig): ResolvedConfig {
   return {
     ...c,
@@ -479,5 +525,6 @@ export function resolveConfig(c: MailerConfig): ResolvedConfig {
     requireSignedTrackingUrls: c.requireSignedTrackingUrls ?? DEFAULTS.requireSignedTrackingUrls,
     trackingUrlLifetimeDays: c.trackingUrlLifetimeDays ?? DEFAULTS.trackingUrlLifetimeDays,
     circuitBreaker: { ...CIRCUIT_BREAKER_DEFAULTS, ...(c.circuitBreaker ?? {}) },
+    broadcastStopRules: { ...BROADCAST_STOP_RULE_DEFAULTS, ...(c.broadcastStopRules ?? {}) },
   }
 }
