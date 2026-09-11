@@ -334,6 +334,23 @@ export interface BroadcastDoc {
   recipientCount: number | null
   /** When true, dispatch fires each recipient at their local-timezone equivalent of `scheduledAt`. */
   respectRecipientTimezone?: boolean
+  /**
+   * Native waves: the most send rows this broadcast may have. Dispatch stops
+   * enqueueing when the broadcast's send rows (every status, earlier waves
+   * included) reach it, and parks the broadcast in `paused` with
+   * `pauseReason.code === 'cap_reached'` if eligible recipients remain.
+   * Raising it and resuming sends the next slice. Null or absent: no cap.
+   */
+  recipientCap?: number | null
+  /** Order recipients are taken in (host-side sort). Null or absent: the adapter's own order. */
+  order?: BroadcastOrder | null
+  /** Set while `status === 'paused'`. */
+  pausedAt?: Date | null
+  pauseReason?: BroadcastPauseReason | null
+  /** Lease held by the one dispatcher allowed to enqueue for this broadcast. */
+  dispatchLeaseId?: string | null
+  /** Bumped on every (re)start of dispatch; part of the dispatch job id. */
+  dispatchGeneration?: number
   stats: {
     sent: number
     delivered: number
@@ -346,6 +363,25 @@ export interface BroadcastDoc {
   createdAt: Date
   createdBy: string
   updatedAt: Date
+}
+
+export interface BroadcastOrder {
+  /** A host field, e.g. `updatedAt` for "most recently active first" with `direction: 'desc'`. */
+  field: string
+  direction: 'asc' | 'desc'
+}
+
+export interface BroadcastPauseReason {
+  /**
+   * cap_reached     — the wave's recipientCap is spent; raise it and resume.
+   * stop_rule       — a per-broadcast bounce/complaint/unsubscribe threshold was crossed.
+   * circuit_breaker — the sender domain's marketing circuit breaker tripped.
+   * manual          — paused by an operator.
+   */
+  code: 'cap_reached' | 'stop_rule' | 'circuit_breaker' | 'manual'
+  message: string
+  at: Date
+  details?: Record<string, unknown>
 }
 
 export interface OutboxDoc {

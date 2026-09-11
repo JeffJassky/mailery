@@ -46,7 +46,12 @@ export type SuppressionReason =
 
 export type FlowRunStatus = 'active' | 'completed' | 'exited' | 'failed'
 
-export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled' | 'failed'
+/**
+ * `paused` — dispatch stopped with the broadcast re-openable: a wave reached
+ * its `recipientCap`, a stop rule or the circuit breaker fired, or an
+ * operator paused it. `pauseReason` says which; `resume` re-opens it.
+ */
+export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'paused' | 'sent' | 'cancelled' | 'failed'
 
 export type HealthStatus = 'healthy' | 'degraded' | 'tripped'
 

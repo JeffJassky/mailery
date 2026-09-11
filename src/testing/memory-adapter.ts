@@ -5,9 +5,31 @@
 
 import type {
   AdapterFilter,
+  AdapterSort,
   Contact,
   ContactAdapter,
 } from '../shared/types.js'
+
+function fieldPath(c: Contact, path: string): unknown {
+  let cur: unknown = c.fields
+  for (const part of path.split('.')) {
+    if (cur === null || typeof cur !== 'object') return undefined
+    cur = (cur as Record<string, unknown>)[part]
+  }
+  return cur
+}
+
+function compareValues(a: unknown, b: unknown): number {
+  const an = a === null || a === undefined
+  const bn = b === null || b === undefined
+  if (an || bn) return an && bn ? 0 : an ? -1 : 1
+  const av = a instanceof Date ? a.getTime() : a
+  const bv = b instanceof Date ? b.getTime() : b
+  if (typeof av === 'number' && typeof bv === 'number') return av - bv
+  const as = String(av)
+  const bs = String(bv)
+  return as < bs ? -1 : as > bs ? 1 : 0
+}
 
 export class MemoryContactAdapter implements ContactAdapter {
   private readonly byId = new Map<string, Contact>()
@@ -50,10 +72,36 @@ export class MemoryContactAdapter implements ContactAdapter {
     return out
   }
 
+  /** `query` honours `opts.sort` over `contact.fields` (dotted paths), like MongoContactAdapter over documents. */
+  readonly supportsSort: boolean = true
+
   async query(
     filter: AdapterFilter,
-    opts: { limit: number; cursor?: string },
+    opts: { limit: number; cursor?: string; sort?: AdapterSort },
   ): Promise<{ contacts: Contact[]; nextCursor?: string }> {
+    if (opts.sort) {
+      const { field, direction } = opts.sort
+      const dir = direction === 'desc' ? -1 : 1
+      // Same order as Mongo: null/missing lowest, ties by id ascending.
+      const sorted = Array.from(this.byId.values())
+        .filter((c) => matches(c, filter))
+        .sort((a, b) => {
+          const byValue = compareValues(fieldPath(a, field), fieldPath(b, field)) * dir
+          if (byValue !== 0) return byValue
+          return a.externalId < b.externalId ? -1 : a.externalId > b.externalId ? 1 : 0
+        })
+      let start = 0
+      if (opts.cursor) {
+        const at = sorted.findIndex((c) => c.externalId === opts.cursor)
+        start = at === -1 ? sorted.length : at + 1
+      }
+      const page = sorted.slice(start, start + opts.limit)
+      return {
+        contacts: page,
+        nextCursor: start + opts.limit < sorted.length ? page[page.length - 1]?.externalId : undefined,
+      }
+    }
+
     const all = Array.from(this.byId.values())
       .filter((c) => matches(c, filter))
       .sort((a, b) => (a.externalId < b.externalId ? -1 : 1))

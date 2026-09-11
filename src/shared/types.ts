@@ -26,11 +26,38 @@ export interface AdapterFilter {
   createdBefore?: Date
 }
 
+/**
+ * Order for `ContactAdapter.query`. `field` names a field on the host's
+ * contact record (for MongoContactAdapter, a document path such as
+ * `updatedAt`), not a key of the `Contact` projection. Ties break on the
+ * contact id, ascending, so the order is total and pagination is stable.
+ */
+export interface AdapterSort {
+  field: string
+  direction: 'asc' | 'desc'
+}
+
 export interface ContactAdapter {
   getById(externalId: string): Promise<Contact | null>
   getByEmail(email: string): Promise<Contact | null>
   getBatch(externalIds: string[]): Promise<Map<string, Contact>>
-  query(filter: AdapterFilter, opts: { limit: number; cursor?: string }): Promise<{ contacts: Contact[]; nextCursor?: string }>
+  /**
+   * One page of contacts matching `filter`. Without `opts.sort` the order is
+   * the adapter's own and must be stable across calls (MongoContactAdapter:
+   * by id). `opts.sort` is honoured only by adapters that declare
+   * `supportsSort: true`; mailery never passes it to one that does not.
+   */
+  query(
+    filter: AdapterFilter,
+    opts: { limit: number; cursor?: string; sort?: AdapterSort },
+  ): Promise<{ contacts: Contact[]; nextCursor?: string }>
+  /**
+   * True when `query` honours `opts.sort` (with an opaque cursor that
+   * encodes the sort position). Optional: adapters written before 0.18 omit
+   * it, and a broadcast with an `order` is then refused at create time
+   * rather than silently sent in id order.
+   */
+  readonly supportsSort?: boolean
   count(filter: AdapterFilter): Promise<number>
   addTags?(externalId: string, tags: string[]): Promise<void>
   removeTags?(externalId: string, tags: string[]): Promise<void>

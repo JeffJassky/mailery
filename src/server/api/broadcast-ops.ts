@@ -13,10 +13,14 @@ import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 
 import type { Mailer } from '../mailer.js'
-import type { BroadcastDoc, TemplateDoc } from '../models/index.js'
+import type { BroadcastDoc, BroadcastOrder, TemplateDoc } from '../models/index.js'
 import type { SegmentDefinition } from '../../shared/types.js'
 import { segmentDefinitionSchema, slugSchema } from '../../shared/schemas.js'
-import { countBroadcastRecipients, type BroadcastRecipientCount } from '../runner/broadcasts.js'
+import {
+  countBroadcastRecipients,
+  startBroadcastDispatch,
+  type BroadcastRecipientCount,
+} from '../runner/broadcasts.js'
 
 /** A typed failure the HTTP layer can map to a status code without guessing. */
 export class BroadcastOperationError extends Error {
@@ -45,6 +49,8 @@ export interface CreateBroadcastInput {
   templateSlug: string
   segmentDefinition?: SegmentDefinition
   respectRecipientTimezone?: boolean
+  recipientCap?: number | null
+  order?: BroadcastOrder | null
 }
 
 export interface PatchBroadcastInput {
@@ -52,7 +58,26 @@ export interface PatchBroadcastInput {
   templateSlug?: string
   segmentDefinition?: SegmentDefinition
   respectRecipientTimezone?: boolean
+  recipientCap?: number | null
+  order?: BroadcastOrder | null
 }
+
+export interface ResumeBroadcastInput {
+  /** New cap. Omit to keep the current one; null removes the cap. */
+  recipientCap?: number | null
+  confirmedCount?: number
+}
+
+const MAX_RECIPIENT_CAP = 10_000_000
+const ORDER_FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/
+
+const recipientCapSchema = z.number().int().positive().max(MAX_RECIPIENT_CAP).nullable()
+const orderSchema = z
+  .object({
+    field: z.string().max(128).regex(ORDER_FIELD_RE, 'must be a plain field path, e.g. updatedAt'),
+    direction: z.enum(['asc', 'desc']),
+  })
+  .nullable()
 
 export interface ScheduleBroadcastInput {
   scheduledAt: unknown
@@ -67,6 +92,8 @@ export const agentCreateBroadcastSchema = z.object({
   templateSlug: slugSchema,
   segmentDefinition: z.object({ filters: z.array(z.any()) }).optional(),
   respectRecipientTimezone: z.boolean().optional(),
+  recipientCap: recipientCapSchema.optional(),
+  order: orderSchema.optional(),
 })
 
 export const agentPatchBroadcastSchema = z.object({
@@ -74,7 +101,36 @@ export const agentPatchBroadcastSchema = z.object({
   templateSlug: slugSchema.optional(),
   segmentDefinition: z.object({ filters: z.array(z.any()) }).optional(),
   respectRecipientTimezone: z.boolean().optional(),
+  recipientCap: recipientCapSchema.optional(),
+  order: orderSchema.optional(),
 })
+
+export const agentResumeBroadcastSchema = z.object({
+  recipientCap: recipientCapSchema.optional(),
+  confirmedCount: z.number().int().nonnegative(),
+})
+
+/**
+ * Validate the wave settings. The admin routes pass bodies through without a
+ * schema, so this runs on every path.
+ */
+function checkWaveSettings(mailer: Mailer, input: { recipientCap?: unknown; order?: unknown }): void {
+  if (input.recipientCap !== undefined && !recipientCapSchema.safeParse(input.recipientCap).success) {
+    throw new BroadcastOperationError('invalid_recipient_cap', `recipientCap must be a positive integer up to ${MAX_RECIPIENT_CAP}, or null`)
+  }
+  if (input.order !== undefined) {
+    if (!orderSchema.safeParse(input.order).success) {
+      throw new BroadcastOperationError('invalid_order', 'order must be {field: "<host field path>", direction: "asc" | "desc"}, or null')
+    }
+    if (input.order !== null && !mailer.adapter.supportsSort) {
+      throw new BroadcastOperationError(
+        'adapter_cannot_sort',
+        'the contact adapter does not declare supportsSort, so a broadcast cannot be sent in an order; omit order to send in the adapter\'s own order',
+        422,
+      )
+    }
+  }
+}
 
 export const agentScheduleBroadcastSchema = z.object({
   scheduledAt: z.string().min(1),
@@ -166,10 +222,16 @@ export async function countRecipients(
   mailer: Mailer,
   b: BroadcastDoc,
   segment?: SegmentDefinition,
+  overrides: { recipientCap?: number | null } = {},
 ): Promise<BroadcastRecipientCount & { templateKind: TemplateDoc['kind'] }> {
   const tpl = await loadBroadcastTemplate(mailer, b)
   const count = await countBroadcastRecipients(
-    { _id: b._id, segmentDefinition: segment ?? b.segmentDefinition },
+    {
+      _id: b._id,
+      segmentDefinition: segment ?? b.segmentDefinition,
+      order: b.order ?? null,
+      recipientCap: overrides.recipientCap !== undefined ? overrides.recipientCap : (b.recipientCap ?? null),
+    },
     tpl.kind,
     mailer.getRunnerContext(),
   )
@@ -194,6 +256,7 @@ export async function createBroadcast(
     ? parseSegment(input.segmentDefinition, !!opts.strictSegment)
     : DEFAULT_SEGMENT
   if (opts.requireSubscribed) assertSubscribedSegment(segmentDefinition)
+  checkWaveSettings(mailer, input)
   const now = new Date()
   const doc: BroadcastDoc = {
     slug,
@@ -215,6 +278,8 @@ export async function createBroadcast(
     updatedAt: now,
   }
   if (input.respectRecipientTimezone) doc.respectRecipientTimezone = true
+  if (input.recipientCap !== undefined) doc.recipientCap = input.recipientCap
+  if (input.order !== undefined) doc.order = input.order
   try {
     const res = await mailer.collections.broadcasts.insertOne(doc)
     doc._id = res.insertedId
@@ -245,7 +310,10 @@ export async function patchBroadcast(
     ? parseSegment(patch.segmentDefinition, !!opts.strictSegment)
     : undefined
   if (opts.requireSubscribed && segmentDefinition) assertSubscribedSegment(segmentDefinition)
+  checkWaveSettings(mailer, patch)
   const set: Record<string, unknown> = { updatedAt: new Date() }
+  if (patch.recipientCap !== undefined) set.recipientCap = patch.recipientCap
+  if (patch.order !== undefined) set.order = patch.order
   if (typeof patch.name === 'string') set.name = patch.name
   if (typeof patch.templateSlug === 'string') set.templateSlug = patch.templateSlug
   if (segmentDefinition) set.segmentDefinition = segmentDefinition
@@ -326,6 +394,87 @@ export async function scheduleBroadcast(
     diffSummary: `scheduled at ${scheduled.toISOString()} · confirmedCount=${confirmedCount} · threshold=${threshold}`,
   })
   return res
+}
+
+/**
+ * Re-open a paused broadcast and dispatch again. For a wave parked at its cap
+ * (`pauseReason.code === 'cap_reached'`), pass a higher `recipientCap` — or
+ * null for "everyone remaining" — and dispatch sends only to eligible
+ * contacts, in order, who have no send row yet, until the rows reach the new
+ * cap. With `requireExactCount`, `confirmedCount` must equal what that pass
+ * will enqueue (`countRecipients` with the new cap).
+ */
+export async function resumeBroadcast(
+  mailer: Mailer,
+  slug: string,
+  input: ResumeBroadcastInput,
+  actor: string,
+  opts: BroadcastOpOptions = {},
+): Promise<BroadcastDoc> {
+  const b = await loadBroadcast(mailer, slug)
+  if (b.status !== 'paused') {
+    throw new BroadcastOperationError('not_paused', `broadcast is ${b.status}; only a paused broadcast can be resumed`, 409)
+  }
+  if (opts.requireSubscribed) assertSubscribedSegment(b.segmentDefinition)
+  checkWaveSettings(mailer, { recipientCap: input.recipientCap })
+  const cap = input.recipientCap !== undefined ? input.recipientCap : (b.recipientCap ?? null)
+  const sendsSoFar = await mailer.collections.sends.countDocuments({ broadcastId: b._id })
+  if (cap !== null && cap <= sendsSoFar && b.pauseReason?.code === 'cap_reached') {
+    throw new BroadcastOperationError(
+      'cap_not_raised',
+      `${sendsSoFar} send(s) already count against recipientCap ${cap}; pass a higher recipientCap (or null for no cap) to send the next wave`,
+      409,
+      { recipientCap: cap, sendsSoFar },
+    )
+  }
+  if (cap !== null && cap < sendsSoFar) {
+    throw new BroadcastOperationError('cap_below_sent', `recipientCap ${cap} is below the ${sendsSoFar} send(s) already made`, 400)
+  }
+  let expected: number | null = null
+  if (opts.requireExactCount) {
+    if (typeof input.confirmedCount !== 'number') {
+      throw new BroadcastOperationError('confirmedCount_required', 'confirmedCount (number) is required')
+    }
+    expected = (await countRecipients(mailer, b, undefined, { recipientCap: cap })).recipientCount
+    if (input.confirmedCount !== expected) {
+      throw new BroadcastOperationError(
+        'count_mismatch',
+        `confirmedCount ${input.confirmedCount} does not match the ${expected} recipient(s) resuming would send to now`,
+        409,
+        { expected, confirmedCount: input.confirmedCount },
+      )
+    }
+  }
+
+  const now = new Date()
+  const resumed = await mailer.collections.broadcasts.findOneAndUpdate(
+    { _id: b._id, status: 'paused' },
+    {
+      $set: {
+        status: 'sending',
+        recipientCap: cap,
+        pausedAt: null,
+        pauseReason: null,
+        dispatchLeaseId: null,
+        updatedAt: now,
+        ...(typeof input.confirmedCount === 'number'
+          ? { confirmedCount: input.confirmedCount, confirmedAt: now, confirmedBy: actor }
+          : {}),
+      },
+    },
+    { returnDocument: 'after' },
+  )
+  if (!resumed) throw new BroadcastOperationError('not_paused', 'broadcast left paused while being resumed', 409)
+  await mailer.audit({
+    actor,
+    action: 'broadcast.resume',
+    resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
+    diffSummary: `was paused (${b.pauseReason?.code ?? 'unknown'}) · recipientCap ${b.recipientCap ?? 'none'} → ${cap ?? 'none'} · sendsSoFar=${sendsSoFar}${
+      expected !== null ? ` · confirmedCount=${expected}` : ''
+    }`,
+  })
+  await startBroadcastDispatch(resumed, mailer.getRunnerContext())
+  return (await mailer.collections.broadcasts.findOne({ _id: b._id })) ?? resumed
 }
 
 export async function cancelBroadcast(
@@ -425,6 +574,10 @@ export function broadcastSummary(b: BroadcastDoc) {
     status: b.status,
     segmentDefinition: b.segmentDefinition,
     respectRecipientTimezone: b.respectRecipientTimezone === true,
+    recipientCap: b.recipientCap ?? null,
+    order: b.order ?? null,
+    pausedAt: b.pausedAt ?? null,
+    pauseReason: b.pauseReason ?? null,
     scheduledAt: b.scheduledAt,
     startedAt: b.startedAt,
     completedAt: b.completedAt,

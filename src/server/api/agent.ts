@@ -69,6 +69,7 @@ import {
   agentCreateBroadcastSchema,
   agentPatchBroadcastSchema,
   agentScheduleBroadcastSchema,
+  agentResumeBroadcastSchema,
   broadcastStatusBreakdown,
   broadcastSummary,
   cancelBroadcast,
@@ -78,6 +79,7 @@ import {
   emptyBroadcastStats,
   loadBroadcast,
   patchBroadcast,
+  resumeBroadcast,
   scheduleBroadcast,
 } from './broadcast-ops.js'
 
@@ -989,6 +991,27 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     }),
   )
 
+  /**
+   * Re-open a paused broadcast. The next wave of a capped broadcast:
+   * `{recipientCap: <higher>, confirmedCount}` where confirmedCount is
+   * `recipientCount` from POST /broadcasts/:slug/count after the cap change —
+   * i.e. count first with the cap you intend (the count route reports
+   * `uncappedRecipientCount` and `sendsSoFar`, so the next slice is
+   * `min(uncapped, newCap - sendsSoFar)`).
+   */
+  router.post(
+    '/broadcasts/:slug/resume',
+    wrap(async (req, res) => {
+      const parsed = agentResumeBroadcastSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
+      const b = await resumeBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req), {
+        requireSubscribed: true,
+        requireExactCount: true,
+      })
+      res.json({ broadcast: broadcastSummary(b) })
+    }),
+  )
+
   router.post(
     '/broadcasts/:slug/cancel',
     wrap(async (req, res) => {
@@ -1619,6 +1642,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
   { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to. recipientCount is what schedule requires as confirmedCount.' },
   { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}. 409 count_mismatch unless confirmedCount equals POST /broadcasts/:slug/count → recipientCount. The segment must be limited to subscribed contacts.' },
+  { method: 'POST', path: '/broadcasts/:slug/resume', summary: 'Re-open a paused broadcast: {recipientCap?, confirmedCount}. For the next wave of a capped broadcast raise recipientCap (null = no cap); confirmedCount must equal what the pass will send.' },
   { method: 'POST', path: '/broadcasts/:slug/cancel', summary: 'Cancel a broadcast.' },
   { method: 'POST', path: '/tick', summary: 'Run the runner tick now (trigger scan, sweeps, outbox, webhook backlog).' },
   { method: 'GET', path: '/webhooks/status', summary: 'Provider webhook ingest: last event received, counts by type (24h), unprocessed backlog.' },

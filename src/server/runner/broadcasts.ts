@@ -5,10 +5,21 @@
  * enqueue (pause when waitingCount > broadcastEnqueueMaxWaiting).
  *
  * Who a broadcast reaches is decided in exactly one place,
- * `eligibleRecipientPages`: the host filter, the mailer-side post-filters,
- * a sendable address, and the suppression check. Dispatch and
- * `countBroadcastRecipients` both consume it, which is what lets the agent
- * API refuse a `confirmedCount` that differs from what dispatch will send.
+ * `eligibleRecipientPages`: the host filter (in the broadcast's `order`),
+ * the mailer-side post-filters, a sendable address, and the suppression
+ * check. Dispatch and `countBroadcastRecipients` both consume it, which is
+ * what lets the agent API refuse a `confirmedCount` that differs from what
+ * dispatch will send.
+ *
+ * Native waves. `recipientCap` bounds the broadcast's total send rows. A
+ * dispatch pass walks the eligible stream in order, skips contacts that
+ * already have a row (earlier waves), and enqueues new ones until the rows
+ * reach the cap; if eligible contacts remain it parks the broadcast in
+ * `paused` (`pauseReason.code: 'cap_reached'`). Raising the cap and resuming
+ * runs the same pass again, so the next wave is the next contacts in order
+ * who have not been sent to. Exactly one dispatcher may enqueue for a
+ * broadcast at a time (`dispatchLeaseId`), so the cap holds even when a
+ * stalled-dispatch rescue races a live worker.
  */
 
 import { ObjectId } from 'mongodb'
@@ -42,7 +53,7 @@ export async function processScheduledBroadcasts(ctx: RunnerContext): Promise<vo
     // Optimistic claim — only one worker takes this broadcast.
     const claimed = await ctx.collections.broadcasts.findOneAndUpdate(
       { _id: b._id, status: 'scheduled' },
-      { $set: { status: 'sending', startedAt: now, updatedAt: now } },
+      { $set: { status: 'sending', startedAt: now, updatedAt: now, dispatchLeaseId: null } },
       { returnDocument: 'after' },
     )
     if (!claimed) continue
@@ -56,10 +67,22 @@ export async function processScheduledBroadcasts(ctx: RunnerContext): Promise<vo
  * can't starve trigger scans and sweeps — the tick worker has concurrency 1.
  * The noop driver has no workers (hosts drive the runner synchronously), so
  * dispatch stays inline there.
+ *
+ * The job id carries a per-start generation. It used to be
+ * `broadcast-dispatch:<id>` alone, and both drivers drop an add whose id they
+ * still hold (Bull keeps completed jobs for a day; Agenda any job not yet
+ * finished) — so resuming a paused wave, or rescuing a stalled dispatch,
+ * could silently never run.
  */
-async function startBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
+export async function startBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
+  const bumped = await ctx.collections.broadcasts.findOneAndUpdate(
+    { _id: broadcast._id },
+    { $inc: { dispatchGeneration: 1 } },
+    { returnDocument: 'after' },
+  )
+  const current = bumped ?? broadcast
   if (ctx.config.queue.driver === 'noop') {
-    await runBroadcastDispatch(broadcast, ctx)
+    await runBroadcastDispatch(current, ctx)
     return
   }
   await ctx.queues.advance.add(
@@ -68,7 +91,7 @@ async function startBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContex
     {
       attempts: 3,
       backoff: { type: 'exponential', delay: 60_000 },
-      jobId: `broadcast-dispatch:${broadcast._id}`,
+      jobId: `broadcast-dispatch:${broadcast._id}:${current.dispatchGeneration ?? 0}`,
     },
   )
 }
@@ -83,7 +106,8 @@ export async function dispatchBroadcastById(broadcastId: ObjectId, ctx: RunnerCo
 /**
  * Rescue broadcasts whose dispatcher died. Re-dispatch is idempotent: the
  * per-recipient dedupeKey unique index skips send rows already inserted, so
- * a resumed broadcast picks up where the dead worker left off.
+ * a resumed broadcast picks up where the dead worker left off, and the cap
+ * counts the rows already there.
  */
 export async function resumeStalledBroadcasts(ctx: RunnerContext): Promise<void> {
   const cutoff = new Date(Date.now() - STALLED_BROADCAST_THRESHOLD_MS)
@@ -92,11 +116,14 @@ export async function resumeStalledBroadcasts(ctx: RunnerContext): Promise<void>
     .toArray()
 
   for (const b of stalled) {
-    // Touch before re-dispatch so subsequent ticks don't stack rescues.
-    await ctx.collections.broadcasts.updateOne(
-      { _id: b._id },
-      { $set: { updatedAt: new Date() } },
+    // Release the dead dispatcher's lease (conditionally, so concurrent
+    // ticks don't stack rescues). A dispatcher that was merely slow finds
+    // its lease gone at its next heartbeat and stops.
+    const reset = await ctx.collections.broadcasts.updateOne(
+      { _id: b._id, status: 'sending', updatedAt: { $lt: cutoff } },
+      { $set: { dispatchLeaseId: null, updatedAt: new Date() } },
     )
+    if (reset.modifiedCount === 0) continue
     await startBroadcastDispatch(b, ctx)
   }
 }
@@ -107,8 +134,8 @@ async function runBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext)
   } catch (err) {
     console.error('mailery: broadcast dispatch failed', { id: String(broadcast._id), err })
     await ctx.collections.broadcasts.updateOne(
-      { _id: broadcast._id },
-      { $set: { status: 'failed', updatedAt: new Date() } },
+      { _id: broadcast._id, status: 'sending' },
+      { $set: { status: 'failed', updatedAt: new Date(), dispatchLeaseId: null } },
     )
   }
 }
@@ -129,20 +156,29 @@ export function isSendableEmail(email: string | null | undefined): boolean {
 }
 
 /**
- * Stream the broadcast's eligible recipients, one adapter page at a time:
- * the host filter (stage A), the mailer-side post-filters (stage B), a
- * sendable address, and not suppressed for the template's kind. A yielded
- * page may be empty; the stream ends when the adapter's cursor does.
+ * Stream the broadcast's eligible recipients, one adapter page at a time, in
+ * the broadcast's `order`: the host filter (stage A), the mailer-side
+ * post-filters (stage B), a sendable address, and not suppressed for the
+ * template's kind. A yielded page may be empty; the stream ends when the
+ * adapter's cursor does.
  */
 export async function* eligibleRecipientPages(
-  broadcast: Pick<BroadcastDoc, 'segmentDefinition'>,
+  broadcast: Pick<BroadcastDoc, 'segmentDefinition' | 'order'>,
   kind: TemplateKind,
   ctx: RunnerContext,
 ): AsyncGenerator<Contact[]> {
   const { hostFilter, postFilters } = planSegment(broadcast.segmentDefinition)
+  const sort = broadcast.order ?? undefined
+  if (sort && !ctx.adapter.supportsSort) {
+    throw new Error('mailery: this broadcast has an order but the contact adapter does not support sorted queries')
+  }
   let cursor: string | undefined
   for (;;) {
-    const page = await ctx.adapter.query(hostFilter, { limit: ctx.config.broadcastEnqueueBatchSize, cursor })
+    const page = await ctx.adapter.query(hostFilter, {
+      limit: ctx.config.broadcastEnqueueBatchSize,
+      cursor,
+      ...(sort ? { sort: { field: sort.field, direction: sort.direction } } : {}),
+    })
     if (page.contacts.length === 0) break
     const passed = (await applyPostFilters(page.contacts, postFilters, ctx)).filter((c) => isSendableEmail(c.email))
     const suppressed = await suppressedEmails(ctx.collections, passed.map((c) => c.email), kind)
@@ -167,7 +203,12 @@ export interface BroadcastRecipientCount {
   eligible: number
   /** Eligible contacts that already have a send row for this broadcast. */
   alreadySent: number
-  /** What dispatch would enqueue now: eligible, minus already sent. */
+  /** Every send row the broadcast has — what `recipientCap` is measured against. */
+  sendsSoFar: number
+  recipientCap: number | null
+  /** Eligible contacts not yet sent to, ignoring the cap. */
+  uncappedRecipientCount: number
+  /** What dispatch would enqueue now: not yet sent to, within the cap. */
   recipientCount: number
   computedMs: number
 }
@@ -177,20 +218,35 @@ export interface BroadcastRecipientCount {
  * instead of enqueued. Costs one pass over the host filter's matches.
  */
 export async function countBroadcastRecipients(
-  broadcast: Pick<BroadcastDoc, '_id' | 'segmentDefinition'>,
+  broadcast: Pick<BroadcastDoc, '_id' | 'segmentDefinition' | 'order' | 'recipientCap'>,
   kind: TemplateKind,
   ctx: RunnerContext,
 ): Promise<BroadcastRecipientCount> {
   const t0 = Date.now()
   const { hostFilter } = planSegment(broadcast.segmentDefinition)
-  const hostMatched = await ctx.adapter.count(hostFilter)
+  const [hostMatched, sendsSoFar] = await Promise.all([
+    ctx.adapter.count(hostFilter),
+    broadcast._id ? ctx.collections.sends.countDocuments({ broadcastId: broadcast._id }) : Promise.resolve(0),
+  ])
   let eligible = 0
   let alreadySent = 0
   for await (const page of eligibleRecipientPages(broadcast, kind, ctx)) {
     eligible += page.length
     if (broadcast._id) alreadySent += (await alreadyDispatched(ctx, broadcast._id, page)).size
   }
-  return { hostMatched, eligible, alreadySent, recipientCount: eligible - alreadySent, computedMs: Date.now() - t0 }
+  const cap = typeof broadcast.recipientCap === 'number' ? broadcast.recipientCap : null
+  const uncapped = eligible - alreadySent
+  const recipientCount = cap === null ? uncapped : Math.max(0, Math.min(uncapped, cap - sendsSoFar))
+  return {
+    hostMatched,
+    eligible,
+    alreadySent,
+    sendsSoFar,
+    recipientCap: cap,
+    uncappedRecipientCount: uncapped,
+    recipientCount,
+    computedMs: Date.now() - t0,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,73 +257,127 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
   const template = await ctx.collections.templates.findOne({ slug: broadcast.templateSlug })
   if (!template) {
     await ctx.collections.broadcasts.updateOne(
-      { _id: broadcast._id },
-      { $set: { status: 'failed', updatedAt: new Date() } },
+      { _id: broadcast._id, status: 'sending' },
+      { $set: { status: 'failed', updatedAt: new Date(), dispatchLeaseId: null } },
     )
     return
   }
 
+  // Take the lease: free, or held by a dispatcher whose heartbeat went
+  // stale. Anyone else is a live dispatcher, and this one bows out.
+  const leaseId = new ObjectId().toHexString()
+  const staleCutoff = new Date(Date.now() - STALLED_BROADCAST_THRESHOLD_MS)
+  const b = await ctx.collections.broadcasts.findOneAndUpdate(
+    {
+      _id: broadcast._id,
+      status: 'sending',
+      $or: [{ dispatchLeaseId: null }, { dispatchLeaseId: { $exists: false } }, { updatedAt: { $lt: staleCutoff } }],
+    },
+    { $set: { dispatchLeaseId: leaseId, updatedAt: new Date() } },
+    { returnDocument: 'after' },
+  )
+  if (!b) return
+
+  // Heartbeat, and the check that this dispatcher may still enqueue: the
+  // broadcast is still `sending` (not paused or cancelled) and the lease is
+  // still ours. resumeStalledBroadcasts treats a stale updatedAt as a dead
+  // dispatcher, so this runs every page and during backpressure.
+  const holdsLease = async () =>
+    (
+      await ctx.collections.broadcasts.updateOne(
+        { _id: b._id, status: 'sending', dispatchLeaseId: leaseId },
+        { $set: { updatedAt: new Date() } },
+      )
+    ).matchedCount === 1
+
   const maxWaiting = ctx.config.broadcastEnqueueMaxWaiting
-  const respectTimezone = broadcast.respectRecipientTimezone === true
-  const scheduledMs = broadcast.scheduledAt?.getTime() ?? Date.now()
-  const heartbeat = () =>
-    ctx.collections.broadcasts.updateOne({ _id: broadcast._id }, { $set: { updatedAt: new Date() } })
+  const respectTimezone = b.respectRecipientTimezone === true
+  const scheduledMs = b.scheduledAt?.getTime() ?? Date.now()
+  const cap = typeof b.recipientCap === 'number' ? b.recipientCap : null
+  let capReached = false
 
-  // Progress heartbeat — resumeStalledBroadcasts treats a stale updatedAt
-  // as a dead dispatcher, so touch it every page (and during backpressure).
-  await heartbeat()
-  for await (const eligible of eligibleRecipientPages(broadcast, template.kind, ctx)) {
-    await heartbeat()
-    const seen = await alreadyDispatched(ctx, broadcast._id!, eligible)
-    const fresh = eligible.filter((c) => !seen.has(broadcastDedupeKey(broadcast._id!, c.externalId)))
-    if (fresh.length === 0) continue
+  try {
+    for await (const eligible of eligibleRecipientPages(b, template.kind, ctx)) {
+      if (!(await holdsLease())) return
+      const seen = await alreadyDispatched(ctx, b._id!, eligible)
+      let fresh = eligible.filter((c) => !seen.has(broadcastDedupeKey(b._id!, c.externalId)))
+      if (fresh.length === 0) continue
 
-    // Backpressure: wait until the send queue's waiting set drains below cap.
-    while ((await ctx.queues.send.getWaitingCount()) > maxWaiting) {
-      await heartbeat()
-      await sleep(2000)
-    }
-
-    const inserted: Array<{ sendId: ObjectId; delayMs: number }> = []
-    for (const contact of fresh) {
-      const { doc, delayMs } = buildSendDoc(broadcast, template, contact, ctx, scheduledMs, respectTimezone)
-      try {
-        await ctx.collections.sends.insertOne(doc)
-        inserted.push({ sendId: doc._id!, delayMs })
-      } catch (err: any) {
-        if (err?.code !== 11000) throw err
-        // dup dedupeKey — a concurrent dispatcher got there first
+      if (cap !== null) {
+        // Rows, not this pass's inserts: earlier waves count against the cap.
+        const room = cap - (await ctx.collections.sends.countDocuments({ broadcastId: b._id }))
+        if (room <= 0) {
+          capReached = true // eligible, unsent contacts remain past the cap
+          break
+        }
+        if (fresh.length > room) {
+          fresh = fresh.slice(0, room)
+          capReached = true
+        }
       }
+
+      // Backpressure: wait until the send queue's waiting set drains below cap.
+      while ((await ctx.queues.send.getWaitingCount()) > maxWaiting) {
+        if (!(await holdsLease())) return
+        await sleep(2000)
+      }
+
+      const inserted: Array<{ sendId: ObjectId; delayMs: number }> = []
+      for (const contact of fresh) {
+        const { doc, delayMs } = buildSendDoc(b, template, contact, ctx, scheduledMs, respectTimezone)
+        try {
+          await ctx.collections.sends.insertOne(doc)
+          inserted.push({ sendId: doc._id!, delayMs })
+        } catch (err: any) {
+          if (err?.code !== 11000) throw err
+          // dup dedupeKey — already dispatched somewhere
+        }
+      }
+
+      // Bulk enqueue.
+      await Promise.all(
+        inserted.map(({ sendId, delayMs }) =>
+          ctx.queues.send.add(
+            'send',
+            { sendId: String(sendId) },
+            {
+              attempts: ctx.config.sendRetryAttempts,
+              backoff: { type: 'exponential', delay: 60_000 },
+              ...(delayMs > 0 ? { delay: delayMs } : {}),
+            },
+          ),
+        ),
+      )
+      if (capReached) break
     }
 
-    // Bulk enqueue.
-    await Promise.all(
-      inserted.map(({ sendId, delayMs }) =>
-        ctx.queues.send.add(
-          'send',
-          { sendId: String(sendId) },
-          {
-            attempts: ctx.config.sendRetryAttempts,
-            backoff: { type: 'exponential', delay: 60_000 },
-            ...(delayMs > 0 ? { delay: delayMs } : {}),
+    const now = new Date()
+    // Every send row this broadcast has, across waves and re-dispatches.
+    const total = await ctx.collections.sends.countDocuments({ broadcastId: b._id })
+    const set: Record<string, unknown> = capReached
+      ? {
+          status: 'paused',
+          pausedAt: now,
+          pauseReason: {
+            code: 'cap_reached',
+            message: `${total} send(s) reached recipientCap ${cap}; eligible recipients remain — raise recipientCap and resume to send the next wave`,
+            at: now,
+            details: { recipientCap: cap, sendsSoFar: total },
           },
-        ),
-      ),
+        }
+      : { status: 'sent', completedAt: now }
+    // Only while still ours and still sending: a pause or cancel that landed
+    // during the pass must not be overwritten with 'sent'.
+    await ctx.collections.broadcasts.updateOne(
+      { _id: b._id, status: 'sending', dispatchLeaseId: leaseId },
+      { $set: { ...set, recipientCount: total, updatedAt: now, dispatchLeaseId: null } },
+    )
+  } finally {
+    await ctx.collections.broadcasts.updateOne(
+      { _id: b._id, dispatchLeaseId: leaseId },
+      { $set: { dispatchLeaseId: null } },
     )
   }
-
-  await ctx.collections.broadcasts.updateOne(
-    { _id: broadcast._id },
-    {
-      $set: {
-        status: 'sent',
-        completedAt: new Date(),
-        // Every send row this broadcast has, across re-dispatches.
-        recipientCount: await ctx.collections.sends.countDocuments({ broadcastId: broadcast._id }),
-        updatedAt: new Date(),
-      },
-    },
-  )
 }
 
 // ---------------------------------------------------------------------------

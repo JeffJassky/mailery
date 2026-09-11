@@ -1869,8 +1869,12 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
   r.post(
     '/broadcasts',
     broadcastHandler(async (req, res) => {
-      const { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone } = req.body ?? {}
-      await createBroadcast(mailer, { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone }, (req as any).actor)
+      const { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone, recipientCap, order } = req.body ?? {}
+      await createBroadcast(
+        mailer,
+        { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone, recipientCap, order },
+        (req as any).actor,
+      )
       return res.json({ ok: true, slug })
     }),
   )
@@ -1878,8 +1882,13 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
   r.patch(
     '/broadcasts/:slug',
     broadcastHandler(async (req, res) => {
-      const { name, templateSlug, segmentDefinition, respectRecipientTimezone } = req.body ?? {}
-      await patchBroadcast(mailer, String(req.params.slug), { name, templateSlug, segmentDefinition, respectRecipientTimezone }, (req as any).actor)
+      const { name, templateSlug, segmentDefinition, respectRecipientTimezone, recipientCap, order } = req.body ?? {}
+      await patchBroadcast(
+        mailer,
+        String(req.params.slug),
+        { name, templateSlug, segmentDefinition, respectRecipientTimezone, recipientCap, order },
+        (req as any).actor,
+      )
       return res.json({ ok: true })
     }),
   )
