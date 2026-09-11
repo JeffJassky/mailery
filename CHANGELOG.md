@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Broadcasts, ready for a first production send
+## 0.18.0 — Broadcasts, ready for a first production send
 
 Broadcast code had never run in production. This makes it safe to send a staged newsletter (test contacts, seed inboxes, then capped waves) from an agent session, and fixes what would have gone wrong on the first real send.
 
