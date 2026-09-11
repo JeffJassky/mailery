@@ -21,6 +21,7 @@ import {
   startBroadcastDispatch,
   type BroadcastRecipientCount,
 } from '../runner/broadcasts.js'
+import { aggregateBroadcastStats, emptyBroadcastStats, type BroadcastStats } from '../runner/broadcast-control.js'
 
 /** A typed failure the HTTP layer can map to a status code without guessing. */
 export class BroadcastOperationError extends Error {
@@ -497,60 +498,29 @@ export async function cancelBroadcast(
 // Stats
 // ---------------------------------------------------------------------------
 
-export interface BroadcastStats {
-  delivered: number
-  opened: number
-  clicked: number
-  bounced: number
-}
-
-export function emptyBroadcastStats(): BroadcastStats {
-  return { delivered: 0, opened: 0, clicked: 0, bounced: 0 }
-}
+export { emptyBroadcastStats, type BroadcastStats }
 
 /**
- * Per-broadcast stats computed from `mailer_sends` at read time. Test sends
- * (`POST /broadcasts/:slug/test-send`) carry no `broadcastId` and so never
- * count here.
+ * Per-broadcast stats computed from `mailer_sends` at read time (see
+ * runner/broadcast-control.ts). A superset of the four counts the admin list
+ * has always returned. Test sends (`POST /broadcasts/:slug/test-send`) carry
+ * no `broadcastId` and so never count here.
  */
 export async function computeBroadcastStats(
   mailer: Mailer,
   idFilter?: ObjectId,
 ): Promise<Map<string, BroadcastStats>> {
-  const out = new Map<string, BroadcastStats>()
-  const match: Record<string, unknown> = { broadcastId: { $ne: null } }
-  if (idFilter) match.broadcastId = idFilter
+  return aggregateBroadcastStats(mailer.collections, idFilter)
+}
 
-  const rows = await mailer.collections.sends
-    .aggregate<{
-      _id: ObjectId
-      delivered: number
-      opened: number
-      clicked: number
-      bounced: number
-    }>([
-      { $match: match },
-      {
-        $group: {
-          _id: '$broadcastId',
-          delivered: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] } },
-          opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
-          clicked: { $sum: { $cond: [{ $ifNull: ['$firstClickAt', false] }, 1, 0] } },
-          bounced: { $sum: { $cond: [{ $eq: ['$status', 'bounced'] }, 1, 0] } },
-        },
-      },
-    ])
-    .toArray()
-  for (const row of rows) {
-    if (!row._id) continue
-    out.set(String(row._id), {
-      delivered: row.delivered,
-      opened: row.opened,
-      clicked: row.clicked,
-      bounced: row.bounced,
-    })
+/** How much of a capped broadcast has been spent. */
+export function capProgress(b: BroadcastDoc, stats: BroadcastStats) {
+  const cap = typeof b.recipientCap === 'number' ? b.recipientCap : null
+  return {
+    recipientCap: cap,
+    sendsSoFar: stats.total,
+    remaining: cap === null ? null : Math.max(0, cap - stats.total),
   }
-  return out
 }
 
 /** Send rows for one broadcast, counted by status. */

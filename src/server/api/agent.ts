@@ -73,6 +73,7 @@ import {
   broadcastStatusBreakdown,
   broadcastSummary,
   cancelBroadcast,
+  capProgress,
   computeBroadcastStats,
   countRecipients,
   createBroadcast,
@@ -924,14 +925,16 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     '/broadcasts/:slug',
     wrap(async (req, res) => {
       const b = await loadBroadcast(mailer, String(req.params.slug))
-      const [stats, statusBreakdown] = await Promise.all([
+      const [statsMap, statusBreakdown] = await Promise.all([
         computeBroadcastStats(mailer, b._id),
         broadcastStatusBreakdown(mailer, b._id!),
       ])
+      const stats = statsMap.get(String(b._id)) ?? emptyBroadcastStats()
       res.json({
         broadcast: broadcastSummary(b),
-        stats: stats.get(String(b._id)) ?? emptyBroadcastStats(),
+        stats,
         statusBreakdown,
+        capProgress: capProgress(b, stats),
       })
     }),
   )
@@ -1637,7 +1640,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'POST', path: '/contacts/:externalId/tags', summary: 'Add or remove tags on a test contact ({add: [...], remove: [...]}), so a gated flow lets it through.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/reset', summary: 'Delete a test contact\'s runs, sends, events ({events: [names]} to narrow) and suppressions, then resubscribe. Each part can be turned off with false.', testContactsOnly: true },
   { method: 'GET', path: '/broadcasts', summary: 'Every broadcast (newest first, up to 200) with its stats.' },
-  { method: 'GET', path: '/broadcasts/:slug', summary: 'One broadcast with stats and a per-status count of its send rows.' },
+  { method: 'GET', path: '/broadcasts/:slug', summary: 'One broadcast: stats (delivered, bounced hard/soft, complained, unsubscribed, opened, clicked, with rates), a per-status count of its send rows, pause reason and cap progress.' },
   { method: 'POST', path: '/broadcasts', summary: 'Create a draft broadcast: {slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?}.' },
   { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
   { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to. recipientCount is what schedule requires as confirmedCount.' },

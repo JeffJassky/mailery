@@ -235,6 +235,99 @@ describe('agent broadcasts: the true recipient count', () => {
   })
 })
 
+describe('agent broadcasts: stats', () => {
+  it('reports counts, rates, a status breakdown and cap progress', async () => {
+    await call('POST', '/broadcasts', { slug: 'stats', name: 'Stats', templateSlug: 'news', recipientCap: 50 })
+    const b = await H.ctx.collections.broadcasts.findOne({ slug: 'stats' })
+    const tpl = await H.ctx.collections.templates.findOne({ slug: 'news' })
+    const now = new Date()
+    const row = (i: number, patch: Record<string, unknown>) => ({
+      dedupeKey: `broadcast:${b!._id}:s${i}`,
+      externalId: `s${i}`,
+      emailAtSend: `s${i}@example.com`,
+      templateId: tpl!._id!,
+      templateSlug: 'news',
+      flowRunId: null,
+      broadcastId: b!._id!,
+      manualSendBy: null,
+      kind: 'marketing' as const,
+      provider: 'null',
+      providerMessageId: null,
+      fromName: 'T',
+      fromEmail: 'hello@example.com',
+      subject: 's',
+      bodyHash: '',
+      status: 'queued' as const,
+      errorMessage: null,
+      bounceType: null,
+      bounceReason: null,
+      links: [],
+      vars: {},
+      openedAt: null,
+      openCount: 0,
+      firstClickAt: null,
+      clickCount: 0,
+      clickedLinks: [],
+      unsubscribedAt: null,
+      complainedAt: null,
+      queuedAt: now,
+      updatedAt: now,
+      sentAt: null,
+      deliveredAt: null,
+      ...patch,
+    })
+    const delivered = { status: 'delivered', sentAt: now, deliveredAt: now }
+    await H.ctx.collections.sends.insertMany([
+      // 6 delivered: 3 opened (1 of them clicked), 1 complained, 1 unsubscribed
+      row(1, { ...delivered, openedAt: now, firstClickAt: now }),
+      row(2, { ...delivered, openedAt: now }),
+      row(3, { ...delivered, openedAt: now }),
+      row(4, { ...delivered, status: 'complained', complainedAt: now }),
+      row(5, { ...delivered, unsubscribedAt: now }),
+      row(6, delivered),
+      // 2 bounced (1 hard, 1 soft), 1 still queued, 1 suppressed at send time
+      row(7, { status: 'bounced', sentAt: now, bounceType: 'hard' }),
+      row(8, { status: 'bounced', sentAt: now, bounceType: 'soft' }),
+      row(9, {}),
+      row(10, { status: 'suppressed' }),
+    ] as any)
+    // A test send for the same template carries no broadcastId and never counts.
+    await H.ctx.collections.sends.insertOne({ ...row(11, delivered), broadcastId: null, dedupeKey: 'oneoff:test' } as any)
+
+    const res = await call('GET', '/broadcasts/stats')
+    expect(res.status).toBe(200)
+    expect(res.body.stats).toMatchObject({
+      total: 10,
+      accepted: 8,
+      delivered: 6,
+      bounced: 2,
+      hardBounced: 1,
+      softBounced: 1,
+      complained: 1,
+      unsubscribed: 1,
+      opened: 3,
+      clicked: 1,
+      outcomes: 8,
+    })
+    expect(res.body.stats.rates).toEqual({
+      deliveryRatePct: 75,
+      bounceRatePct: 25,
+      hardBounceRatePct: 12.5,
+      complaintRatePct: 12.5,
+      unsubscribeRatePct: 12.5,
+      openRatePct: 50,
+      clickRatePct: 16.67,
+    })
+    expect(res.body.statusBreakdown).toEqual({ delivered: 5, complained: 1, bounced: 2, queued: 1, suppressed: 1 })
+    expect(res.body.capProgress).toEqual({ recipientCap: 50, sendsSoFar: 10, remaining: 40 })
+    expect(res.body.broadcast.pauseReason).toBeNull()
+
+    // The admin list keeps its keys (now a superset).
+    const list = await call('GET', '/api/broadcasts')
+    expect(list.body.find((x: any) => x.slug === 'stats').stats).toMatchObject({ delivered: 6, opened: 3, clicked: 1, bounced: 2 })
+  })
+})
+
 describe('agent broadcasts: the subscribed-only guard', () => {
   it('refuses a segment without a top-level subscriptionStatus: subscribed filter', async () => {
     const bare = await call('POST', '/broadcasts', {
