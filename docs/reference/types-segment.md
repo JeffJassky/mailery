@@ -41,11 +41,13 @@ type SegmentFilter =
 
 Two-pass:
 
-1. **Stage A — host filter**: mailery calls `adapter.query()` with the host-relevant filters (`fieldEquals`, `fieldIn`, `hasTag`, etc.). The adapter returns a cursor.
-2. **Stage B — mailer post-filter**: mailery streams the cursor through its own filters (`firedEvent`, `subscriptionStatus`, `opened`, etc.), dropping contacts that fail.
-3. **Suppression check**: at send time, every recipient is re-checked against `mailer_suppressions`. Suppressed contacts are skipped.
+1. **Stage A — host filter**: mailery calls `adapter.query()` with at most one condition per adapter slot, taken from the top level (the first `hasTag`, one condition per field). The adapter returns a cursor.
+2. **Stage B — mailer post-filter**: every other filter runs over each streamed page with one batched lookup per distinct filter: mailer-side kinds (`subscriptionStatus`, `firedEvent`, `opened`, `subscribedAfter`, …), extra host-side filters, and everything nested in `any` / `not`. Host-side kinds evaluated here read the `Contact` projection (`tags`, `fields` by dotted path).
+3. **Suppression check**: recipients suppressed for the template's kind are skipped at dispatch, and every send is re-checked at send time.
 
-The admin UI broadcast composer shows recipient counts at each stage so you can see where the segment narrows.
+`POST /broadcasts/:slug/count` on the agent API reports the count after each stage, and the admin composer's count is the final one.
+
+Segments are validated when saved and strictly when scheduled: values are primitives, field names may not start with `$`, and an unknown kind is refused — never evaluated as "matches everyone".
 
 ## Example
 

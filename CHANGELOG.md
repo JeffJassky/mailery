@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — Broadcasts, ready for a first production send
+
+Broadcast code had never run in production. This makes it safe to send a staged newsletter (test contacts, seed inboxes, then capped waves) from an agent session, and fixes what would have gone wrong on the first real send.
+
+### Added
+
+- **Agent API broadcast routes**: `GET /broadcasts`, `GET /broadcasts/:slug` (stats, per-status breakdown, pause reason, cap progress, stop-rule evaluation), `POST /broadcasts`, `PATCH /broadcasts/:slug`, `POST /broadcasts/:slug/count`, `/schedule`, `/test-send`, `/pause`, `/resume`, `/cancel`. The agent path refuses a segment without a top-level `subscriptionStatus: subscribed` (422 `segment_requires_subscribed`) and schedules or resumes only when `confirmedCount` equals the true count (409 `count_mismatch`).
+- **A true recipient count** — the dispatch stream counted: host filter, post-filters, a sendable address, suppression, minus contacts already sent to, within the cap. The admin composer's count uses it too (`upperBound` is now exact).
+- **Native waves**: `recipientCap` and `order: { field, direction }` on a broadcast. A capped pass parks in the new `paused` status (`pauseReason.code: 'cap_reached'`); resuming with a higher cap sends only the next slice. `ContactAdapter.query` accepts an optional `sort`, adapters declare `supportsSort`; `MongoContactAdapter` and `MemoryContactAdapter` implement it.
+- **Per-broadcast stop rules** (`MailerConfig.broadcastStopRules`, overridable per broadcast): hard bounce > 2%, complaint > 0.1%, unsubscribe > 1% of sends with an outcome, once 100 are in. A breach pauses the broadcast and holds its queued sends (new send status `held`) until an explicit resume. New hook `onBroadcastPaused`.
+- **Test sends** of a broadcast's template to named test contacts, not counted in its stats.
+- **Stats** with hard/soft bounces, complaints, unsubscribes and rates, computed from the sticky fields rather than `status`.
+
+### Fixed
+
+- Segment filters `opened`, `notOpened`, `subscribedAfter`, `subscribedBefore`, and host-side filters nested in `any`/`not`, matched every contact. A second top-level `hasTag` replaced the first. Nested `subscriptionStatus` matched nobody. `firedEvent`/`notFiredEvent` on one event shared a cache slot. An unknown filter kind matched everyone.
+- Cancelling a broadcast left every queued send to go out.
+- A broadcast could use a transactional template (no List-Unsubscribe, no marketing opt-outs, no circuit breaker).
+- Resuming or rescuing a dispatch could silently never run: the dispatch job id was fixed per broadcast, and both queue drivers drop a duplicate id.
+- A cancel or pause during dispatch was overwritten with `sent`.
+- With `respectRecipientTimezone`, a wave dispatched after `scheduledAt` reached every recipient at once; it now goes at each recipient's next local slot.
+- A broadcast send that met a tripped circuit breaker re-queued every 60 seconds indefinitely; the broadcast now pauses and its sends are held.
+- Unsubscribes were never attributed to a send, so broadcast unsubscribe counts were always 0. The unsubscribe token carries the send id (optional `i`; older tokens verify as before).
+- `isSuppressed` ignored `expiresAt` on its hash lookup, so a temporary suppression never lifted.
+- The open pixel overwrote `bounced` / `complained` with `delivered`.
+
+### Changed — check before upgrading
+
+- New status values: `BroadcastStatus` gains `paused`, `SendStatus` gains `held`. Code that switches exhaustively on either needs a case.
+- Broadcast segments are validated. The admin create/patch routes answer `400 invalid_segment` for a malformed segment (types only), and schedule validates strictly: non-empty values, primitives, no `$`-prefixed fields.
+- Schedule requires the template to exist, be `marketing` and be published.
+- Cancelling a `sent` or `failed` broadcast with nothing left to send answers `409 already_finished`.
+- The admin composer's count does a full pass over the host filter's matches, where it used to be a single `count()`.
+
 ## 0.17.1 — A Preview tab, and previews that show your unsaved edits
 
 ### Added

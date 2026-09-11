@@ -108,10 +108,44 @@ body: {
 ## Broadcasts
 
 ### `GET /api/broadcasts`
-List all broadcasts, newest-created first.
+List all broadcasts, newest-created first, each with `stats` computed from its sends (see [broadcasts → stats](/guide/broadcasts#stats); the four keys `delivered`, `opened`, `clicked`, `bounced` are always present).
 
 ### `GET /api/broadcasts/:slug`
-Single broadcast.
+Single broadcast with `stats`.
+
+### `POST /api/broadcasts`
+```ts
+{ slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?, recipientCap?, order?, stopRules? }
+→ { ok: true, slug }
+→ 400 { error: 'validation_failed' | 'invalid_segment' | 'invalid_recipient_cap' | 'invalid_order' | 'invalid_stop_rules' }
+→ 409 { error: 'slug_taken' | 'template_not_marketing' }
+→ 422 { error: 'adapter_cannot_sort' }
+```
+The segment is validated leniently here (types only), so the composer can save a half-filled row; scheduling validates strictly.
+
+### `PATCH /api/broadcasts/:slug`
+Same fields as create except `slug`. Draft only. `→ { ok: true }`, `409 not_draft`.
+
+### `POST /api/broadcasts/:slug/segment/count`
+```ts
+{ segmentDefinition }       // the segment being edited, not necessarily saved
+→ { upperBound, approximate: false, computedMs, hostMatched, eligible, alreadySent, recipientCount }
+```
+Since 0.18 `upperBound` is the **exact** count dispatch would send (host filter, post-filters, suppression, cap) — it keeps its name because the composer reads it. It was the host filter alone.
+
+### `POST /api/broadcasts/:slug/schedule`
+```ts
+{ scheduledAt, confirmedCount, respectRecipientTimezone? }
+→ { ok: true }
+→ 400 { error: 'scheduledAt_required' | 'bad_scheduledAt' | 'confirmedCount_required' | 'invalid_segment' }
+→ 409 { error: 'not_draft' | 'template_not_found' | 'template_not_marketing' | 'template_not_published' }
+```
+The admin path does not compare `confirmedCount` with the count (the composer's typed-count gate does); the agent path does.
+
+### `POST /api/broadcasts/:slug/cancel`
+`→ { ok: true }`. Cancels the broadcast's queued and held sends as well; `409 already_finished` for a sent or failed broadcast with nothing left to send.
+
+Waves, stop-rule overrides, pause, resume and test sends are on the [agent API](/reference/agent-api#broadcasts).
 
 ## Contacts
 

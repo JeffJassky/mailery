@@ -567,19 +567,36 @@ One-off campaigns.
   templateSlug: string,
   segmentDefinition: SegmentDefinition,
 
-  status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled' | 'failed',
+  status: 'draft' | 'scheduled' | 'sending' | 'paused' | 'sent' | 'cancelled' | 'failed',
   scheduledAt: Date | null,
   startedAt: Date | null,
   completedAt: Date | null,
+  respectRecipientTimezone?: boolean,
 
-  // Confirmation gate (admin UI only)
+  // Confirmation gate. The agent API requires confirmedCount to equal the
+  // true recipient count at schedule/resume; the admin UI's typed-count gate
+  // confirms the (now exact) composer count.
   confirmationRequired: boolean,
-  confirmedCount: number | null,                   // operator-typed count at confirmation time
+  confirmedCount: number | null,
   confirmedAt: Date | null,
   confirmedBy: string | null,
 
-  recipientCount: number | null,                   // computed when sending starts
+  recipientCount: number | null,                   // total send rows, set when a dispatch pass ends
 
+  // Native waves (0.18)
+  recipientCap?: number | null,                    // max total send rows; null/absent = no cap
+  order?: { field: string, direction: 'asc' | 'desc' } | null,   // host-side sort
+  pausedAt?: Date | null,
+  pauseReason?: { code: 'cap_reached' | 'stop_rule' | 'circuit_breaker' | 'manual', message: string, at: Date, details?: object } | null,
+  dispatchLeaseId?: string | null,                 // the one dispatcher allowed to enqueue
+  dispatchGeneration?: number,                     // part of the dispatch job id
+
+  // Stop rules (0.18)
+  stopRules?: Partial<{ enabled, hardBounceRatePct, complaintRatePct, unsubscribeRatePct, minSample }> | null,
+  stopRuleBreach?: { at: Date, sample: number, breaches: object[] } | null,  // a breach with nothing left to hold
+  failureReason?: string | null,
+
+  // Never updated after creation: stats are computed from mailer_sends on read.
   stats: {
     sent: number,
     delivered: number,
@@ -597,6 +614,8 @@ One-off campaigns.
 ```
 
 **Indexes**: `{ slug: 1 }` unique, `{ status: 1, scheduledAt: 1 }`
+
+Broadcast sends are ordinary `mailer_sends` rows with `broadcastId` set and `dedupeKey: broadcast:<broadcastId>:<externalId>` — the unique index is what makes re-dispatch (waves, stalled-dispatch rescue) send to each contact at most once. They carry `notBefore` (their scheduled moment, recipient-local when time zones are respected), and a paused broadcast's queued sends sit in status `held` until resume re-queues them.
 
 ### Tag storage (optional, fallback-only)
 

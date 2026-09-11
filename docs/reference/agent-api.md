@@ -287,6 +287,106 @@ body: { runs?: boolean; sends?: boolean; events?: boolean | string[]; suppressio
 
 Deletes the contact's flow runs, sends, events (or only the named ones) and suppression rows, then re-subscribes. This is what makes a `trigger.once` flow re-testable with the same address.
 
+## Broadcasts
+
+The same operations as the admin API's broadcast routes (one implementation, `api/broadcast-ops.ts`), plus waves, stop rules, pause/resume and test sends. See the [broadcasts guide](/guide/broadcasts) for the model. The agent path is stricter than the admin path on three points:
+
+- every segment must contain `{ kind: 'subscriptionStatus', equals: 'subscribed' }` at the **top level** (`422 segment_requires_subscribed`) — otherwise the host filter mails every contact it matches, consented or not;
+- segments are validated strictly on every write (`400 invalid_segment`);
+- schedule and resume require `confirmedCount` to equal the true count (`409 count_mismatch { expected }`).
+
+A broadcast summary, as the routes return it:
+
+```ts
+BroadcastSummary = {
+  id, slug, name, templateSlug, status,          // draft | scheduled | sending | paused | sent | cancelled | failed
+  segmentDefinition, respectRecipientTimezone,
+  recipientCap: number | null, order: { field, direction } | null,
+  pausedAt, pauseReason: { code: 'cap_reached' | 'stop_rule' | 'circuit_breaker' | 'manual', message, at, details } | null,
+  stopRules: Partial<BroadcastStopRules> | null,  // this broadcast's overrides
+  stopRuleBreach, failureReason,
+  scheduledAt, startedAt, completedAt, confirmedCount, confirmedAt, confirmedBy, recipientCount,
+  createdAt, createdBy, updatedAt,
+}
+```
+
+### `GET /broadcasts`
+
+`→ Array<BroadcastSummary & { stats }>`, newest first, up to 200.
+
+### `GET /broadcasts/:slug`
+
+```ts
+→ {
+  broadcast: BroadcastSummary,
+  stats: { total, accepted, delivered, bounced, hardBounced, softBounced, complained, unsubscribed, opened, clicked, outcomes,
+           rates: { deliveryRatePct, bounceRatePct, hardBounceRatePct, complaintRatePct, unsubscribeRatePct, openRatePct, clickRatePct } },
+  statusBreakdown: { queued?: n, sent?: n, delivered?: n, bounced?: n, held?: n, … },
+  capProgress: { recipientCap, sendsSoFar, remaining },
+  stopRules: { rules, sample, evaluated, breaches: [{ rule, count, ratePct, thresholdPct }] },
+}
+```
+
+Bounce, complaint and unsubscribe rates are over `outcomes` (sends delivered or bounced) — the sample the stop rules use. Test sends never count.
+
+### `POST /broadcasts`
+
+```ts
+{ slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?, recipientCap?, order?, stopRules? }
+→ 201 { broadcast }
+```
+
+`segmentDefinition` defaults to subscribed contacts. `409 slug_taken` / `template_not_marketing`, `422 segment_requires_subscribed` / `adapter_cannot_sort` (an `order` on an adapter without `supportsSort`), `400 invalid_segment` / `invalid_recipient_cap` / `invalid_order` / `invalid_stop_rules`.
+
+### `PATCH /broadcasts/:slug`
+
+Same fields as create except `slug`; a draft only (`409 not_draft`). `→ { broadcast }`
+
+### `POST /broadcasts/:slug/count`
+
+```ts
+{ recipientCap?: number | null }   // preview a different cap (the next wave's size)
+→ { slug, status, hostMatched, eligible, alreadySent, sendsSoFar, recipientCap, uncappedRecipientCount,
+    recipientCount, heldSends, templateKind, confirmationThreshold, computedMs }
+```
+
+`recipientCount` is what dispatch would enqueue now: eligible (host filter, post-filters, sendable address, not suppressed), minus contacts that already have a send row, within the cap. Schedule wants `recipientCount`; resume wants `recipientCount + heldSends`. `409 template_not_found`.
+
+### `POST /broadcasts/:slug/schedule`
+
+```ts
+{ scheduledAt: ISO string, confirmedCount: number, respectRecipientTimezone?: boolean }
+→ { broadcast }
+```
+
+`409 count_mismatch { expected, confirmedCount }` / `not_draft` / `template_not_found` / `template_not_marketing` / `template_not_published`, `422 segment_requires_subscribed`.
+
+### `POST /broadcasts/:slug/test-send` — test contacts only
+
+```ts
+{ contactIds: string[] /* 1–10 */, vars?, dispatch?: 'now' | 'queue' }
+→ 201 { broadcast: { slug, status }, templateSlug, dispatched, sends: SendSummary[] }
+```
+
+Sends the broadcast's template, rendered as each contact, through the real pipeline without scheduling the broadcast. Every contact is checked against `testContacts` before anything is sent. The sends carry no `broadcastId` and are tagged `manualSendBy: broadcast-test:<slug>`; follow one with `GET /sends/:id/wait`.
+
+### `POST /broadcasts/:slug/pause`
+
+`{ reason? } → { broadcast, heldSends }`. From `sending` or `sent`; queued sends are held. `409 not_pausable`.
+
+### `POST /broadcasts/:slug/resume`
+
+```ts
+{ recipientCap?: number | null, stopRules?: Partial<BroadcastStopRules> | null, confirmedCount: number }
+→ { broadcast }
+```
+
+The only way out of `paused`. For the next wave, pass a higher `recipientCap` (`null` = everyone remaining); `409 cap_not_raised` otherwise, and `400 cap_below_sent` below the rows already made. A stop-rule pause re-opens only when the rules — with this call's `stopRules` merged in — no longer fire (`409 stop_rule_still_breached { evaluation }`). A circuit-breaker pause re-opens only once the bucket is reset (`409 circuit_breaker_tripped`). Held sends are re-queued. `409 count_mismatch { expected, recipientCount, heldSends }`.
+
+### `POST /broadcasts/:slug/cancel`
+
+`→ { broadcast, cancelledSends }`. Cancels the broadcast's queued and held sends too. `409 already_finished` for a sent or failed broadcast with nothing left to send.
+
 ## Runner and status
 
 ### `POST /tick`
@@ -318,7 +418,7 @@ One document for an agent to reason about:
 
 ## Errors
 
-Every error is JSON: `{ error: string, message?: string }`. `401 unauthorized` (no or wrong token), `403 test_contacts_not_configured` / `not_a_test_contact`, `404 *_not_found`, `409` for state conflicts (`no_live_steps`, `already_gated`, `not_gated`, `run_not_active`, `not_published`), `400 validation_failed` / `confirm_required` / `fire_failed`.
+Every error is JSON: `{ error: string, message?: string }`. `401 unauthorized` (no or wrong token), `403 test_contacts_not_configured` / `not_a_test_contact`, `404 *_not_found`, `409` for state conflicts (`no_live_steps`, `already_gated`, `not_gated`, `run_not_active`, `not_published`, and the broadcast codes above), `422` for refusals on principle (`segment_requires_subscribed`, `adapter_cannot_sort`), `400 validation_failed` / `confirm_required` / `fire_failed`.
 
 ## A rollout, end to end
 
@@ -350,3 +450,35 @@ curl -s -X POST "$A/flows/activation/ungate" -H "$T"
 curl -s -X POST "$A/contacts/u_qa1/tags" -H "$T" -H 'content-type: application/json' -d '{"remove":["Mailery Canary"]}'
 curl -s -X POST "$A/contacts/u_qa1/reset" -H "$T"
 ```
+
+## A staged broadcast, end to end
+
+```bash
+J='content-type: application/json'; B="$A/broadcasts/june-news"
+
+# 1. draft: subscribed only, most recently active first, first wave of 200, default stop rules
+curl -s -X POST "$A/broadcasts" -H "$T" -H "$J" -d '{
+  "slug":"june-news","name":"June news","templateSlug":"june-news",
+  "segmentDefinition":{"filters":[{"kind":"subscriptionStatus","equals":"subscribed"}]},
+  "recipientCap":200,"order":{"field":"updatedAt","direction":"desc"}}'
+
+# 2. the real thing to test contacts and seed inboxes, nothing scheduled
+curl -s -X POST "$B/test-send" -H "$T" -H "$J" -d '{"contactIds":["u_qa1","u_seed_gmail"]}'
+
+# 3. the true count, then schedule with it (10:00 recipient-local if contacts carry timezone)
+N=$(curl -s -X POST "$B/count" -H "$T" | jq .recipientCount)
+curl -s -X POST "$B/schedule" -H "$T" -H "$J" -d "{\"scheduledAt\":\"2026-06-02T10:00:00Z\",\"confirmedCount\":$N}"
+
+# 4. watch the wave; it parks in paused/cap_reached when the 200 are out
+curl -s "$B" -H "$T" | jq '{status:.broadcast.status, pause:.broadcast.pauseReason.code, rates:.stats.rates, stop:.stopRules, cap:.capProgress}'
+
+# 5. next wave: preview the size at the new cap, then resume with exactly that
+N=$(curl -s -X POST "$B/count" -H "$T" -H "$J" -d '{"recipientCap":1700}' | jq '.recipientCount + .heldSends')
+curl -s -X POST "$B/resume" -H "$T" -H "$J" -d "{\"recipientCap\":1700,\"confirmedCount\":$N}"
+
+# 6. the rest: no cap
+N=$(curl -s -X POST "$B/count" -H "$T" -H "$J" -d '{"recipientCap":null}' | jq '.recipientCount + .heldSends')
+curl -s -X POST "$B/resume" -H "$T" -H "$J" -d "{\"recipientCap\":null,\"confirmedCount\":$N}"
+```
+
+If a stop rule fires, the broadcast pauses on its own (`pauseReason.code: "stop_rule"`) with its queued sends held; resume is refused until the rules — adjusted in the resume call if that is the decision — no longer fire.
