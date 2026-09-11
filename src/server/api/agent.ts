@@ -80,6 +80,7 @@ import {
   createBroadcast,
   emptyBroadcastStats,
   loadBroadcast,
+  loadBroadcastTemplate,
   patchBroadcast,
   pauseBroadcastByOperator,
   resumeBroadcast,
@@ -95,6 +96,13 @@ const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
  * minus what the server owns (timestamps, stats, draft). Defaults mirror what
  * the admin publish route writes for a template created in the SPA.
  */
+const broadcastTestSendSchema = z.object({
+  contactIds: z.array(z.string().min(1).max(256)).min(1).max(10),
+  vars: z.record(z.string(), z.unknown()).optional(),
+  /** 'queue' leaves the sends queued for the worker instead of dispatching inline. */
+  dispatch: z.enum(['now', 'queue']).optional(),
+})
+
 const agentTagsInputSchema = z.object({
   add: z.array(z.string().min(1).max(128)).max(25).default([]),
   remove: z.array(z.string().min(1).max(128)).max(25).default([]),
@@ -998,6 +1006,57 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     }),
   )
 
+  /**
+   * Send the broadcast's template, rendered as each named contact (host
+   * vars, signed unsubscribe link, tracking), through the real pipeline —
+   * without scheduling the broadcast. Test contacts only, all checked before
+   * anything is sent. The sends carry no broadcastId, so they never count in
+   * the broadcast's stats, its cap or its stop rules; each is tagged
+   * `manualSendBy: broadcast-test:<slug>`.
+   */
+  router.post(
+    '/broadcasts/:slug/test-send',
+    wrap(async (req, res) => {
+      const parsed = broadcastTestSendSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
+      const b = await loadBroadcast(mailer, String(req.params.slug))
+      const tpl = await loadBroadcastTemplate(mailer, b)
+      if (!tpl.body?.html && !tpl.body?.mjml) {
+        return res.status(409).json({ error: 'not_published', message: `template "${tpl.slug}" has no published body` })
+      }
+      const contacts: Contact[] = []
+      for (const id of parsed.data.contactIds) {
+        const contact = await loadContact(res, id)
+        if (!contact) return
+        if (!guardTestContact(res, contact)) return
+        contacts.push(contact)
+      }
+      const ctx = mailer.getRunnerContext()
+      const dispatchNow = parsed.data.dispatch !== 'queue'
+      const sends: ReturnType<typeof sendSummary>[] = []
+      for (const contact of contacts) {
+        const { sendId } = await mailer.sendOneOff({
+          templateSlug: tpl.slug,
+          externalId: contact.externalId,
+          dedupeKey: `broadcast-test:${b._id}:${contact.externalId}:${crypto.randomUUID()}`,
+          vars: parsed.data.vars,
+        })
+        const _id = new ObjectId(sendId)
+        await c.sends.updateOne({ _id }, { $set: { manualSendBy: `broadcast-test:${b.slug}` } })
+        if (dispatchNow) await dispatchSend(_id, ctx)
+        const row = await c.sends.findOne({ _id })
+        if (row) sends.push(sendSummary(row))
+      }
+      await mailer.audit({
+        actor: actorOf(req),
+        action: 'agent.broadcast.test-send',
+        resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
+        diffSummary: `template=${tpl.slug} to=${contacts.map((x) => x.email).join(', ')} dispatch=${dispatchNow ? 'now' : 'queue'}`,
+      })
+      res.status(201).json({ broadcast: { slug: b.slug, status: b.status }, templateSlug: tpl.slug, dispatched: dispatchNow, sends })
+    }),
+  )
+
   /** Pause a sending (or sent, with queued sends) broadcast by hand; queued sends are held. */
   router.post(
     '/broadcasts/:slug/pause',
@@ -1660,6 +1719,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
   { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to. recipientCount is what schedule requires as confirmedCount.' },
   { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}. 409 count_mismatch unless confirmedCount equals POST /broadcasts/:slug/count → recipientCount. The segment must be limited to subscribed contacts.' },
+  { method: 'POST', path: '/broadcasts/:slug/test-send', summary: 'Send the broadcast\'s template, rendered as each of {contactIds} (test contacts only), through the real pipeline without scheduling it; not counted in the broadcast\'s stats. {dispatch: "queue"} to leave them queued.', testContactsOnly: true },
   { method: 'POST', path: '/broadcasts/:slug/pause', summary: 'Pause a sending broadcast by hand ({reason?}); its queued sends are held.' },
   { method: 'POST', path: '/broadcasts/:slug/resume', summary: 'Re-open a paused broadcast: {recipientCap?, stopRules?, confirmedCount}. Next wave: raise recipientCap (null = no cap). confirmedCount = /count recipientCount + heldSends. A stop-rule pause re-opens only when the (adjusted) rules no longer fire; a circuit-breaker pause only once the breaker is reset.' },
   { method: 'POST', path: '/broadcasts/:slug/cancel', summary: 'Cancel a broadcast.' },

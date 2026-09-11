@@ -235,6 +235,50 @@ describe('agent broadcasts: the true recipient count', () => {
   })
 })
 
+describe('agent broadcasts: test send', () => {
+  it('renders the template as each test contact and sends it for real, without touching the broadcast', async () => {
+    await call('POST', '/broadcasts', { slug: 'june', name: 'June', templateSlug: 'news' })
+    const before = H.provider.sent.length
+    const res = await call('POST', '/broadcasts/june/test-send', { contactIds: ['t1', 't2'] })
+    expect(res.status).toBe(201)
+    expect(res.body.dispatched).toBe(true)
+    expect(res.body.sends.map((s: any) => [s.externalId, s.status])).toEqual([
+      ['t1', 'sent'],
+      ['t2', 'sent'],
+    ])
+    const delivered = H.provider.sent.slice(before)
+    expect(delivered.map((a) => a.subject)).toEqual(['News for Quinn', 'News for Tess'])
+    expect(delivered[0]!.headers?.['List-Unsubscribe']).toMatch(/\/m\/unsub\//)
+
+    const rows = await H.ctx.collections.sends.find({ externalId: { $in: ['t1', 't2'] } }).toArray()
+    expect(rows.every((r) => r.broadcastId === null && r.manualSendBy === 'broadcast-test:june')).toBe(true)
+    const got = await call('GET', '/broadcasts/june')
+    expect(got.body.broadcast.status).toBe('draft')
+    expect(got.body.stats.total).toBe(0)
+    expect(await H.ctx.collections.auditLog.findOne({ action: 'agent.broadcast.test-send', 'resource.slug': 'june' })).toBeTruthy()
+  })
+
+  it('refuses anyone outside the test pattern, and sends to no one if any contact fails', async () => {
+    await call('POST', '/broadcasts', { slug: 'june', name: 'June', templateSlug: 'news' })
+    const before = H.provider.sent.length
+    const res = await call('POST', '/broadcasts/june/test-send', { contactIds: ['t1', 'r1'] })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('not_a_test_contact')
+    expect(H.provider.sent.length).toBe(before)
+    expect(await H.ctx.collections.sends.countDocuments({})).toBe(0)
+
+    expect((await call('POST', '/broadcasts/june/test-send', { contactIds: ['nobody'] })).status).toBe(404)
+    expect((await call('POST', '/broadcasts/june/test-send', { contactIds: [] })).status).toBe(400)
+  })
+
+  it('can leave the sends queued', async () => {
+    await call('POST', '/broadcasts', { slug: 'june', name: 'June', templateSlug: 'news' })
+    const res = await call('POST', '/broadcasts/june/test-send', { contactIds: ['t1'], dispatch: 'queue' })
+    expect(res.status).toBe(201)
+    expect(res.body.sends[0].status).toBe('queued')
+  })
+})
+
 describe('agent broadcasts: stats', () => {
   it('reports counts, rates, a status breakdown and cap progress', async () => {
     await call('POST', '/broadcasts', { slug: 'stats', name: 'Stats', templateSlug: 'news', recipientCap: 50 })
