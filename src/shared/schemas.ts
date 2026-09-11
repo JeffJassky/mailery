@@ -140,6 +140,60 @@ export const sendOneOffInputSchema = z.object({
 export type SendOneOffInput = z.infer<typeof sendOneOffInputSchema>
 
 // ---------------------------------------------------------------------------
+// Segment definitions (mirror SegmentFilter in types.ts)
+// ---------------------------------------------------------------------------
+
+const subscriptionStatusEnum = z.enum(['subscribed', 'unsubscribed', 'pending_doi', 'bounced', 'complained'])
+
+/**
+ * A host field name. Host-side filters become keys in the adapter's query
+ * (for MongoContactAdapter, literally a Mongo filter key), so a `$`-prefixed
+ * name would be an operator, not a field.
+ */
+const fieldNameSchema = (strict: boolean) =>
+  (strict ? z.string().min(1) : z.string()).max(256).regex(/^(?!\$)[^\0]*$/, 'must not start with $')
+
+/**
+ * Filter values are primitives only. An object value such as `{ $ne: null }`
+ * would reach a Mongo-backed adapter as an OPERATOR and match every contact.
+ */
+const segmentValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()])
+
+/**
+ * Build the segment-filter schema. `strict` is what scheduling (and every
+ * agent-path write) requires: non-empty tags, fields and event names, and a
+ * non-empty `any`. The lenient form only checks types, so the admin composer
+ * can save a draft while a row is still half filled in.
+ */
+export function segmentFilterSchema(strict: boolean): z.ZodType<unknown> {
+  const str = strict ? z.string().min(1).max(256) : z.string().max(256)
+  const days = z.number().int().positive().max(36_500).optional()
+  const self: z.ZodType<unknown> = z.lazy(() =>
+    z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('fieldEquals'), field: fieldNameSchema(strict), value: segmentValueSchema }),
+      z.object({ kind: z.literal('fieldIn'), field: fieldNameSchema(strict), values: z.array(segmentValueSchema).max(1000) }),
+      z.object({ kind: z.literal('fieldExists'), field: fieldNameSchema(strict) }),
+      z.object({ kind: z.literal('hasTag'), tag: str }),
+      z.object({ kind: z.literal('notHasTag'), tag: str }),
+      z.object({ kind: z.literal('subscriptionStatus'), equals: subscriptionStatusEnum }),
+      z.object({ kind: z.literal('firedEvent'), eventName: str, withinDays: days }),
+      z.object({ kind: z.literal('notFiredEvent'), eventName: str, withinDays: days }),
+      z.object({ kind: z.literal('subscribedAfter'), date: z.coerce.date() }),
+      z.object({ kind: z.literal('subscribedBefore'), date: z.coerce.date() }),
+      z.object({ kind: z.literal('opened'), templateSlug: slugSchema.optional(), withinDays: days }),
+      z.object({ kind: z.literal('notOpened'), templateSlug: slugSchema.optional(), withinDays: days }),
+      z.object({ kind: z.literal('any'), filters: strict ? z.array(self).min(1).max(50) : z.array(self).max(50) }),
+      z.object({ kind: z.literal('not'), filter: self }),
+    ]),
+  )
+  return self
+}
+
+export function segmentDefinitionSchema(strict: boolean) {
+  return z.object({ filters: z.array(segmentFilterSchema(strict)).max(50) })
+}
+
+// ---------------------------------------------------------------------------
 // Flow step + predicate schemas (mirror types.ts)
 // ---------------------------------------------------------------------------
 

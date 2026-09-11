@@ -15,7 +15,7 @@ import { z } from 'zod'
 import type { Mailer } from '../mailer.js'
 import type { BroadcastDoc } from '../models/index.js'
 import type { SegmentDefinition } from '../../shared/types.js'
-import { slugSchema } from '../../shared/schemas.js'
+import { segmentDefinitionSchema, slugSchema } from '../../shared/schemas.js'
 
 /** A typed failure the HTTP layer can map to a status code without guessing. */
 export class BroadcastOperationError extends Error {
@@ -88,6 +88,29 @@ export interface BroadcastOpOptions {
    * `subscriptionStatus: subscribed`. The agent path sets this.
    */
   requireSubscribed?: boolean
+  /**
+   * Validate segments strictly on create/patch (non-empty tags, fields and
+   * event names). Scheduling always validates strictly; the admin composer
+   * saves drafts leniently so a half-filled row does not block a save.
+   */
+  strictSegment?: boolean
+}
+
+/**
+ * Validate and normalise a segment (dates coerced to `Date`). An unknown
+ * filter kind is refused here rather than evaluated as "matches everyone" at
+ * dispatch.
+ */
+export function parseSegment(seg: unknown, strict: boolean): SegmentDefinition {
+  const r = segmentDefinitionSchema(strict).safeParse(seg)
+  if (!r.success) {
+    throw new BroadcastOperationError(
+      'invalid_segment',
+      `segmentDefinition: ${r.error.issues.map((i) => `${i.path.join('.') || 'filters'}: ${i.message}`).join('; ')}`,
+      400,
+    )
+  }
+  return r.data as SegmentDefinition
 }
 
 /**
@@ -134,13 +157,16 @@ export async function createBroadcast(
   if (!slug || !name || !templateSlug) {
     throw new BroadcastOperationError('validation_failed', 'slug, name, templateSlug required')
   }
-  if (opts.requireSubscribed) assertSubscribedSegment(input.segmentDefinition ?? DEFAULT_SEGMENT)
+  const segmentDefinition = input.segmentDefinition
+    ? parseSegment(input.segmentDefinition, !!opts.strictSegment)
+    : DEFAULT_SEGMENT
+  if (opts.requireSubscribed) assertSubscribedSegment(segmentDefinition)
   const now = new Date()
   const doc: BroadcastDoc = {
     slug,
     name,
     templateSlug,
-    segmentDefinition: input.segmentDefinition ?? DEFAULT_SEGMENT,
+    segmentDefinition,
     status: 'draft',
     scheduledAt: null,
     startedAt: null,
@@ -182,11 +208,14 @@ export async function patchBroadcast(
   if (b.status !== 'draft') {
     throw new BroadcastOperationError('not_draft', `broadcast is ${b.status}; only a draft can be edited`, 409)
   }
-  if (opts.requireSubscribed && patch.segmentDefinition) assertSubscribedSegment(patch.segmentDefinition)
+  const segmentDefinition = patch.segmentDefinition
+    ? parseSegment(patch.segmentDefinition, !!opts.strictSegment)
+    : undefined
+  if (opts.requireSubscribed && segmentDefinition) assertSubscribedSegment(segmentDefinition)
   const set: Record<string, unknown> = { updatedAt: new Date() }
   if (typeof patch.name === 'string') set.name = patch.name
   if (typeof patch.templateSlug === 'string') set.templateSlug = patch.templateSlug
-  if (patch.segmentDefinition) set.segmentDefinition = patch.segmentDefinition
+  if (segmentDefinition) set.segmentDefinition = segmentDefinition
   if (typeof patch.respectRecipientTimezone === 'boolean') set.respectRecipientTimezone = patch.respectRecipientTimezone
   // Conditional on draft so a concurrent schedule cannot be edited underneath.
   const res = await mailer.collections.broadcasts.findOneAndUpdate(
@@ -218,6 +247,9 @@ export async function scheduleBroadcast(
   // Checked again at schedule: a draft created or edited through the admin
   // API never passed the agent-path guard.
   if (opts.requireSubscribed) assertSubscribedSegment(b.segmentDefinition)
+  // Whatever path saved the draft, what is about to be dispatched must be a
+  // complete, known segment.
+  parseSegment(b.segmentDefinition, true)
   if (!input.scheduledAt) throw new BroadcastOperationError('scheduledAt_required', 'scheduledAt is required')
   const scheduled = new Date(input.scheduledAt as string)
   if (Number.isNaN(scheduled.getTime())) throw new BroadcastOperationError('bad_scheduledAt', 'scheduledAt is not a date')

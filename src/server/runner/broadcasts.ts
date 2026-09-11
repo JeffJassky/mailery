@@ -7,9 +7,10 @@
 
 import { ObjectId } from 'mongodb'
 
-import type { Contact, SegmentDefinition, SegmentFilter, AdapterFilter } from '../../shared/types.js'
+import type { Contact } from '../../shared/types.js'
 import type { BroadcastDoc, SendDoc, TemplateDoc } from '../models/index.js'
 import { isSuppressed } from './suppression.js'
+import { applyPostFilters, planSegment } from './segment.js'
 import { sha256Hex } from '../tokens.js'
 import type { RunnerContext } from './index.js'
 
@@ -116,8 +117,7 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
     return
   }
 
-  const hostFilter = toAdapterFilter(broadcast.segmentDefinition)
-  const postFilters = broadcast.segmentDefinition.filters.filter((f) => isMailerSide(f))
+  const { hostFilter, postFilters } = planSegment(broadcast.segmentDefinition)
 
   let cursor: string | undefined = undefined
   let total = 0
@@ -203,105 +203,6 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
       },
     },
   )
-}
-
-// ---------------------------------------------------------------------------
-// Segment translation
-// ---------------------------------------------------------------------------
-
-function toAdapterFilter(seg: SegmentDefinition): AdapterFilter {
-  const out: AdapterFilter = {}
-  for (const f of seg.filters) {
-    switch (f.kind) {
-      case 'hasTag':
-        out.hasTag = f.tag
-        break
-      case 'fieldEquals':
-        out.fieldEquals = { field: f.field, value: f.value }
-        break
-      case 'fieldIn':
-        out.fieldIn = { field: f.field, values: f.values }
-        break
-      case 'fieldExists':
-        out.fieldExists = f.field
-        break
-      // notHasTag isn't a single-condition adapter filter, defer to post-filter
-      // subscriptionStatus / firedEvent / opened are all mailer-side
-    }
-  }
-  return out
-}
-
-function isMailerSide(f: SegmentFilter): boolean {
-  return (
-    f.kind === 'subscriptionStatus' ||
-    f.kind === 'firedEvent' ||
-    f.kind === 'notFiredEvent' ||
-    f.kind === 'subscribedAfter' ||
-    f.kind === 'subscribedBefore' ||
-    f.kind === 'opened' ||
-    f.kind === 'notOpened' ||
-    f.kind === 'notHasTag' ||
-    f.kind === 'any' ||
-    f.kind === 'not'
-  )
-}
-
-async function applyPostFilters(contacts: Contact[], filters: SegmentFilter[], ctx: RunnerContext): Promise<Contact[]> {
-  if (filters.length === 0) return contacts
-  const externalIds = contacts.map((c) => c.externalId)
-
-  // Cache common lookups in one Mongo round-trip per filter.
-  const cache: Record<string, Set<string>> = {}
-  for (const f of filters) {
-    if (f.kind === 'subscriptionStatus') {
-      const docs = await ctx.collections.subscriptions
-        .find({ externalId: { $in: externalIds }, status: f.equals })
-        .project<{ externalId: string }>({ externalId: 1 })
-        .toArray()
-      cache[`sub:${f.equals}`] = new Set(docs.map((d) => d.externalId))
-    }
-    if (f.kind === 'firedEvent' || f.kind === 'notFiredEvent') {
-      const query: any = { externalId: { $in: externalIds }, name: f.eventName }
-      if (f.withinDays) {
-        query.occurredAt = { $gt: new Date(Date.now() - f.withinDays * 86_400_000) }
-      }
-      const docs = await ctx.collections.events
-        .find(query)
-        .project<{ externalId: string }>({ externalId: 1 })
-        .toArray()
-      cache[`evt:${f.eventName}`] = new Set(docs.map((d) => d.externalId))
-    }
-  }
-
-  return contacts.filter((c) => filters.every((f) => filterMatches(c, f, cache)))
-}
-
-function filterMatches(c: Contact, f: SegmentFilter, cache: Record<string, Set<string>>): boolean {
-  switch (f.kind) {
-    case 'subscriptionStatus':
-      return cache[`sub:${f.equals}`]?.has(c.externalId) ?? false
-    case 'firedEvent':
-      return cache[`evt:${f.eventName}`]?.has(c.externalId) ?? false
-    case 'notFiredEvent':
-      return !cache[`evt:${f.eventName}`]?.has(c.externalId)
-    case 'notHasTag':
-      return !c.tags.includes(f.tag)
-    case 'opened':
-    case 'notOpened':
-      // V1: not implemented in batch — would need a per-contact send lookup.
-      // Treat as pass for now; suppress at dispatch time.
-      return true
-    case 'subscribedAfter':
-    case 'subscribedBefore':
-      return true // V2
-    case 'any':
-      return f.filters.some((sub) => filterMatches(c, sub, cache))
-    case 'not':
-      return !filterMatches(c, f.filter, cache)
-    default:
-      return true
-  }
 }
 
 // ---------------------------------------------------------------------------
