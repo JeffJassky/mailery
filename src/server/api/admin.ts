@@ -46,6 +46,15 @@ import {
   type MailTesterClient,
 } from '../runner/mail-tester.js'
 import { HEALTH_AGG_ID, healthBucketId } from '../models/index.js'
+import {
+  BroadcastOperationError,
+  cancelBroadcast,
+  computeBroadcastStats,
+  createBroadcast,
+  emptyBroadcastStats,
+  patchBroadcast,
+  scheduleBroadcast,
+} from './broadcast-ops.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1856,57 +1865,18 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
   // ----- Broadcasts: create / patch / schedule / cancel --------------------
   r.post(
     '/broadcasts',
-    asyncHandler(async (req, res) => {
-      const { slug, name, templateSlug, segmentDefinition } = req.body ?? {}
-      if (!slug || !name || !templateSlug) {
-        return res.status(400).json({ error: 'validation_failed', message: 'slug, name, templateSlug required' })
-      }
-      const now = new Date()
-      try {
-        await c.broadcasts.insertOne({
-          slug,
-          name,
-          templateSlug,
-          segmentDefinition: segmentDefinition ?? { filters: [{ kind: 'subscriptionStatus', equals: 'subscribed' }] },
-          status: 'draft',
-          scheduledAt: null,
-          startedAt: null,
-          completedAt: null,
-          confirmationRequired: true,
-          confirmedCount: null,
-          confirmedAt: null,
-          confirmedBy: null,
-          recipientCount: null,
-          stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0 },
-          createdAt: now,
-          createdBy: (req as any).actor,
-          updatedAt: now,
-        } as any)
-      } catch (err: any) {
-        if (err?.code === 11000) return res.status(409).json({ error: 'slug_taken' })
-        throw err
-      }
-      await mailer.audit({
-        actor: (req as any).actor,
-        action: 'broadcast.create',
-        resource: { collection: 'mailer_broadcasts', slug },
-      })
+    broadcastHandler(async (req, res) => {
+      const { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone } = req.body ?? {}
+      await createBroadcast(mailer, { slug, name, templateSlug, segmentDefinition, respectRecipientTimezone }, (req as any).actor)
       return res.json({ ok: true, slug })
     }),
   )
 
   r.patch(
     '/broadcasts/:slug',
-    asyncHandler(async (req, res) => {
-      const b = await c.broadcasts.findOne({ slug: req.params.slug })
-      if (!b) return res.status(404).json({ error: 'not_found' })
-      if (b.status !== 'draft') return res.status(409).json({ error: 'not_draft' })
-      const { name, templateSlug, segmentDefinition } = req.body ?? {}
-      const set: Record<string, unknown> = { updatedAt: new Date() }
-      if (typeof name === 'string') set.name = name
-      if (typeof templateSlug === 'string') set.templateSlug = templateSlug
-      if (segmentDefinition) set.segmentDefinition = segmentDefinition
-      await c.broadcasts.updateOne({ _id: b._id }, { $set: set })
+    broadcastHandler(async (req, res) => {
+      const { name, templateSlug, segmentDefinition, respectRecipientTimezone } = req.body ?? {}
+      await patchBroadcast(mailer, String(req.params.slug), { name, templateSlug, segmentDefinition, respectRecipientTimezone }, (req as any).actor)
       return res.json({ ok: true })
     }),
   )
@@ -1943,52 +1913,17 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
   r.post(
     '/broadcasts/:slug/schedule',
-    asyncHandler(async (req, res) => {
-      const b = await c.broadcasts.findOne({ slug: req.params.slug })
-      if (!b) return res.status(404).json({ error: 'not_found' })
-      if (b.status !== 'draft') return res.status(409).json({ error: 'not_draft' })
+    broadcastHandler(async (req, res) => {
       const { scheduledAt, confirmedCount, respectRecipientTimezone } = req.body ?? {}
-      if (!scheduledAt) return res.status(400).json({ error: 'scheduledAt_required' })
-      const scheduled = new Date(scheduledAt)
-      if (Number.isNaN(scheduled.getTime())) return res.status(400).json({ error: 'bad_scheduledAt' })
-
-      const threshold = mailer.config.broadcastConfirmationThreshold
-      if (typeof confirmedCount !== 'number') {
-        return res.status(400).json({ error: 'confirmedCount_required' })
-      }
-
-      const set: Record<string, unknown> = {
-        status: 'scheduled',
-        scheduledAt: scheduled,
-        confirmedCount,
-        confirmedAt: new Date(),
-        confirmedBy: (req as any).actor,
-        updatedAt: new Date(),
-      }
-      if (respectRecipientTimezone) set.respectRecipientTimezone = true
-
-      await c.broadcasts.updateOne({ _id: b._id }, { $set: set })
-      await mailer.audit({
-        actor: (req as any).actor,
-        action: 'broadcast.schedule',
-        resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
-        diffSummary: `scheduled at ${scheduled.toISOString()} · confirmedCount=${confirmedCount} · threshold=${threshold}`,
-      })
+      await scheduleBroadcast(mailer, String(req.params.slug), { scheduledAt, confirmedCount, respectRecipientTimezone }, (req as any).actor)
       return res.json({ ok: true })
     }),
   )
 
   r.post(
     '/broadcasts/:slug/cancel',
-    asyncHandler(async (req, res) => {
-      const b = await c.broadcasts.findOne({ slug: req.params.slug })
-      if (!b) return res.status(404).json({ error: 'not_found' })
-      await c.broadcasts.updateOne({ _id: b._id }, { $set: { status: 'cancelled', updatedAt: new Date() } })
-      await mailer.audit({
-        actor: (req as any).actor,
-        action: 'broadcast.cancel',
-        resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
-      })
+    broadcastHandler(async (req, res) => {
+      await cancelBroadcast(mailer, String(req.params.slug), (req as any).actor)
       return res.json({ ok: true })
     }),
   )
@@ -2212,52 +2147,19 @@ async function computeTemplateStats(mailer: Mailer, slugFilter?: string): Promis
   return out
 }
 
-interface BroadcastStats {
-  delivered: number
-  opened: number
-  clicked: number
-  bounced: number
-}
-function emptyBroadcastStats(): BroadcastStats {
-  return { delivered: 0, opened: 0, clicked: 0, bounced: 0 }
-}
-
-async function computeBroadcastStats(
-  mailer: Mailer,
-  idFilter?: ObjectId,
-): Promise<Map<string, BroadcastStats>> {
-  const out = new Map<string, BroadcastStats>()
-  const match: Record<string, unknown> = { broadcastId: { $ne: null } }
-  if (idFilter) match.broadcastId = idFilter
-
-  const rows = await mailer.collections.sends
-    .aggregate<{
-      _id: ObjectId
-      delivered: number
-      opened: number
-      clicked: number
-      bounced: number
-    }>([
-      { $match: match },
-      {
-        $group: {
-          _id: '$broadcastId',
-          delivered: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] } },
-          opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
-          clicked: { $sum: { $cond: [{ $ifNull: ['$firstClickAt', false] }, 1, 0] } },
-          bounced: { $sum: { $cond: [{ $eq: ['$status', 'bounced'] }, 1, 0] } },
-        },
-      },
-    ])
-    .toArray()
-  for (const row of rows) {
-    if (!row._id) continue
-    out.set(String(row._id), {
-      delivered: row.delivered,
-      opened: row.opened,
-      clicked: row.clicked,
-      bounced: row.bounced,
+/**
+ * `asyncHandler` for the broadcast routes: a `BroadcastOperationError` from
+ * the shared operations becomes the JSON body these routes have always
+ * answered with (`{ error: code }` plus a message), anything else goes to the
+ * host's error handler as before.
+ */
+function broadcastHandler(fn: AsyncHandler) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    fn(req, res, next).catch((err) => {
+      if (err instanceof BroadcastOperationError) {
+        return res.status(err.status).json({ error: err.code, message: err.message, ...(err.details ?? {}) })
+      }
+      next(err)
     })
   }
-  return out
 }

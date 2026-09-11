@@ -64,6 +64,21 @@ import {
   FlowOperationError,
 } from '../runner/arm.js'
 import { simulateFlow } from '../runner/simulate.js'
+import {
+  BroadcastOperationError,
+  agentCreateBroadcastSchema,
+  agentPatchBroadcastSchema,
+  agentScheduleBroadcastSchema,
+  broadcastStatusBreakdown,
+  broadcastSummary,
+  cancelBroadcast,
+  computeBroadcastStats,
+  createBroadcast,
+  emptyBroadcastStats,
+  loadBroadcast,
+  patchBroadcast,
+  scheduleBroadcast,
+} from './broadcast-ops.js'
 
 declare const __PKG_VERSION__: string | undefined
 const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
@@ -887,6 +902,75 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     }),
   )
 
+  // ----- Broadcasts -------------------------------------------------------------------
+  //
+  // The same operations as the admin API's broadcast routes (they share
+  // api/broadcast-ops.ts), with structured bodies and the token's actor. What
+  // differs from the admin path is what the agent path refuses: see the
+  // per-route notes.
+  router.get(
+    '/broadcasts',
+    wrap(async (_req, res) => {
+      const docs = await c.broadcasts.find().sort({ createdAt: -1 }).limit(200).toArray()
+      const stats = await computeBroadcastStats(mailer)
+      res.json(docs.map((b) => ({ ...broadcastSummary(b), stats: stats.get(String(b._id)) ?? emptyBroadcastStats() })))
+    }),
+  )
+
+  router.get(
+    '/broadcasts/:slug',
+    wrap(async (req, res) => {
+      const b = await loadBroadcast(mailer, String(req.params.slug))
+      const [stats, statusBreakdown] = await Promise.all([
+        computeBroadcastStats(mailer, b._id),
+        broadcastStatusBreakdown(mailer, b._id!),
+      ])
+      res.json({
+        broadcast: broadcastSummary(b),
+        stats: stats.get(String(b._id)) ?? emptyBroadcastStats(),
+        statusBreakdown,
+      })
+    }),
+  )
+
+  router.post(
+    '/broadcasts',
+    wrap(async (req, res) => {
+      const parsed = agentCreateBroadcastSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
+      const b = await createBroadcast(mailer, parsed.data as any, actorOf(req))
+      res.status(201).json({ broadcast: broadcastSummary(b) })
+    }),
+  )
+
+  router.patch(
+    '/broadcasts/:slug',
+    wrap(async (req, res) => {
+      const parsed = agentPatchBroadcastSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
+      const b = await patchBroadcast(mailer, String(req.params.slug), parsed.data as any, actorOf(req))
+      res.json({ broadcast: broadcastSummary(b) })
+    }),
+  )
+
+  router.post(
+    '/broadcasts/:slug/schedule',
+    wrap(async (req, res) => {
+      const parsed = agentScheduleBroadcastSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
+      const b = await scheduleBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req))
+      res.json({ broadcast: broadcastSummary(b) })
+    }),
+  )
+
+  router.post(
+    '/broadcasts/:slug/cancel',
+    wrap(async (req, res) => {
+      const out = await cancelBroadcast(mailer, String(req.params.slug), actorOf(req))
+      res.json({ broadcast: broadcastSummary(out.broadcast), cancelledSends: out.cancelledSends })
+    }),
+  )
+
   // ----- Runner + status ---------------------------------------------------------------
   router.post(
     '/tick',
@@ -985,6 +1069,9 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
   router.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof FlowOperationError) {
       return res.status(err.status).json({ error: err.code, message: err.message })
+    }
+    if (err instanceof BroadcastOperationError) {
+      return res.status(err.status).json({ error: err.code, message: err.message, ...(err.details ?? {}) })
     }
     if (err?.name === 'ZodError') {
       return res.status(400).json({ error: 'validation_failed', issues: err.issues })
@@ -1454,6 +1541,10 @@ function runSummary(r: FlowRunDoc) {
   }
 }
 
+function zodMessage(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
+}
+
 function objectOrUndefined(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
 }
@@ -1496,6 +1587,12 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'POST', path: '/contacts/:externalId/unsubscribe', summary: 'Unsubscribe a test contact (marketing scope).', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/tags', summary: 'Add or remove tags on a test contact ({add: [...], remove: [...]}), so a gated flow lets it through.', testContactsOnly: true },
   { method: 'POST', path: '/contacts/:externalId/reset', summary: 'Delete a test contact\'s runs, sends, events ({events: [names]} to narrow) and suppressions, then resubscribe. Each part can be turned off with false.', testContactsOnly: true },
+  { method: 'GET', path: '/broadcasts', summary: 'Every broadcast (newest first, up to 200) with its stats.' },
+  { method: 'GET', path: '/broadcasts/:slug', summary: 'One broadcast with stats and a per-status count of its send rows.' },
+  { method: 'POST', path: '/broadcasts', summary: 'Create a draft broadcast: {slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?}.' },
+  { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
+  { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}.' },
+  { method: 'POST', path: '/broadcasts/:slug/cancel', summary: 'Cancel a broadcast.' },
   { method: 'POST', path: '/tick', summary: 'Run the runner tick now (trigger scan, sweeps, outbox, webhook backlog).' },
   { method: 'GET', path: '/webhooks/status', summary: 'Provider webhook ingest: last event received, counts by type (24h), unprocessed backlog.' },
   { method: 'GET', path: '/status', summary: 'One document with setup checks, health, every flow (enabled, version, watermark, gate, active runs), every template, and 24h counts.' },
