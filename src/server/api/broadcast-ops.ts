@@ -81,6 +81,35 @@ export const agentScheduleBroadcastSchema = z.object({
   respectRecipientTimezone: z.boolean().optional(),
 })
 
+/** Options that differ between the admin path and the agent path. */
+export interface BroadcastOpOptions {
+  /**
+   * Refuse any segment that is not restricted, at the top level, to
+   * `subscriptionStatus: subscribed`. The agent path sets this.
+   */
+  requireSubscribed?: boolean
+}
+
+/**
+ * The agent-path guard. A segment's host filter streams the host's contact
+ * store — for a Mongo-backed host, the `users` collection, every account ever
+ * created — and only a mailer-side `subscriptionStatus` filter narrows that to
+ * people who opted in. A segment without it mails every account the host
+ * filter matches, consented or not. The filter has to sit at the TOP level
+ * (AND-ed): nested inside `any` or `not` it no longer restricts anything.
+ */
+export function assertSubscribedSegment(seg: SegmentDefinition | undefined | null): void {
+  const filters = Array.isArray(seg?.filters) ? seg!.filters : []
+  const ok = filters.some((f) => f && f.kind === 'subscriptionStatus' && f.equals === 'subscribed')
+  if (!ok) {
+    throw new BroadcastOperationError(
+      'segment_requires_subscribed',
+      'the agent API only schedules broadcasts to subscribed contacts: add {"kind": "subscriptionStatus", "equals": "subscribed"} to segmentDefinition.filters (top level)',
+      422,
+    )
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Lookups
 // ---------------------------------------------------------------------------
@@ -99,11 +128,13 @@ export async function createBroadcast(
   mailer: Mailer,
   input: CreateBroadcastInput,
   actor: string,
+  opts: BroadcastOpOptions = {},
 ): Promise<BroadcastDoc> {
   const { slug, name, templateSlug } = input
   if (!slug || !name || !templateSlug) {
     throw new BroadcastOperationError('validation_failed', 'slug, name, templateSlug required')
   }
+  if (opts.requireSubscribed) assertSubscribedSegment(input.segmentDefinition ?? DEFAULT_SEGMENT)
   const now = new Date()
   const doc: BroadcastDoc = {
     slug,
@@ -145,11 +176,13 @@ export async function patchBroadcast(
   slug: string,
   patch: PatchBroadcastInput,
   actor: string,
+  opts: BroadcastOpOptions = {},
 ): Promise<BroadcastDoc> {
   const b = await loadBroadcast(mailer, slug)
   if (b.status !== 'draft') {
     throw new BroadcastOperationError('not_draft', `broadcast is ${b.status}; only a draft can be edited`, 409)
   }
+  if (opts.requireSubscribed && patch.segmentDefinition) assertSubscribedSegment(patch.segmentDefinition)
   const set: Record<string, unknown> = { updatedAt: new Date() }
   if (typeof patch.name === 'string') set.name = patch.name
   if (typeof patch.templateSlug === 'string') set.templateSlug = patch.templateSlug
@@ -176,11 +209,15 @@ export async function scheduleBroadcast(
   slug: string,
   input: ScheduleBroadcastInput,
   actor: string,
+  opts: BroadcastOpOptions = {},
 ): Promise<BroadcastDoc> {
   const b = await loadBroadcast(mailer, slug)
   if (b.status !== 'draft') {
     throw new BroadcastOperationError('not_draft', `broadcast is ${b.status}; only a draft can be scheduled`, 409)
   }
+  // Checked again at schedule: a draft created or edited through the admin
+  // API never passed the agent-path guard.
+  if (opts.requireSubscribed) assertSubscribedSegment(b.segmentDefinition)
   if (!input.scheduledAt) throw new BroadcastOperationError('scheduledAt_required', 'scheduledAt is required')
   const scheduled = new Date(input.scheduledAt as string)
   if (Number.isNaN(scheduled.getTime())) throw new BroadcastOperationError('bad_scheduledAt', 'scheduledAt is not a date')

@@ -180,6 +180,58 @@ describe('agent broadcasts: schedule / dispatch / cancel', () => {
   })
 })
 
+describe('agent broadcasts: the subscribed-only guard', () => {
+  it('refuses a segment without a top-level subscriptionStatus: subscribed filter', async () => {
+    const bare = await call('POST', '/broadcasts', {
+      slug: 'everyone',
+      name: 'Everyone',
+      templateSlug: 'news',
+      segmentDefinition: { filters: [{ kind: 'hasTag', tag: 'beta' }] },
+    })
+    expect(bare.status).toBe(422)
+    expect(bare.body.error).toBe('segment_requires_subscribed')
+
+    // Nested inside `any` it restricts nothing, so it does not count.
+    const nested = await call('POST', '/broadcasts', {
+      slug: 'nested',
+      name: 'Nested',
+      templateSlug: 'news',
+      segmentDefinition: { filters: [{ kind: 'any', filters: [SUBSCRIBED, { kind: 'hasTag', tag: 'beta' }] }] },
+    })
+    expect(nested.status).toBe(422)
+
+    const other = await call('POST', '/broadcasts', {
+      slug: 'unsubs',
+      name: 'Unsubs',
+      templateSlug: 'news',
+      segmentDefinition: { filters: [{ kind: 'subscriptionStatus', equals: 'unsubscribed' }] },
+    })
+    expect(other.status).toBe(422)
+    expect(await H.ctx.collections.broadcasts.countDocuments({})).toBe(0)
+  })
+
+  it('refuses a patch that drops the filter', async () => {
+    await call('POST', '/broadcasts', { slug: 'june', name: 'June', templateSlug: 'news' })
+    const res = await call('PATCH', '/broadcasts/june', { segmentDefinition: { filters: [{ kind: 'hasTag', tag: 'beta' }] } })
+    expect(res.status).toBe(422)
+    const stored = await H.ctx.collections.broadcasts.findOne({ slug: 'june' })
+    expect(stored?.segmentDefinition.filters).toEqual([SUBSCRIBED])
+  })
+
+  it('refuses to schedule an admin-created draft that lacks it, while the admin path still may', async () => {
+    await call('POST', '/api/broadcasts', {
+      slug: 'adm-all',
+      name: 'Adm',
+      templateSlug: 'news',
+      segmentDefinition: { filters: [{ kind: 'hasTag', tag: 'beta' }] },
+    })
+    const res = await call('POST', '/broadcasts/adm-all/schedule', { scheduledAt: new Date().toISOString(), confirmedCount: 2 })
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('segment_requires_subscribed')
+    expect((await H.ctx.collections.broadcasts.findOne({ slug: 'adm-all' }))?.status).toBe('draft')
+  })
+})
+
 describe('admin broadcast routes keep their response shapes', () => {
   it('create / patch / schedule / cancel answer as before', async () => {
     const created = await call('POST', '/api/broadcasts', { slug: 'adm', name: 'Adm', templateSlug: 'news' })

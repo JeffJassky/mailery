@@ -938,7 +938,7 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     wrap(async (req, res) => {
       const parsed = agentCreateBroadcastSchema.safeParse(req.body ?? {})
       if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
-      const b = await createBroadcast(mailer, parsed.data as any, actorOf(req))
+      const b = await createBroadcast(mailer, parsed.data as any, actorOf(req), { requireSubscribed: true })
       res.status(201).json({ broadcast: broadcastSummary(b) })
     }),
   )
@@ -948,7 +948,7 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     wrap(async (req, res) => {
       const parsed = agentPatchBroadcastSchema.safeParse(req.body ?? {})
       if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
-      const b = await patchBroadcast(mailer, String(req.params.slug), parsed.data as any, actorOf(req))
+      const b = await patchBroadcast(mailer, String(req.params.slug), parsed.data as any, actorOf(req), { requireSubscribed: true })
       res.json({ broadcast: broadcastSummary(b) })
     }),
   )
@@ -958,7 +958,7 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     wrap(async (req, res) => {
       const parsed = agentScheduleBroadcastSchema.safeParse(req.body ?? {})
       if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
-      const b = await scheduleBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req))
+      const b = await scheduleBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req), { requireSubscribed: true })
       res.json({ broadcast: broadcastSummary(b) })
     }),
   )
