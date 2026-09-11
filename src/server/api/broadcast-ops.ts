@@ -13,9 +13,10 @@ import { ObjectId } from 'mongodb'
 import { z } from 'zod'
 
 import type { Mailer } from '../mailer.js'
-import type { BroadcastDoc } from '../models/index.js'
+import type { BroadcastDoc, TemplateDoc } from '../models/index.js'
 import type { SegmentDefinition } from '../../shared/types.js'
 import { segmentDefinitionSchema, slugSchema } from '../../shared/schemas.js'
+import { countBroadcastRecipients, type BroadcastRecipientCount } from '../runner/broadcasts.js'
 
 /** A typed failure the HTTP layer can map to a status code without guessing. */
 export class BroadcastOperationError extends Error {
@@ -94,6 +95,11 @@ export interface BroadcastOpOptions {
    * saves drafts leniently so a half-filled row does not block a save.
    */
   strictSegment?: boolean
+  /**
+   * Schedule only when `confirmedCount` equals the true recipient count
+   * (`countRecipients`) at the moment of scheduling. The agent path sets this.
+   */
+  requireExactCount?: boolean
 }
 
 /**
@@ -141,6 +147,33 @@ export async function loadBroadcast(mailer: Mailer, slug: string): Promise<Broad
   const b = await mailer.collections.broadcasts.findOne({ slug })
   if (!b) throw new BroadcastOperationError('not_found', `no broadcast with slug "${slug}"`, 404)
   return b
+}
+
+export async function loadBroadcastTemplate(mailer: Mailer, b: BroadcastDoc): Promise<TemplateDoc> {
+  const tpl = await mailer.collections.templates.findOne({ slug: b.templateSlug })
+  if (!tpl) {
+    throw new BroadcastOperationError('template_not_found', `template "${b.templateSlug}" does not exist`, 409)
+  }
+  return tpl
+}
+
+/**
+ * The true recipient count for a broadcast as stored (or for `segment`, an
+ * unsaved edit of it): exactly the recipients dispatch would enqueue now.
+ * Requires the template, whose kind decides which suppressions apply.
+ */
+export async function countRecipients(
+  mailer: Mailer,
+  b: BroadcastDoc,
+  segment?: SegmentDefinition,
+): Promise<BroadcastRecipientCount & { templateKind: TemplateDoc['kind'] }> {
+  const tpl = await loadBroadcastTemplate(mailer, b)
+  const count = await countBroadcastRecipients(
+    { _id: b._id, segmentDefinition: segment ?? b.segmentDefinition },
+    tpl.kind,
+    mailer.getRunnerContext(),
+  )
+  return { ...count, templateKind: tpl.kind }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +291,17 @@ export async function scheduleBroadcast(
   }
   const confirmedCount = input.confirmedCount
   const threshold = mailer.config.broadcastConfirmationThreshold
+  if (opts.requireExactCount) {
+    const { recipientCount } = await countRecipients(mailer, b)
+    if (confirmedCount !== recipientCount) {
+      throw new BroadcastOperationError(
+        'count_mismatch',
+        `confirmedCount ${confirmedCount} does not match the ${recipientCount} recipient(s) this broadcast would send to now; recount with POST /broadcasts/${b.slug}/count`,
+        409,
+        { expected: recipientCount, confirmedCount },
+      )
+    }
+  }
 
   const set: Record<string, unknown> = {
     status: 'scheduled',

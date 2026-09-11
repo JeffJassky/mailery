@@ -3,15 +3,21 @@
  * passed, streams the segment via the adapter cursor + mailer-side post-filter,
  * and bulk-enqueues Send docs + jobs. Per-provider rate limiting + bounded
  * enqueue (pause when waitingCount > broadcastEnqueueMaxWaiting).
+ *
+ * Who a broadcast reaches is decided in exactly one place,
+ * `eligibleRecipientPages`: the host filter, the mailer-side post-filters,
+ * a sendable address, and the suppression check. Dispatch and
+ * `countBroadcastRecipients` both consume it, which is what lets the agent
+ * API refuse a `confirmedCount` that differs from what dispatch will send.
  */
 
 import { ObjectId } from 'mongodb'
 
 import type { Contact } from '../../shared/types.js'
+import type { TemplateKind } from '../../shared/enums.js'
 import type { BroadcastDoc, SendDoc, TemplateDoc } from '../models/index.js'
-import { isSuppressed } from './suppression.js'
+import { suppressedEmails } from './suppression.js'
 import { applyPostFilters, planSegment } from './segment.js'
-import { sha256Hex } from '../tokens.js'
 import type { RunnerContext } from './index.js'
 
 /**
@@ -107,6 +113,90 @@ async function runBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext)
   }
 }
 
+// ---------------------------------------------------------------------------
+// Who a broadcast reaches
+// ---------------------------------------------------------------------------
+
+export function broadcastDedupeKey(broadcastId: ObjectId | string, externalId: string): string {
+  return `broadcast:${broadcastId}:${externalId}`
+}
+
+/** Anything a provider would reject outright is never enqueued. */
+const SENDABLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+export function isSendableEmail(email: string | null | undefined): boolean {
+  return typeof email === 'string' && SENDABLE_EMAIL_RE.test(email)
+}
+
+/**
+ * Stream the broadcast's eligible recipients, one adapter page at a time:
+ * the host filter (stage A), the mailer-side post-filters (stage B), a
+ * sendable address, and not suppressed for the template's kind. A yielded
+ * page may be empty; the stream ends when the adapter's cursor does.
+ */
+export async function* eligibleRecipientPages(
+  broadcast: Pick<BroadcastDoc, 'segmentDefinition'>,
+  kind: TemplateKind,
+  ctx: RunnerContext,
+): AsyncGenerator<Contact[]> {
+  const { hostFilter, postFilters } = planSegment(broadcast.segmentDefinition)
+  let cursor: string | undefined
+  for (;;) {
+    const page = await ctx.adapter.query(hostFilter, { limit: ctx.config.broadcastEnqueueBatchSize, cursor })
+    if (page.contacts.length === 0) break
+    const passed = (await applyPostFilters(page.contacts, postFilters, ctx)).filter((c) => isSendableEmail(c.email))
+    const suppressed = await suppressedEmails(ctx.collections, passed.map((c) => c.email), kind)
+    yield passed.filter((c) => !suppressed.has(c.email.toLowerCase()))
+    if (!page.nextCursor) break
+    cursor = page.nextCursor
+  }
+}
+
+/** Which of `contacts` already have a send row for this broadcast. */
+async function alreadyDispatched(ctx: RunnerContext, broadcastId: ObjectId, contacts: Contact[]): Promise<Set<string>> {
+  if (contacts.length === 0) return new Set()
+  const keys = contacts.map((c) => broadcastDedupeKey(broadcastId, c.externalId))
+  const found = await ctx.collections.sends.distinct('dedupeKey', { dedupeKey: { $in: keys } })
+  return new Set(found.map(String))
+}
+
+export interface BroadcastRecipientCount {
+  /** Stage A alone: what the host filter matches. An upper bound. */
+  hostMatched: number
+  /** After post-filters, the sendable-address check and suppression. */
+  eligible: number
+  /** Eligible contacts that already have a send row for this broadcast. */
+  alreadySent: number
+  /** What dispatch would enqueue now: eligible, minus already sent. */
+  recipientCount: number
+  computedMs: number
+}
+
+/**
+ * The true recipient count: the same stream dispatch consumes, counted
+ * instead of enqueued. Costs one pass over the host filter's matches.
+ */
+export async function countBroadcastRecipients(
+  broadcast: Pick<BroadcastDoc, '_id' | 'segmentDefinition'>,
+  kind: TemplateKind,
+  ctx: RunnerContext,
+): Promise<BroadcastRecipientCount> {
+  const t0 = Date.now()
+  const { hostFilter } = planSegment(broadcast.segmentDefinition)
+  const hostMatched = await ctx.adapter.count(hostFilter)
+  let eligible = 0
+  let alreadySent = 0
+  for await (const page of eligibleRecipientPages(broadcast, kind, ctx)) {
+    eligible += page.length
+    if (broadcast._id) alreadySent += (await alreadyDispatched(ctx, broadcast._id, page)).size
+  }
+  return { hostMatched, eligible, alreadySent, recipientCount: eligible - alreadySent, computedMs: Date.now() - t0 }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
 async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
   const template = await ctx.collections.templates.findOne({ slug: broadcast.templateSlug })
   if (!template) {
@@ -117,79 +207,53 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
     return
   }
 
-  const { hostFilter, postFilters } = planSegment(broadcast.segmentDefinition)
-
-  let cursor: string | undefined = undefined
-  let total = 0
-  const batchSize = ctx.config.broadcastEnqueueBatchSize
   const maxWaiting = ctx.config.broadcastEnqueueMaxWaiting
   const respectTimezone = broadcast.respectRecipientTimezone === true
   const scheduledMs = broadcast.scheduledAt?.getTime() ?? Date.now()
+  const heartbeat = () =>
+    ctx.collections.broadcasts.updateOne({ _id: broadcast._id }, { $set: { updatedAt: new Date() } })
 
-  for (;;) {
-    // Progress heartbeat — resumeStalledBroadcasts treats a stale updatedAt
-    // as a dead dispatcher, so touch it every page (and during backpressure).
-    await ctx.collections.broadcasts.updateOne(
-      { _id: broadcast._id },
-      { $set: { updatedAt: new Date() } },
-    )
+  // Progress heartbeat — resumeStalledBroadcasts treats a stale updatedAt
+  // as a dead dispatcher, so touch it every page (and during backpressure).
+  await heartbeat()
+  for await (const eligible of eligibleRecipientPages(broadcast, template.kind, ctx)) {
+    await heartbeat()
+    const seen = await alreadyDispatched(ctx, broadcast._id!, eligible)
+    const fresh = eligible.filter((c) => !seen.has(broadcastDedupeKey(broadcast._id!, c.externalId)))
+    if (fresh.length === 0) continue
 
-    const page = await ctx.adapter.query(hostFilter, { limit: batchSize, cursor })
-    if (page.contacts.length === 0) break
-
-    // Stage B: mailer-side post-filter.
-    const eligible = await applyPostFilters(page.contacts, postFilters, ctx)
-
-    if (eligible.length > 0) {
-      // Backpressure: wait until the send queue's waiting set drains below cap.
-      while ((await ctx.queues.send.getWaitingCount()) > maxWaiting) {
-        await ctx.collections.broadcasts.updateOne(
-          { _id: broadcast._id },
-          { $set: { updatedAt: new Date() } },
-        )
-        await sleep(2000)
-      }
-
-      const sendDocs = await Promise.all(
-        eligible.map(async (contact) => buildSendDoc(broadcast, template, contact, ctx, scheduledMs, respectTimezone)),
-      )
-
-      // Filter out suppressed (mailer-side suppression check is the same one
-      // dispatchSend would do; we short-circuit here to avoid enqueuing).
-      const inserted: Array<{ sendId: ObjectId; delayMs: number }> = []
-      for (const { doc, delayMs } of sendDocs) {
-        if (!doc) continue
-        try {
-          await ctx.collections.sends.insertOne(doc)
-          inserted.push({ sendId: doc._id!, delayMs })
-        } catch (err: any) {
-          if (err?.code !== 11000) throw err
-          // dup dedupeKey — already dispatched somewhere
-        }
-      }
-
-      // Bulk enqueue.
-      if (inserted.length > 0) {
-        await Promise.all(
-          inserted.map(({ sendId, delayMs }) =>
-            ctx.queues.send.add(
-              'send',
-              { sendId: String(sendId) },
-              {
-                attempts: ctx.config.sendRetryAttempts,
-                backoff: { type: 'exponential', delay: 60_000 },
-                ...(delayMs > 0 ? { delay: delayMs } : {}),
-              },
-            ),
-          ),
-        )
-      }
-
-      total += inserted.length
+    // Backpressure: wait until the send queue's waiting set drains below cap.
+    while ((await ctx.queues.send.getWaitingCount()) > maxWaiting) {
+      await heartbeat()
+      await sleep(2000)
     }
 
-    if (!page.nextCursor) break
-    cursor = page.nextCursor
+    const inserted: Array<{ sendId: ObjectId; delayMs: number }> = []
+    for (const contact of fresh) {
+      const { doc, delayMs } = buildSendDoc(broadcast, template, contact, ctx, scheduledMs, respectTimezone)
+      try {
+        await ctx.collections.sends.insertOne(doc)
+        inserted.push({ sendId: doc._id!, delayMs })
+      } catch (err: any) {
+        if (err?.code !== 11000) throw err
+        // dup dedupeKey — a concurrent dispatcher got there first
+      }
+    }
+
+    // Bulk enqueue.
+    await Promise.all(
+      inserted.map(({ sendId, delayMs }) =>
+        ctx.queues.send.add(
+          'send',
+          { sendId: String(sendId) },
+          {
+            attempts: ctx.config.sendRetryAttempts,
+            backoff: { type: 'exponential', delay: 60_000 },
+            ...(delayMs > 0 ? { delay: delayMs } : {}),
+          },
+        ),
+      ),
+    )
   }
 
   await ctx.collections.broadcasts.updateOne(
@@ -198,7 +262,8 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
       $set: {
         status: 'sent',
         completedAt: new Date(),
-        recipientCount: total,
+        // Every send row this broadcast has, across re-dispatches.
+        recipientCount: await ctx.collections.sends.countDocuments({ broadcastId: broadcast._id }),
         updatedAt: new Date(),
       },
     },
@@ -210,24 +275,20 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
 // ---------------------------------------------------------------------------
 
 interface BuildResult {
-  doc: SendDoc | null
+  doc: SendDoc
   delayMs: number
 }
 
-async function buildSendDoc(
+function buildSendDoc(
   broadcast: BroadcastDoc,
   template: TemplateDoc,
   contact: Contact,
   ctx: RunnerContext,
   scheduledMs: number,
   respectTimezone: boolean,
-): Promise<BuildResult> {
-  // Final suppression check before we insert.
-  const supp = await isSuppressed(ctx.collections, contact.email, template.kind)
-  if (supp.suppressed) return { doc: null, delayMs: 0 }
-
+): BuildResult {
   const sendId = new ObjectId()
-  const dedupeKey = `broadcast:${broadcast._id}:${contact.externalId}`
+  const dedupeKey = broadcastDedupeKey(broadcast._id!, contact.externalId)
 
   // Per-recipient TZ delay calculation. Anchored to scheduledAt (not enqueue
   // time) so tick lag and backpressure pauses don't drift later batches.
@@ -272,7 +333,6 @@ async function buildSendDoc(
     sentAt: null,
     deliveredAt: null,
   }
-  void sha256Hex
   return { doc, delayMs }
 }
 

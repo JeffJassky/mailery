@@ -73,6 +73,7 @@ import {
   broadcastSummary,
   cancelBroadcast,
   computeBroadcastStats,
+  countRecipients,
   createBroadcast,
   emptyBroadcastStats,
   loadBroadcast,
@@ -958,8 +959,33 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
     wrap(async (req, res) => {
       const parsed = agentScheduleBroadcastSchema.safeParse(req.body ?? {})
       if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
-      const b = await scheduleBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req), { requireSubscribed: true, strictSegment: true })
+      const b = await scheduleBroadcast(mailer, String(req.params.slug), parsed.data, actorOf(req), {
+        requireSubscribed: true,
+        strictSegment: true,
+        requireExactCount: true,
+      })
       res.json({ broadcast: broadcastSummary(b) })
+    }),
+  )
+
+  /**
+   * The true recipient count — the stream dispatch consumes, counted: host
+   * filter, mailer-side post-filters, sendable address, suppression for the
+   * template's kind, minus contacts that already have a send row for this
+   * broadcast. `recipientCount` is the number schedule requires as
+   * `confirmedCount`.
+   */
+  router.post(
+    '/broadcasts/:slug/count',
+    wrap(async (req, res) => {
+      const b = await loadBroadcast(mailer, String(req.params.slug))
+      const count = await countRecipients(mailer, b)
+      res.json({
+        slug: b.slug,
+        status: b.status,
+        ...count,
+        confirmationThreshold: mailer.config.broadcastConfirmationThreshold,
+      })
     }),
   )
 
@@ -1591,7 +1617,8 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'GET', path: '/broadcasts/:slug', summary: 'One broadcast with stats and a per-status count of its send rows.' },
   { method: 'POST', path: '/broadcasts', summary: 'Create a draft broadcast: {slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?}.' },
   { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
-  { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}.' },
+  { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to. recipientCount is what schedule requires as confirmedCount.' },
+  { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}. 409 count_mismatch unless confirmedCount equals POST /broadcasts/:slug/count → recipientCount. The segment must be limited to subscribed contacts.' },
   { method: 'POST', path: '/broadcasts/:slug/cancel', summary: 'Cancel a broadcast.' },
   { method: 'POST', path: '/tick', summary: 'Run the runner tick now (trigger scan, sweeps, outbox, webhook backlog).' },
   { method: 'GET', path: '/webhooks/status', summary: 'Provider webhook ingest: last event received, counts by type (24h), unprocessed backlog.' },

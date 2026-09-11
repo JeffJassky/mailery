@@ -50,8 +50,11 @@ import {
   BroadcastOperationError,
   cancelBroadcast,
   computeBroadcastStats,
+  countRecipients,
   createBroadcast,
   emptyBroadcastStats,
+  loadBroadcast,
+  parseSegment,
   patchBroadcast,
   scheduleBroadcast,
 } from './broadcast-ops.js'
@@ -1883,30 +1886,25 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
   r.post(
     '/broadcasts/:slug/segment/count',
-    asyncHandler(async (req, res) => {
-      const segmentDefinition = req.body?.segmentDefinition
-      if (!segmentDefinition?.filters) return res.status(400).json({ error: 'segment_required' })
-      const t0 = Date.now()
-      // V1: only host-side filter translation. Mailer-side filters
-      // (subscription status, fired events, etc.) and the suppression check
-      // are applied at dispatch time over the streamed cursor, so the live
-      // counter would have to scan-and-filter the full audience to be
-      // precise. We return the upper-bound count and tell the UI it's an
-      // estimate. When richer estimation lands, swap this for a sampled
-      // pass that includes mailer-side filters + suppression.
-      const hostFilter: any = {}
-      for (const f of segmentDefinition.filters) {
-        if (f.kind === 'hasTag') hostFilter.hasTag = f.tag
-        if (f.kind === 'fieldEquals') hostFilter.fieldEquals = { field: f.field, value: f.value }
-      }
-      const hasMailerFilters = segmentDefinition.filters.some((f: any) =>
-        ['subscriptionStatus', 'firedEvent', 'notFiredEvent', 'notHasTag', 'opened', 'notOpened', 'subscribedAfter', 'subscribedBefore'].includes(f.kind),
-      )
-      const upperBound = await mailer.adapter.count(hostFilter)
+    broadcastHandler(async (req, res) => {
+      const raw = req.body?.segmentDefinition
+      if (!raw?.filters) return res.status(400).json({ error: 'segment_required' })
+      // The composer counts the segment being edited, not the stored one, and
+      // may hold a half-filled row — parsed leniently, like a draft save.
+      const segment = parseSegment(raw, false)
+      const b = await loadBroadcast(mailer, String(req.params.slug))
+      // The same stream dispatch consumes (host filter, post-filters,
+      // suppression), so the count the operator types is the count that
+      // goes out. `upperBound` keeps its name for the composer; it is exact.
+      const count = await countRecipients(mailer, b, segment)
       return res.json({
-        upperBound,
-        approximate: hasMailerFilters,
-        computedMs: Date.now() - t0,
+        upperBound: count.recipientCount,
+        approximate: false,
+        computedMs: count.computedMs,
+        hostMatched: count.hostMatched,
+        eligible: count.eligible,
+        alreadySent: count.alreadySent,
+        recipientCount: count.recipientCount,
       })
     }),
   )

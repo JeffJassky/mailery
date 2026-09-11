@@ -180,6 +180,61 @@ describe('agent broadcasts: schedule / dispatch / cancel', () => {
   })
 })
 
+describe('agent broadcasts: the true recipient count', () => {
+  it('counts what dispatch sends: subscription, suppression, post-filters — and schedule holds it to that', async () => {
+    // r1 is subscribed but suppressed; t2 is unsubscribed.
+    await H.mailer.suppress('real@example.com', { scope: 'marketing', reason: 'manual', source: 'test' })
+    await H.ctx.collections.subscriptions.updateOne({ externalId: 't2' }, { $set: { status: 'unsubscribed' } })
+    try {
+      await call('POST', '/broadcasts', { slug: 'june', name: 'June', templateSlug: 'news' })
+      const count = await call('POST', '/broadcasts/june/count')
+      expect(count.status).toBe(200)
+      expect(count.body).toMatchObject({ hostMatched: 3, eligible: 1, alreadySent: 0, recipientCount: 1, templateKind: 'marketing' })
+
+      const wrong = await call('POST', '/broadcasts/june/schedule', { scheduledAt: new Date(Date.now() - 1000).toISOString(), confirmedCount: 3 })
+      expect(wrong.status).toBe(409)
+      expect(wrong.body).toMatchObject({ error: 'count_mismatch', expected: 1, confirmedCount: 3 })
+      expect((await H.ctx.collections.broadcasts.findOne({ slug: 'june' }))?.status).toBe('draft')
+
+      const right = await call('POST', '/broadcasts/june/schedule', { scheduledAt: new Date(Date.now() - 1000).toISOString(), confirmedCount: 1 })
+      expect(right.status).toBe(200)
+      await runTick(H.ctx)
+      const sends = await H.ctx.collections.sends.find({ broadcastId: { $ne: null } }).toArray()
+      expect(sends.map((s) => s.externalId)).toEqual(['t1'])
+
+      // After dispatch the same count reports the recipient as already sent.
+      const after = await call('POST', '/broadcasts/june/count')
+      expect(after.body).toMatchObject({ eligible: 1, alreadySent: 1, recipientCount: 0 })
+    } finally {
+      await H.ctx.collections.suppressions.deleteMany({ email: 'real@example.com' })
+      await H.ctx.collections.subscriptions.updateOne({ externalId: 't2' }, { $set: { status: 'subscribed' } })
+    }
+  })
+
+  it('refuses to count without the template', async () => {
+    await call('POST', '/api/broadcasts', { slug: 'ghost', name: 'Ghost', templateSlug: 'no-such-template' })
+    const res = await call('POST', '/broadcasts/ghost/count')
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('template_not_found')
+  })
+
+  it('the admin composer count is exact now, under the key it already reads', async () => {
+    await H.mailer.suppress('real@example.com', { scope: 'all', reason: 'manual', source: 'test' })
+    try {
+      await call('POST', '/api/broadcasts', { slug: 'adm-count', name: 'Adm', templateSlug: 'news' })
+      const res = await call('POST', '/api/broadcasts/adm-count/segment/count', {
+        segmentDefinition: { filters: [SUBSCRIBED, { kind: 'hasTag', tag: 'beta' }] },
+      })
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ upperBound: 2, approximate: false, hostMatched: 2, recipientCount: 2 })
+      const all = await call('POST', '/api/broadcasts/adm-count/segment/count', { segmentDefinition: { filters: [SUBSCRIBED] } })
+      expect(all.body).toMatchObject({ upperBound: 2, hostMatched: 3 })
+    } finally {
+      await H.ctx.collections.suppressions.deleteMany({ email: 'real@example.com' })
+    }
+  })
+})
+
 describe('agent broadcasts: the subscribed-only guard', () => {
   it('refuses a segment without a top-level subscriptionStatus: subscribed filter', async () => {
     const bare = await call('POST', '/broadcasts', {
