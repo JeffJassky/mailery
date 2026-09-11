@@ -137,7 +137,14 @@ async function runBroadcastDispatch(broadcast: BroadcastDoc, ctx: RunnerContext)
     console.error('mailery: broadcast dispatch failed', { id: String(broadcast._id), err })
     await ctx.collections.broadcasts.updateOne(
       { _id: broadcast._id, status: 'sending' },
-      { $set: { status: 'failed', updatedAt: new Date(), dispatchLeaseId: null } },
+      {
+        $set: {
+          status: 'failed',
+          failureReason: `dispatch error: ${String((err as Error)?.message ?? err)}`,
+          updatedAt: new Date(),
+          dispatchLeaseId: null,
+        },
+      },
     )
   }
 }
@@ -257,10 +264,19 @@ export async function countBroadcastRecipients(
 
 async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): Promise<void> {
   const template = await ctx.collections.templates.findOne({ slug: broadcast.templateSlug })
-  if (!template) {
+  // A broadcast is bulk mail: without a marketing template its sends would
+  // carry no List-Unsubscribe, skip marketing opt-outs and bypass the
+  // circuit breaker. Schedule refuses it; this catches a template whose kind
+  // changed after scheduling.
+  const failure = !template
+    ? `template "${broadcast.templateSlug}" not found`
+    : template.kind !== 'marketing'
+      ? `template "${broadcast.templateSlug}" is ${template.kind}, not marketing`
+      : null
+  if (failure || !template) {
     await ctx.collections.broadcasts.updateOne(
       { _id: broadcast._id, status: 'sending' },
-      { $set: { status: 'failed', updatedAt: new Date(), dispatchLeaseId: null } },
+      { $set: { status: 'failed', failureReason: failure, updatedAt: new Date(), dispatchLeaseId: null } },
     )
     return
   }
@@ -416,10 +432,10 @@ function buildSendDoc(
 
   // Per-recipient TZ delay calculation. Anchored to scheduledAt (not enqueue
   // time) so tick lag and backpressure pauses don't drift later batches.
-  let delayMs = Math.max(0, scheduledMs - Date.now())
+  const now = Date.now()
+  let delayMs = Math.max(0, scheduledMs - now)
   if (respectTimezone && contact.timezone) {
-    const offsetMs = perRecipientOffsetMs(scheduledMs, contact.timezone)
-    delayMs = Math.max(0, scheduledMs + offsetMs - Date.now())
+    delayMs = Math.max(0, recipientSlotMs(scheduledMs, contact.timezone, now) - now)
   }
 
   const doc: SendDoc = {
@@ -474,14 +490,43 @@ function buildSendDoc(
  * they get the NEXT occurrence of the wall-clock slot, i.e. same time
  * tomorrow. (Berlin, UTC+2: raw offset −2h → +22h.)
  */
+const DAY_MS = 24 * 60 * 60 * 1000
+/** A slot missed by less than this is sent now rather than tomorrow (tick lag). */
+const TZ_SLOT_GRACE_MS = 15 * 60 * 1000
+
+/**
+ * When a recipient in `timezone` should get a broadcast scheduled for
+ * `scheduledMs`: the same wall-clock time, in their zone, as scheduledAt
+ * reads in UTC — the next such moment not already more than the grace
+ * period in the past at `nowMs`.
+ *
+ * The roll-forward matters for anything dispatched after scheduledAt: a wave
+ * resumed days later, or a stalled dispatch rescued. The offset alone is
+ * relative to scheduledAt, so without it every recipient of a late wave got
+ * the mail at once, at whatever hour it was for them. The offset is
+ * recomputed at the rolled-forward day, so a DST change in between keeps the
+ * local time.
+ */
+export function recipientSlotMs(scheduledMs: number, timezone: string, nowMs: number): number {
+  let anchor = scheduledMs
+  let target = anchor + perRecipientOffsetMs(anchor, timezone)
+  const earliest = nowMs - TZ_SLOT_GRACE_MS
+  if (target < earliest) {
+    anchor += Math.ceil((earliest - target) / DAY_MS) * DAY_MS
+    target = anchor + perRecipientOffsetMs(anchor, timezone)
+    if (target < earliest) target += DAY_MS
+  }
+  return target
+}
+
 function perRecipientOffsetMs(scheduledMs: number, timezone: string): number {
-  const DAY_MS = 24 * 60 * 60 * 1000
   try {
     // Get the offset between the scheduled UTC instant interpreted as a wall
-    // clock and the same wall clock in the recipient's tz.
+    // clock and the same wall clock in the recipient's tz. hourCycle h23:
+    // with `hour12: false` some ICU builds print midnight as "24".
     const scheduled = new Date(scheduledMs)
-    const utc = scheduled.toLocaleString('en-US', { timeZone: 'UTC', hour12: false })
-    const local = scheduled.toLocaleString('en-US', { timeZone: timezone, hour12: false })
+    const utc = scheduled.toLocaleString('en-US', { timeZone: 'UTC', hourCycle: 'h23' })
+    const local = scheduled.toLocaleString('en-US', { timeZone: timezone, hourCycle: 'h23' })
 
     // Parse both as Date objects in the runner's local tz and take the diff.
     const parse = (s: string) => {

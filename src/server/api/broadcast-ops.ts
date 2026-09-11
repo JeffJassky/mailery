@@ -327,6 +327,7 @@ export async function createBroadcast(
     : DEFAULT_SEGMENT
   if (opts.requireSubscribed) assertSubscribedSegment(segmentDefinition)
   checkWaveSettings(mailer, input)
+  await assertBroadcastTemplate(mailer, templateSlug, { mustExist: false })
   const now = new Date()
   const doc: BroadcastDoc = {
     slug,
@@ -382,6 +383,7 @@ export async function patchBroadcast(
     : undefined
   if (opts.requireSubscribed && segmentDefinition) assertSubscribedSegment(segmentDefinition)
   checkWaveSettings(mailer, patch)
+  if (typeof patch.templateSlug === 'string') await assertBroadcastTemplate(mailer, patch.templateSlug, { mustExist: false })
   const set: Record<string, unknown> = { updatedAt: new Date() }
   if (patch.recipientCap !== undefined) set.recipientCap = patch.recipientCap
   if (patch.order !== undefined) set.order = patch.order
@@ -421,8 +423,9 @@ export async function scheduleBroadcast(
   // API never passed the agent-path guard.
   if (opts.requireSubscribed) assertSubscribedSegment(b.segmentDefinition)
   // Whatever path saved the draft, what is about to be dispatched must be a
-  // complete, known segment.
+  // complete, known segment and a published marketing template.
   parseSegment(b.segmentDefinition, true)
+  await assertBroadcastTemplate(mailer, b.templateSlug, { mustExist: true })
   if (!input.scheduledAt) throw new BroadcastOperationError('scheduledAt_required', 'scheduledAt is required')
   const scheduled = new Date(input.scheduledAt as string)
   if (Number.isNaN(scheduled.getTime())) throw new BroadcastOperationError('bad_scheduledAt', 'scheduledAt is not a date')
@@ -595,14 +598,55 @@ export async function cancelBroadcast(
   actor: string,
 ): Promise<{ broadcast: BroadcastDoc; cancelledSends: number }> {
   const b = await loadBroadcast(mailer, slug)
+  if (b.status === 'cancelled') return { broadcast: b, cancelledSends: 0 }
+  const pending = await mailer.collections.sends.countDocuments({ broadcastId: b._id, status: { $in: ['queued', 'held'] } })
+  if ((b.status === 'sent' || b.status === 'failed') && pending === 0) {
+    throw new BroadcastOperationError('already_finished', `broadcast is ${b.status} with nothing left to send; there is nothing to cancel`, 409)
+  }
   await mailer.collections.broadcasts.updateOne({ _id: b._id }, { $set: { status: 'cancelled', updatedAt: new Date() } })
+  // Cancelling used to stop only future enqueues: every send already in the
+  // queue (a whole broadcast, once dispatch had run) still went out.
+  const now = new Date()
+  const cancelled = await mailer.collections.sends.updateMany(
+    { broadcastId: b._id, status: { $in: ['queued', 'held'] } },
+    { $set: { status: 'cancelled', errorMessage: `cancelled: broadcast cancelled by ${actor}`, updatedAt: now } },
+  )
   await mailer.audit({
     actor,
     action: 'broadcast.cancel',
     resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
+    diffSummary: `was ${b.status}; cancelled ${cancelled.modifiedCount} queued/held send(s)`,
   })
   const after = await mailer.collections.broadcasts.findOne({ _id: b._id })
-  return { broadcast: after ?? b, cancelledSends: 0 }
+  return { broadcast: after ?? b, cancelledSends: cancelled.modifiedCount }
+}
+
+/**
+ * A broadcast is bulk mail, so its template must be `marketing`: only a
+ * marketing send carries List-Unsubscribe, honours marketing-scope
+ * unsubscribes, and is held by the circuit breaker. A transactional template
+ * would mail the whole segment past every opt-out.
+ */
+async function assertBroadcastTemplate(
+  mailer: Mailer,
+  templateSlug: string,
+  opts: { mustExist: boolean },
+): Promise<void> {
+  const tpl = await mailer.collections.templates.findOne({ slug: templateSlug })
+  if (!tpl) {
+    if (opts.mustExist) throw new BroadcastOperationError('template_not_found', `template "${templateSlug}" does not exist`, 409)
+    return
+  }
+  if (tpl.kind !== 'marketing') {
+    throw new BroadcastOperationError(
+      'template_not_marketing',
+      `template "${templateSlug}" is ${tpl.kind}; a broadcast needs a marketing template (List-Unsubscribe, marketing opt-outs, circuit breaker)`,
+      409,
+    )
+  }
+  if (opts.mustExist && !tpl.body?.html && !tpl.body?.mjml) {
+    throw new BroadcastOperationError('template_not_published', `template "${templateSlug}" has no published body`, 409)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +705,7 @@ export function broadcastSummary(b: BroadcastDoc) {
     pauseReason: b.pauseReason ?? null,
     stopRules: b.stopRules ?? null,
     stopRuleBreach: b.stopRuleBreach ?? null,
+    failureReason: b.failureReason ?? null,
     scheduledAt: b.scheduledAt,
     startedAt: b.startedAt,
     completedAt: b.completedAt,

@@ -357,6 +357,8 @@ export interface BroadcastDoc {
   dispatchLeaseId?: string | null
   /** Bumped on every (re)start of dispatch; part of the dispatch job id. */
   dispatchGeneration?: number
+  /** Why dispatch set status 'failed'. */
+  failureReason?: string | null
   /** Per-broadcast overrides of `MailerConfig.broadcastStopRules`. */
   stopRules?: Partial<{
     enabled: boolean

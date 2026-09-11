@@ -164,12 +164,18 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         return
       }
       const now = new Date()
+      // An open proves delivery, but only moves a send forward from 'sent'.
+      // Setting status unconditionally overwrote 'bounced' and 'complained'
+      // (a complaint is usually preceded by an open), undercounting both.
+      await mailer.collections.sends.updateOne(
+        { _id: sendId, status: 'sent' },
+        { $set: { status: 'delivered' as const } },
+      )
       await mailer.collections.sends.updateOne(
         { _id: sendId },
         {
           $set: {
             openedAt: send.openedAt ?? now,
-            status: 'delivered' as const,
           },
           $inc: { openCount: 1 },
           // Per-open user agent, so `hasOpenedExcludingBots` has a signal to
