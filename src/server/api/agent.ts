@@ -96,6 +96,10 @@ const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
  * minus what the server owns (timestamps, stats, draft). Defaults mirror what
  * the admin publish route writes for a template created in the SPA.
  */
+const broadcastCountSchema = z.object({
+  recipientCap: z.number().int().positive().max(10_000_000).nullable().optional(),
+})
+
 const broadcastTestSendSchema = z.object({
   contactIds: z.array(z.string().min(1).max(256)).min(1).max(10),
   vars: z.record(z.string(), z.unknown()).optional(),
@@ -995,8 +999,17 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
   router.post(
     '/broadcasts/:slug/count',
     wrap(async (req, res) => {
+      const parsed = broadcastCountSchema.safeParse(req.body ?? {})
+      if (!parsed.success) return res.status(400).json({ error: 'validation_failed', message: zodMessage(parsed.error) })
       const b = await loadBroadcast(mailer, String(req.params.slug))
-      const count = await countRecipients(mailer, b)
+      // {recipientCap} previews another cap — the size of the next wave —
+      // without changing the broadcast.
+      const count = await countRecipients(
+        mailer,
+        b,
+        undefined,
+        parsed.data.recipientCap !== undefined ? { recipientCap: parsed.data.recipientCap } : {},
+      )
       res.json({
         slug: b.slug,
         status: b.status,
@@ -1717,7 +1730,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'GET', path: '/broadcasts/:slug', summary: 'One broadcast: stats (delivered, bounced hard/soft, complained, unsubscribed, opened, clicked, with rates), a per-status count of its send rows, pause reason and cap progress.' },
   { method: 'POST', path: '/broadcasts', summary: 'Create a draft broadcast: {slug, name, templateSlug, segmentDefinition?, respectRecipientTimezone?}.' },
   { method: 'PATCH', path: '/broadcasts/:slug', summary: 'Edit a draft broadcast (name, templateSlug, segmentDefinition, respectRecipientTimezone). 409 once it has left draft.' },
-  { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to. recipientCount is what schedule requires as confirmedCount.' },
+  { method: 'POST', path: '/broadcasts/:slug/count', summary: 'The true recipient count: host filter, post-filters, suppression, minus contacts already sent to, within the cap ({recipientCap} previews another cap). Schedule wants recipientCount; resume wants recipientCount + heldSends.' },
   { method: 'POST', path: '/broadcasts/:slug/schedule', summary: 'Schedule a draft: {scheduledAt, confirmedCount, respectRecipientTimezone?}. 409 count_mismatch unless confirmedCount equals POST /broadcasts/:slug/count → recipientCount. The segment must be limited to subscribed contacts.' },
   { method: 'POST', path: '/broadcasts/:slug/test-send', summary: 'Send the broadcast\'s template, rendered as each of {contactIds} (test contacts only), through the real pipeline without scheduling it; not counted in the broadcast\'s stats. {dispatch: "queue"} to leave them queued.', testContactsOnly: true },
   { method: 'POST', path: '/broadcasts/:slug/pause', summary: 'Pause a sending broadcast by hand ({reason?}); its queued sends are held.' },

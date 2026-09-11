@@ -130,6 +130,11 @@ describe('waves over the agent API', () => {
 
     // w6 unsubscribes between waves: the next slice skips them and still fills the cap.
     await H.ctx.collections.subscriptions.updateOne({ externalId: 'w6' }, { $set: { status: 'unsubscribed' } })
+    // Preview the next wave's size at the cap about to be set, without setting it.
+    const preview = await call('POST', '/broadcasts/wave/count', { recipientCap: 6 })
+    expect(preview.body).toMatchObject({ recipientCap: 6, sendsSoFar: 3, uncappedRecipientCount: 6, recipientCount: 3, heldSends: 0 })
+    expect((await H.ctx.collections.broadcasts.findOne({ slug: 'wave' }))?.recipientCap).toBe(3)
+    expect((await call('POST', '/broadcasts/wave/count', { recipientCap: 0 })).status).toBe(400)
     const wrong = await call('POST', '/broadcasts/wave/resume', { recipientCap: 6, confirmedCount: 4 })
     expect(wrong.status).toBe(409)
     expect(wrong.body).toMatchObject({ error: 'count_mismatch', expected: 3 })
