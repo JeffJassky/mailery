@@ -483,11 +483,15 @@ export interface HealthDoc {
     complained: number
     failedToSend: number
   }
+  /**
+   * Bounce/complaint rates are per send in the window; failureRate is failed
+   * attempts over all attempts. Null when the window has no denominator yet.
+   */
   rates: {
-    bounceRate: number
-    hardBounceRate: number
-    complaintRate: number
-    failureRate: number
+    bounceRate: number | null
+    hardBounceRate: number | null
+    complaintRate: number | null
+    failureRate: number | null
   }
   status: HealthStatus
   trippedAt: Date | null

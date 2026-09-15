@@ -132,11 +132,12 @@ export function Health(_: any) {
   const buckets = health?.buckets ?? []
   const status = health?.status ?? null
 
-  const fmt = (n: number | undefined) => (n == null ? '—' : `${(n * 100).toFixed(2)}%`)
+  // Null = nothing sent in the window yet, so there is no rate to show.
+  const fmt = (n: number | null | undefined) => (n == null ? '—' : `${(n * 100).toFixed(2)}%`)
 
   // Colorize a rate by its trip threshold:
-  //  ≥ trip → red, ≥ 50% of trip → amber, else green, undefined → muted.
-  function rateColor(rate: number | undefined, tripPct: number | undefined): string {
+  //  ≥ trip → red, ≥ 50% of trip → amber, else green, no rate → muted.
+  function rateColor(rate: number | null | undefined, tripPct: number | undefined): string {
     if (rate == null || tripPct == null) return 'var(--fg-muted)'
     const ratePct = rate * 100
     if (ratePct >= tripPct) return 'var(--red-fg)'

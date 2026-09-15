@@ -206,6 +206,16 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     return
   }
 
+  // No address to send to: the row was queued without one, or the host blanked
+  // the contact's email after it was queued (an account deletion between a
+  // flow's send step and dispatch). The provider rejects these outright, so it
+  // is permanent — fail it once, without the failedToSend counter (nothing
+  // reached a provider) and without throwing into the retry policy.
+  if (!send.emailAtSend?.trim() || !contact.email?.trim()) {
+    await markFailed(send._id!, 'no_recipient: the contact has no email address', ctx)
+    return
+  }
+
   const run = send.flowRunId ? await ctx.collections.flowRuns.findOne({ _id: send.flowRunId }) : null
 
   // Aborted-run guard: closes the race where a send is enqueued between the

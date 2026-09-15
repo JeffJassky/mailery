@@ -40,6 +40,15 @@ export interface DnsblConfig {
   dedicatedIps?: string[]
   /** Hours between automatic runs. Default 24. Set to 0 to disable scheduled runs. */
   intervalHours?: number
+  /**
+   * Spamhaus Data Query Service key (free at spamhaus.com for low volume).
+   * Spamhaus refuses queries that arrive through public or shared resolvers —
+   * Google, Cloudflare, and cloud VPC resolvers such as AWS's — answering
+   * 127.255.255.254 instead of a verdict. With a key, every `*.spamhaus.org`
+   * list is queried as `<key>.<zone>.dq.spamhaus.net`, which answers from
+   * anywhere. Rows and the UI keep the public list name; the key is never stored.
+   */
+  spamhausDqsKey?: string
 }
 
 export const DEFAULT_DOMAIN_DNSBL_LISTS: DnsblListSpec[] = [
@@ -404,7 +413,7 @@ export interface MailerConfig {
 
   // ---- Hooks ----------------------------------------------------------------
   getAdminActor?: (req: any) => string
-  onCircuitBreakerTrip?: (info: { reason: string; rates: Record<string, number> }) => Promise<void> | void
+  onCircuitBreakerTrip?: (info: { reason: string; rates: Record<string, number | null> }) => Promise<void> | void
   onSendFailure?: (info: { send: any; error: Error }) => Promise<void> | void
   /**
    * Called when a broadcast is paused by a stop rule, the circuit breaker, a

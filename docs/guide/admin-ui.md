@@ -58,7 +58,7 @@ The Health screen consolidates every reputation signal mailery tracks. Each sect
 
 ### Top-line KPIs
 
-Aggregate rates over the rolling window (default 1 hour): hard bounce, complaint, combined bounce, failed-to-send. Each is colored against its trip threshold — green below 50% of trip, amber above 50%, red at trip or above.
+Aggregate rates over the rolling window (default 1 hour): hard bounce, complaint, combined bounce, failed-to-send. Each is colored against its trip threshold — green below 50% of trip, amber above 50%, red at trip or above. Bounce and complaint rates are per send in the window; failed-to-send is failed attempts over all attempts. A rate shows "—" until the window has something to divide by: outcomes arrive by webhook, often for mail sent in an earlier window, so a quiet window can hold bounces and deliveries with no sends.
 
 ### Per-(sender domain × kind) buckets
 
@@ -68,7 +68,7 @@ See [Deliverability → Per-domain circuit breaker](./deliverability#per-domain-
 
 ### DNS block lists
 
-Daily scan results against Spamhaus / SURBL / URIBL (and Spamhaus ZEN / Barracuda / SORBS / SpamCop when dedicated IPs are configured). Listed targets surface in red with a "Recheck now" button.
+Daily scan results against Spamhaus / SURBL / URIBL (and Spamhaus ZEN / Barracuda / SORBS / SpamCop when dedicated IPs are configured). Listed targets surface in red with a "Recheck now" button. An amber `error` row is a lookup the list refused to answer, not a listing — the detail says why (for Spamhaus behind a public or cloud resolver, set `dnsbl.spamhausDqsKey`).
 
 See [Deliverability → DNS block-list monitoring](./deliverability#dns-block-list-monitoring).
 

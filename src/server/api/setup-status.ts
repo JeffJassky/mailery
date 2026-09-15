@@ -237,7 +237,7 @@ async function checkDnsbl(mailer: Mailer): Promise<SetupCheck> {
       label: 'DNS block-list checks',
       severity: 'warn',
       message: `all ${docs.length} checks errored`,
-      hint: 'Lookups against block lists are failing — usually a DNS-resolution problem on the host running mailery, or a list rate-limiting your public resolver. Verify outbound DNS works.',
+      hint: 'Lookups against block lists are failing — usually a DNS-resolution problem on the host running mailery, or a list refusing your public resolver (Spamhaus answers 127.255.255.254; set dnsbl.spamhausDqsKey). Verify outbound DNS works.',
     }
   }
   return {

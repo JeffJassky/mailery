@@ -124,7 +124,7 @@ export async function runDnsblChecks(
   // Bounded parallelism — DNS lookups are I/O-bound, but blasting all 25+
   // queries at once invites resolver throttling.
   async function processPair(p: typeof pairs[number]) {
-    const queryName = buildQueryName(p.target, p.targetKind, p.list.host)
+    const queryName = buildQueryName(p.target, p.targetKind, spamhausQueryHost(p.list.host, cfg.spamhausDqsKey))
     const lookup = queryName
       ? await queryDnsbl(resolver, queryName)
       : { result: 'error' as DnsblResult, returnCodes: [], errorMessage: 'unsupported target format' }
@@ -194,6 +194,16 @@ function collectTargets(ctx: RunnerContext, cfg: DnsblConfig): { domains: string
 }
 
 /**
+ * Route a public Spamhaus zone through the Data Query Service when a key is
+ * configured: `dbl.spamhaus.org` → `<key>.dbl.dq.spamhaus.net`. Anything else,
+ * or no key, passes through unchanged.
+ */
+export function spamhausQueryHost(listHost: string, dqsKey: string | undefined): string {
+  const zone = dqsKey ? /^([a-z0-9-]+)\.spamhaus\.org$/i.exec(listHost)?.[1] : undefined
+  return zone ? `${dqsKey}.${zone}.dq.spamhaus.net` : listHost
+}
+
+/**
  * Compute the DNS name to query for a (target, list) pair, honoring the
  * per-list peculiarities:
  *   - IPv4: reverse octets and prepend.
@@ -258,19 +268,28 @@ async function queryDnsbl(resolver: Resolver, query: string): Promise<QueryResul
   }
 }
 
+/** Spamhaus's documented refusal codes. */
+const REFUSAL_REASONS: Record<string, string> = {
+  '127.255.255.252': 'malformed query name for this list',
+  '127.255.255.254':
+    'queried through a public or shared DNS resolver, which Spamhaus blocks. Set dnsbl.spamhausDqsKey (free Spamhaus DQS key) or use a private resolver',
+  '127.255.255.255': 'this resolver has exceeded the free query limit',
+}
+
 export function interpretRecords(records: string[]): QueryResult {
   if (!records || records.length === 0) {
     return { result: 'clean', returnCodes: [], errorMessage: null }
   }
-  // Per Spamhaus convention, 127.255.255.x is reserved for query-error /
-  // public-resolver / blocked-by-list signals. Treat those as errors so they
-  // don't false-positive a "listed" verdict.
+  // Per Spamhaus convention, 127.255.255.x means the list refused to answer —
+  // never a listing. Report it as an error that says why, so it doesn't read
+  // as a verdict on the domain.
   const errorish = records.filter((r) => r.startsWith('127.255.255.'))
   if (errorish.length === records.length) {
+    const reasons = [...new Set(records.map((r) => REFUSAL_REASONS[r] ?? 'unrecognised refusal code'))]
     return {
       result: 'error',
       returnCodes: records,
-      errorMessage: `list returned reserved code(s): ${records.join(', ')}`,
+      errorMessage: `not a listing — the list refused the query (${records.join(', ')}): ${reasons.join('; ')}`,
     }
   }
   const listed = records.filter((r) => r.startsWith('127.') && !r.startsWith('127.255.255.'))

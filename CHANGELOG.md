@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.19.0 — No sends to blank addresses, honest health rates, Spamhaus DQS
+
+### Fixed
+
+- A contact whose email the host had blanked (an account deletion that scrubs the user but leaves the row) got a send to `""`. The provider rejected it on every retry and each attempt counted as a provider failure. The flow runner now exits such a run (`exitReason: 'contact_no_email'`) before any step, and `dispatchSend` fails a send with no recipient once (`no_recipient: …`), without a provider call, a `failedToSend` count, or a retry.
+- Health rates could read above 100% — "100% combined bounce, 400% failure" on a bucket that had sent nothing. Bounces and deliveries land in the window their webhook arrives in, usually for mail sent in an earlier one, and the rates divided by `sent || 1`. A rate with no denominator is now `null` (shown as "—"), and `failureRate` is failed attempts over all attempts.
+- Spamhaus's refusal codes (`127.255.255.252/.254/.255`) were reported as a bare "list returned reserved code(s)". The row now says it is not a listing and why — for `.254`, that the query came through a public or shared resolver.
+
+### Added
+
+- `dnsbl.spamhausDqsKey`: query every `*.spamhaus.org` list through Spamhaus's Data Query Service (`<key>.<zone>.dq.spamhaus.net`), which answers from hosts behind cloud resolvers. Rows keep the public list name; the key is not stored.
+
+### Changed — check before upgrading
+
+- `HealthDoc.rates.*`, the admin API's `health.rates` / bucket rates, and `onCircuitBreakerTrip`'s `rates` are now `number | null`. Code that formats them should treat `null` as "no data yet".
+- `failureRate` is `failedToSend / (sent + failedToSend)` instead of `failedToSend / sent`, so `failedToSendRatePctDegrade` now compares against the share of attempts that failed.
+
 ## 0.18.0 — Broadcasts, ready for a first production send
 
 Broadcast code had never run in production. This makes it safe to send a staged newsletter (test contacts, seed inboxes, then capped waves) from an agent session, and fixes what would have gone wrong on the first real send.

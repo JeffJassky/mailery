@@ -44,11 +44,12 @@ const ZERO_COUNTERS = {
   failedToSend: 0,
 }
 
-const ZERO_RATES = {
-  bounceRate: 0,
-  hardBounceRate: 0,
-  complaintRate: 0,
-  failureRate: 0,
+/** A window with no samples has no rate, not a 0% one. */
+const EMPTY_RATES: HealthDoc['rates'] = {
+  bounceRate: null,
+  hardBounceRate: null,
+  complaintRate: null,
+  failureRate: null,
 }
 
 /**
@@ -107,7 +108,7 @@ async function upsertCounter(
         trippedAt: null,
         trippedReason: null,
         manuallyResumedAt: null,
-        rates: { ...ZERO_RATES },
+        rates: { ...EMPTY_RATES },
       } as Partial<HealthDoc>,
       $set: { updatedAt: new Date() },
     },
@@ -150,7 +151,7 @@ export async function evaluateHealth(ctx: RunnerContext): Promise<void> {
             windowStartedAt: new Date(),
             windowDurationMs: windowMs,
             counters: { ...ZERO_COUNTERS },
-            rates: { ...ZERO_RATES },
+            rates: { ...EMPTY_RATES },
             status: 'healthy',
             updatedAt: new Date(),
           },
@@ -159,13 +160,27 @@ export async function evaluateHealth(ctx: RunnerContext): Promise<void> {
       continue
     }
 
-    const c = doc.counters
-    const total = c.sent || 1
-    const rates = {
-      bounceRate: c.bounced / total,
-      hardBounceRate: c.hardBounced / total,
-      complaintRate: c.complained / total,
-      failureRate: c.failedToSend / total,
+    // Outcomes (bounces, deliveries, complaints) land in the window their
+    // webhook arrives in, often for mail sent in an earlier window, and a
+    // failed attempt never counts as sent. Dividing by `sent || 1` reported
+    // 100% bounce and 400% failure on a bucket that had sent nothing this
+    // window. With no sends there is no rate: null, shown as "—".
+    // A bucket born from an upsert carries only the counters bumped so far.
+    const c = { ...ZERO_COUNTERS, ...doc.counters }
+    const perSent = (n: number) => (c.sent > 0 ? n / c.sent : null)
+    const attempts = c.sent + c.failedToSend
+    const rates: HealthDoc['rates'] = {
+      bounceRate: perSent(c.bounced),
+      hardBounceRate: perSent(c.hardBounced),
+      complaintRate: perSent(c.complained),
+      // Failed attempts over all attempts, so it stays within 0–100%.
+      failureRate: attempts > 0 ? c.failedToSend / attempts : null,
+    }
+    const pct = {
+      bounce: (rates.bounceRate ?? 0) * 100,
+      hardBounce: (rates.hardBounceRate ?? 0) * 100,
+      complaint: (rates.complaintRate ?? 0) * 100,
+      failure: (rates.failureRate ?? 0) * 100,
     }
 
     await ctx.collections.health.updateOne(
@@ -180,12 +195,12 @@ export async function evaluateHealth(ctx: RunnerContext): Promise<void> {
     if (doc.status === 'tripped') continue
 
     let trippedReason: string | null = null
-    if (rates.hardBounceRate * 100 >= cb.hardBounceRatePctTrip) {
-      trippedReason = `hard bounce rate ${(rates.hardBounceRate * 100).toFixed(2)}% >= ${cb.hardBounceRatePctTrip}%`
-    } else if (rates.complaintRate * 100 >= cb.complaintRatePctTrip) {
-      trippedReason = `complaint rate ${(rates.complaintRate * 100).toFixed(2)}% >= ${cb.complaintRatePctTrip}%`
-    } else if (rates.bounceRate * 100 >= cb.combinedBounceRatePctTrip) {
-      trippedReason = `combined bounce rate ${(rates.bounceRate * 100).toFixed(2)}% >= ${cb.combinedBounceRatePctTrip}%`
+    if (pct.hardBounce >= cb.hardBounceRatePctTrip) {
+      trippedReason = `hard bounce rate ${pct.hardBounce.toFixed(2)}% >= ${cb.hardBounceRatePctTrip}%`
+    } else if (pct.complaint >= cb.complaintRatePctTrip) {
+      trippedReason = `complaint rate ${pct.complaint.toFixed(2)}% >= ${cb.complaintRatePctTrip}%`
+    } else if (pct.bounce >= cb.combinedBounceRatePctTrip) {
+      trippedReason = `combined bounce rate ${pct.bounce.toFixed(2)}% >= ${cb.combinedBounceRatePctTrip}%`
     }
 
     if (trippedReason) {
@@ -229,7 +244,7 @@ export async function evaluateHealth(ctx: RunnerContext): Promise<void> {
       continue
     }
 
-    if (rates.failureRate * 100 >= cb.failedToSendRatePctDegrade) {
+    if (pct.failure >= cb.failedToSendRatePctDegrade) {
       if (doc.status !== 'degraded') {
         await ctx.collections.health.updateOne(
           { _id: doc._id },

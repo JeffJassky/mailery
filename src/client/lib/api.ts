@@ -466,7 +466,7 @@ export interface HealthBucket {
   senderDomain: string | null
   kind: 'marketing' | 'transactional' | null
   status: 'healthy' | 'degraded' | 'tripped'
-  rates: { bounceRate: number; hardBounceRate: number; complaintRate: number; failureRate: number }
+  rates: { bounceRate: number | null; hardBounceRate: number | null; complaintRate: number | null; failureRate: number | null }
   counters: {
     sent: number; delivered: number; bounced: number; hardBounced: number
     softBounced: number; complained: number; failedToSend: number

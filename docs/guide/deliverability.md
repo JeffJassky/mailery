@@ -316,9 +316,14 @@ await Mailer.init({
       { host: 'bl.spamcop.net', label: 'SpamCop' },
     ],
     intervalHours: 24,
+    // Free Spamhaus DQS key — needed when mailery runs behind a public or
+    // cloud resolver (see below):
+    spamhausDqsKey: process.env.SPAMHAUS_DQS_KEY,
   },
 })
 ```
+
+Spamhaus refuses queries that arrive through public or shared resolvers — Google, Cloudflare, and cloud VPC resolvers such as AWS's — and answers `127.255.255.254` instead of a verdict. Mailery records that as an `error` row reading "not a listing — the list refused the query", never as a listing. To get real Spamhaus verdicts from such a host, register for a free [Data Query Service](https://www.spamhaus.com/free-trial/sign-up-for-a-free-data-query-service-account/) key and set `spamhausDqsKey`; every `*.spamhaus.org` list is then queried as `<key>.<zone>.dq.spamhaus.net`. Rows and the UI keep the public list name, and the key is never written to the database.
 
 In the admin UI, the **Health → DNS block lists** card shows one row per (target × list) with the latest verdict and a "Recheck now" button. Each list publishes its own removal procedure — visit the list's website (linked from the list label) to start delisting.
 

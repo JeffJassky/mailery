@@ -153,6 +153,32 @@ describe('per-(domain × kind) health buckets', () => {
     expect(bucket?.status).toBe('healthy')
   })
 
+  it('reports no rate, not >100%, when nothing was sent in the window', async () => {
+    await reset()
+    const ctx = H.mailer.getRunnerContext()
+    const dims = { fromEmail: 'a@quiet.example.com', kind: 'marketing' as const }
+
+    // Outcomes for mail sent in an earlier window, plus four failed attempts.
+    await recordHealthCounter(ctx, 'delivered', dims)
+    await recordHealthCounter(ctx, 'bounced', dims)
+    await recordHealthCounter(ctx, 'softBounced', dims)
+    await recordHealthCounter(ctx, 'failedToSend', dims, 4)
+    await evaluateHealth(ctx)
+
+    const bucket = await getBucketStatus(ctx, dims.fromEmail, dims.kind)
+    expect(bucket?.rates.bounceRate).toBeNull()
+    expect(bucket?.rates.hardBounceRate).toBeNull()
+    expect(bucket?.rates.complaintRate).toBeNull()
+    expect(bucket?.rates.failureRate).toBe(1)
+
+    await recordHealthCounter(ctx, 'sent', dims, 4)
+    await evaluateHealth(ctx)
+    const after = await getBucketStatus(ctx, dims.fromEmail, dims.kind)
+    expect(after?.rates.bounceRate).toBe(0.25)
+    // 4 failed of 8 attempts.
+    expect(after?.rates.failureRate).toBe(0.5)
+  })
+
   it('resume targets one bucket', async () => {
     await reset()
     const ctx = H.mailer.getRunnerContext()

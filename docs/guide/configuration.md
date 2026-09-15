@@ -247,6 +247,7 @@ The circuit breaker is scoped **per (sender domain × template kind)**. One bad 
     ],
     dedicatedIps: [],                    // optional — IPs to query against ipLists
     intervalHours: 24,                   // 0 disables scheduled runs
+    spamhausDqsKey: undefined,           // free Spamhaus DQS key; required behind public/cloud resolvers
   },
 }
 ```

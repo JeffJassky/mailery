@@ -53,6 +53,14 @@ export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Pr
     await exitFlowRun(run, 'contact_missing', ctx)
     return
   }
+  // A contact with no address can't receive anything this flow does. Hosts
+  // blank the email when they scrub an account (deletion, anonymisation) and
+  // may still return the row; without this the next send step queued a send
+  // to "" that the provider rejected on every retry.
+  if (!contact.email?.trim()) {
+    await exitFlowRun(run, 'contact_no_email', ctx)
+    return
+  }
 
   // Subscription gate: flows are marketing-scope. Any non-subscribed status
   // exits the run before the next step, regardless of template kind — there is
