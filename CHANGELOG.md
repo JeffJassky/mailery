@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.1 — URIBL/SURBL refusals are not listings
+
+### Fixed
+
+- SURBL and URIBL answer `127.0.0.1` to every query they refuse — one from a public or shared resolver, or over the free limit. That read as a listing, so every sender domain showed "listed on URIBL" at once. It is now an error row that says the query was refused. Real listing codes (`127.0.0.2` and up) still list.
+
 ## 0.19.0 — No sends to blank addresses, honest health rates, Spamhaus DQS
 
 ### Fixed
