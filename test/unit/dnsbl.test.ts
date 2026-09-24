@@ -42,6 +42,22 @@ describe('dnsbl record interpretation', () => {
     const r = interpretRecords(['127.0.0.2', '127.255.255.252'])
     expect(r.result).toBe('listed')
   })
+
+  it('treats URIBL/SURBL 127.0.0.1 as a refused query, not a listing', () => {
+    for (const host of ['multi.uribl.com', 'multi.surbl.org']) {
+      const r = interpretRecords(['127.0.0.1'], host)
+      expect(r.result).toBe('error')
+      expect(r.errorMessage).toContain('refused')
+    }
+  })
+
+  it('still lists real URIBL codes', () => {
+    expect(interpretRecords(['127.0.0.2'], 'multi.uribl.com').result).toBe('listed')
+  })
+
+  it('keeps 127.0.0.1 as listed on other lists', () => {
+    expect(interpretRecords(['127.0.0.1'], 'zen.spamhaus.org').result).toBe('listed')
+  })
 })
 
 describe('spamhausQueryHost', () => {

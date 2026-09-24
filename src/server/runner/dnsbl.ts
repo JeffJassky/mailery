@@ -126,7 +126,7 @@ export async function runDnsblChecks(
   async function processPair(p: typeof pairs[number]) {
     const queryName = buildQueryName(p.target, p.targetKind, spamhausQueryHost(p.list.host, cfg.spamhausDqsKey))
     const lookup = queryName
-      ? await queryDnsbl(resolver, queryName)
+      ? await queryDnsbl(resolver, queryName, p.list.host)
       : { result: 'error' as DnsblResult, returnCodes: [], errorMessage: 'unsupported target format' }
     // Transient DNS failure: preserve the prior verdict so a momentary
     // resolver hiccup doesn't flip a clean target to 'error' in setup-status.
@@ -239,10 +239,10 @@ interface QueryResult {
 // should be retried next tick rather than producing a setup-status warn.
 const TRANSIENT_DNS_CODES = new Set(['ESERVFAIL', 'EREFUSED', 'ETIMEOUT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED'])
 
-async function queryDnsbl(resolver: Resolver, query: string): Promise<QueryResult> {
+async function queryDnsbl(resolver: Resolver, query: string, listHost?: string): Promise<QueryResult> {
   try {
     const records = await resolver.resolve4(query)
-    return interpretRecords(records)
+    return interpretRecords(records, listHost)
   } catch (err: any) {
     const code = err?.code
     // NXDOMAIN / no records → not listed.
@@ -276,9 +276,19 @@ const REFUSAL_REASONS: Record<string, string> = {
   '127.255.255.255': 'this resolver has exceeded the free query limit',
 }
 
-export function interpretRecords(records: string[]): QueryResult {
+export function interpretRecords(records: string[], listHost?: string): QueryResult {
   if (!records || records.length === 0) {
     return { result: 'clean', returnCodes: [], errorMessage: null }
+  }
+  // SURBL and URIBL answer 127.0.0.1 to every query they refuse (public
+  // resolver, over quota); real listings use other bits. Reading it as a
+  // listing flags every domain at once.
+  if (listHost && REGISTRABLE_ONLY_LISTS.has(listHost) && records.every((r) => r === '127.0.0.1')) {
+    return {
+      result: 'error',
+      returnCodes: records,
+      errorMessage: `${listHost} refused the query (127.0.0.1): queried through a public or shared DNS resolver, or over the free query limit. Use a private resolver`,
+    }
   }
   // Per Spamhaus convention, 127.255.255.x means the list refused to answer —
   // never a listing. Report it as an error that says why, so it doesn't read
