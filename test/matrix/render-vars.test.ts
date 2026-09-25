@@ -151,8 +151,10 @@ describe('contact variables', () => {
 
     expect(sent.html).not.toContain('<script>')
     expect(sent.html).toContain('&lt;script&gt;')
-    // Subject is compiled through the same escaping Handlebars instance.
-    expect(sent.subject).not.toContain('<script>')
+    // The subject is a plain-text header: it arrives as written (no entities),
+    // and nothing renders it as HTML — mail clients show headers as text and
+    // the admin SPA renders it as a React text node.
+    expect(sent.subject).toBe('Hi <script>alert(1)</script>')
   })
 
   /**

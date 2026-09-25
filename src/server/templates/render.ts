@@ -148,9 +148,12 @@ export async function renderTemplate(
 ): Promise<RenderedTemplate> {
   const hb = makeHandlebars(opts.helpers)
 
-  // Both stay escaped: the preheader is injected into the HTML body, and the
-  // subject reaches HTML surfaces (admin lists, previews) that render it.
-  const subject = hb.compile(template.subject)(ctx)
+  // The subject is a plain-text header, so it is not HTML-escaped: `O'Brien`
+  // must not arrive as `O&#x27;Brien`. Every surface that shows it (the admin
+  // SPA) renders it as text. Line breaks from a variable are folded to spaces,
+  // since a subject is one line. The preheader keeps its escaping, since it
+  // belongs to the HTML.
+  const subject = hb.compile(template.subject, PLAIN_TEXT)(ctx).replace(/[\r\n]+/g, ' ')
   const preheader = hb.compile(template.preheader)(ctx)
 
   // Prefer the compiled HTML if present; fall back to compiling MJML on the fly.
