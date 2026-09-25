@@ -28,6 +28,18 @@ const mailer = await Mailer.init({
 })
 ```
 
+A host on a different `mongodb` driver major (every Mongoose 8 app) gives a URI instead of a `Db`, and an adapter factory that mailery calls with its own database:
+
+```ts
+const mailer = await Mailer.init({
+  mongo: { uri: process.env.MONGODB_URI!, dbName: 'app' },
+  adapter: (db) => new MongoContactAdapter({ db, collection: 'users' }),
+  // ...the rest as above
+})
+// ...
+await mailer.stop() // closes the connection mailery opened; a host's `db` is never closed
+```
+
 See [the configuration guide](/guide/configuration) for the full `MailerConfig`.
 
 ### `Mailer.fromEnv()`

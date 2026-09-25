@@ -73,7 +73,7 @@ export interface TestMailerOptions {
   /** Call `mailer.startWorkers()` after init. Requires a non-noop `queue`. */
   startWorkers?: boolean
   /** Override Mailer config (excluding required fields the harness fills in). */
-  config?: Partial<Omit<Parameters<typeof Mailer.init>[0], 'db' | 'adapter' | 'queue' | 'providers' | 'defaultProvider'>>
+  config?: Partial<Omit<Parameters<typeof Mailer.init>[0], 'db' | 'mongo' | 'adapter' | 'queue' | 'providers' | 'defaultProvider'>>
 }
 
 export interface SeedContactOptions {

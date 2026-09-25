@@ -18,8 +18,9 @@ await Mailer.init({
 
 | Field | Purpose |
 |---|---|
-| `db` | Native MongoDB `Db` instance. mailery creates indexes on init. |
-| `adapter` | A `ContactAdapter` that reads from your host's user collection. Usually `new MongoContactAdapter(...)`. |
+| `db` | Native MongoDB `Db` instance. mailery creates indexes on init. Give `db` or `mongo`, not both. |
+| `mongo` | Instead of `db`: `{ uri, dbName?, clientOptions? }`. mailery opens its own client on its own `mongodb` driver and closes it in `stop()`. Use it when your code is on another driver major (Mongoose 8 bundles driver 6) and cannot share a `Db`. |
+| `adapter` | A `ContactAdapter` that reads from your host's user collection. Usually `new MongoContactAdapter(...)`. With `mongo`, pass a factory instead, `(db) => new MongoContactAdapter({ db, ... })`, and mailery builds it on its own connection. |
 | `queue` | Queue driver selection. See [Queue drivers](./queues). One of `{ driver: 'bull', redis, prefix? }`, `{ driver: 'agenda' }`, `{ driver: 'noop' }`. `prefix` namespaces Redis keys so multiple instances (local/dev/prod) can share one cluster. |
 | `providers` | Map of provider name → instance. Must include at least the `defaultProvider`. |
 | `defaultProvider` | Which provider key (above) handles unrouted sends. |

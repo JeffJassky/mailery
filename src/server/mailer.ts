@@ -6,7 +6,7 @@
  * See plans/10-public-api.md for the surface.
  */
 
-import type { Db, ClientSession, ObjectId } from 'mongodb'
+import type { Db, ClientSession, MongoClient, ObjectId } from 'mongodb'
 import { ObjectId as ObjectIdCtor } from 'mongodb'
 
 import type {
@@ -58,6 +58,9 @@ import {
 } from './runner/index.js'
 import { processWebhookBacklog } from './runner/webhook.js'
 
+const STORAGE_REQUIRED =
+  'Mailer.init: give exactly one of `db` (an open Db) or `mongo` (a connection mailery opens)'
+
 export class Mailer {
   readonly db: Db
   readonly collections: Collections
@@ -68,6 +71,8 @@ export class Mailer {
   readonly events: EventRegistry
 
   private queueDriver: QueueDriver
+  /** The client `Mailer.init` opened from `config.mongo`; closed by `stop()`. Null when the host gave `db`. */
+  private ownedClient: MongoClient | null
   private workersStarted = false
   private runnerContext: RunnerContext
 
@@ -79,6 +84,7 @@ export class Mailer {
     providers: Record<string, MailProvider>
     queueDriver: QueueDriver
     events: EventRegistry
+    ownedClient: MongoClient | null
   }) {
     this.config = args.config
     this.db = args.db
@@ -86,6 +92,7 @@ export class Mailer {
     this.adapter = args.adapter
     this.providers = args.providers
     this.queueDriver = args.queueDriver
+    this.ownedClient = args.ownedClient
     this.queues = args.queueDriver.queues
     this.events = args.events
 
@@ -202,50 +209,75 @@ export class Mailer {
   }
 
   static async init(input: MailerConfig): Promise<Mailer> {
-    const config = resolveConfig(input)
+    if ((input.db == null) === (input.mongo == null)) throw new Error(STORAGE_REQUIRED)
     // Both defaults are validated here, through the same guarded lookup the
     // routes and the runner use — a name that resolves to an inherited
     // `Object.prototype` member is not a provider. `defaultTransactionalProvider`
     // was previously unchecked, so a typo in it stayed silent until a
     // transactional send failed at dispatch time, long after startup.
-    if (!resolveProvider(config.providers, config.defaultProvider)) {
+    if (!resolveProvider(input.providers, input.defaultProvider)) {
       throw new Error(
-        `defaultProvider "${config.defaultProvider}" is not a registered provider. `
-          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+        `defaultProvider "${input.defaultProvider}" is not a registered provider. `
+          + `Registered: ${registeredProviderNames(input.providers).join(', ') || '(none)'}`,
       )
     }
     if (
-      config.defaultTransactionalProvider != null
-      && !resolveProvider(config.providers, config.defaultTransactionalProvider)
+      input.defaultTransactionalProvider != null
+      && !resolveProvider(input.providers, input.defaultTransactionalProvider)
     ) {
       throw new Error(
-        `defaultTransactionalProvider "${config.defaultTransactionalProvider}" is not a `
+        `defaultTransactionalProvider "${input.defaultTransactionalProvider}" is not a `
           + `registered provider. `
-          + `Registered: ${registeredProviderNames(config.providers).join(', ') || '(none)'}`,
+          + `Registered: ${registeredProviderNames(input.providers).join(', ') || '(none)'}`,
       )
     }
-    if (config.varsAdapter) {
+    if (input.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
-      assertNoReservedVarKeys(config.varsAdapter)
+      assertNoReservedVarKeys(input.varsAdapter)
     }
 
-    const collections = getCollections(config.db, config.collectionPrefix)
-    await ensureIndexes(config.db, config.collectionPrefix)
-
-    const queueDriver = await createQueueDriver(config.queue, config.db)
-    if (!config.workerless && config.queue.driver !== 'noop') {
-      await queueDriver.scheduleRepeatingTick(config.tickIntervalSeconds)
+    // Storage opens after every check that needs no database.
+    let ownedClient: MongoClient | null = null
+    let db: Db
+    if (input.mongo) {
+      const { MongoClient } = await import('mongodb')
+      ownedClient = await MongoClient.connect(input.mongo.uri, input.mongo.clientOptions)
+      db = ownedClient.db(input.mongo.dbName)
+    } else if (input.db) {
+      db = input.db
+    } else {
+      throw new Error(STORAGE_REQUIRED)
     }
 
-    return new Mailer({
-      config,
-      db: config.db,
-      collections,
-      adapter: config.adapter,
-      providers: config.providers,
-      queueDriver,
-      events: new EventRegistry(),
-    })
+    try {
+      const config = resolveConfig({
+        ...input,
+        db,
+        adapter: typeof input.adapter === 'function' ? input.adapter(db) : input.adapter,
+      })
+      const collections = getCollections(config.db, config.collectionPrefix)
+      await ensureIndexes(config.db, config.collectionPrefix)
+
+      const queueDriver = await createQueueDriver(config.queue, config.db)
+      if (!config.workerless && config.queue.driver !== 'noop') {
+        await queueDriver.scheduleRepeatingTick(config.tickIntervalSeconds)
+      }
+
+      return new Mailer({
+        config,
+        db: config.db,
+        collections,
+        adapter: config.adapter,
+        providers: config.providers,
+        queueDriver,
+        events: new EventRegistry(),
+        ownedClient,
+      })
+    } catch (err) {
+      // A failed init must not leave the connection it opened behind.
+      await ownedClient?.close()
+      throw err
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -820,6 +852,9 @@ export class Mailer {
   async stop(): Promise<void> {
     await this.queueDriver.close()
     this.workersStarted = false
+    // Only a client mailery opened itself; a host's `db` stays the host's to close.
+    await this.ownedClient?.close()
+    this.ownedClient = null
   }
 
   /** Used internally by the admin router and tests; not part of the public API. */

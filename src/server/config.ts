@@ -2,7 +2,7 @@
  * Mailer configuration shape. Required + optional surfaces with sane defaults.
  */
 
-import type { Db } from 'mongodb'
+import type { Db, MongoClientOptions } from 'mongodb'
 import type Handlebars from 'handlebars'
 import type {
   ContactAdapter,
@@ -204,11 +204,34 @@ export interface BotFilterConfig {
   minOpenDelayMs?: number
 }
 
+/**
+ * A MongoDB connection mailery opens itself, on its own driver: `Mailer.init`
+ * connects, and `mailer.stop()` closes it. For hosts whose code is on another
+ * `mongodb` major (every Mongoose 8 app bundles driver 6), where sharing a
+ * `Db` is not possible.
+ */
+export interface MailerMongoConnection {
+  uri: string
+  /** Database name. Defaults to the one named in `uri`. */
+  dbName?: string
+  clientOptions?: MongoClientOptions
+}
+
+/**
+ * Builds the contact adapter on the database mailery connected to. Use it with
+ * `mongo`, when the host has no `Db` of its own to hand the adapter:
+ * `adapter: (db) => new MongoContactAdapter({ db, collection: 'users' })`.
+ */
+export type ContactAdapterFactory = (db: Db) => ContactAdapter
+
 export interface MailerConfig {
   // ---- Storage --------------------------------------------------------------
-  db: Db
+  /** An open database on the host's own client. Give exactly one of `db` or `mongo`. */
+  db?: Db
+  /** A connection mailery opens and owns. Give exactly one of `db` or `mongo`. */
+  mongo?: MailerMongoConnection
   collectionPrefix?: string
-  adapter: ContactAdapter
+  adapter: ContactAdapter | ContactAdapterFactory
   /**
    * Optional host-provided template variables. `resolve(contact)` runs at
    * send/preview/test render time; its result is merged into the template
@@ -460,7 +483,13 @@ export type ResolvedConfig = Required<
 > & {
   circuitBreaker: CircuitBreakerThresholds
   broadcastStopRules: BroadcastStopRules
-} & MailerConfig
+} & StorageResolvedConfig
+
+/** `MailerConfig` once `Mailer.init` has opened storage: one `db`, one built adapter. */
+export type StorageResolvedConfig = Omit<MailerConfig, 'db' | 'mongo' | 'adapter'> & {
+  db: Db
+  adapter: ContactAdapter
+}
 
 export const DEFAULTS = {
   collectionPrefix: 'mailer_',
@@ -506,7 +535,7 @@ export const BROADCAST_STOP_RULE_DEFAULTS: BroadcastStopRules = {
   minSample: 100,
 }
 
-export function resolveConfig(c: MailerConfig): ResolvedConfig {
+export function resolveConfig(c: StorageResolvedConfig): ResolvedConfig {
   return {
     ...c,
     collectionPrefix: c.collectionPrefix ?? DEFAULTS.collectionPrefix,

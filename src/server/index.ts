@@ -12,7 +12,7 @@ export const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : '
 
 // Core
 export { Mailer } from './mailer.js'
-export type { MailerConfig, RedisOptions, CircuitBreakerThresholds, BotFilterConfig, SenderDomainConfig, SenderDomainRegistry } from './config.js'
+export type { MailerConfig, MailerMongoConnection, ContactAdapterFactory, RedisOptions, CircuitBreakerThresholds, BotFilterConfig, SenderDomainConfig, SenderDomainRegistry } from './config.js'
 export { validateSenderDomain } from './templates/sender-domain.js'
 export type { SenderDomainValidation } from './templates/sender-domain.js'
 
