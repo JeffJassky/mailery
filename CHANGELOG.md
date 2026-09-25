@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.20.0 — Own Mongo connection, subjects as written
+
+### Added
+
+- `MailerConfig.mongo` (`{ uri, dbName?, clientOptions? }`): mailery opens its own client on its own `mongodb` driver instead of taking the host's `Db`, and `stop()` closes it. Hosts on another driver major (every Mongoose 8 app bundles driver 6) no longer need a second, hoisted copy of driver 7 to share a `Db`. Give exactly one of `db` or `mongo`.
+- `adapter` also accepts a factory, `(db) => ContactAdapter`, called with the database mailery connected to, so `MongoContactAdapter` works with `mongo`. Exported types: `MailerMongoConnection`, `ContactAdapterFactory`.
+
+### Fixed
+
+- Subjects were HTML-escaped, so `{{vars.name}}` = `O'Brien` arrived as `O&#x27;Brien` and `Smith & Sons` as `Smith &amp; Sons`. A subject is a plain-text header; it now renders unescaped, with line breaks from variables folded to spaces. The preheader and HTML body keep their escaping.
+
+### Changed — check before upgrading
+
+- `ResolvedConfig` (internal, reached through `getRunnerContext().config`) always has `db` and a built `adapter`; `MailerConfig.db` is now optional.
+- A subject containing `<`, `>` or `&` from a variable now arrives literally. mailery's admin screens render subjects as text; a host that renders `send.subject` as HTML must escape it.
+
 ## 0.19.1 — URIBL/SURBL refusals are not listings
 
 ### Fixed
