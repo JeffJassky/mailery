@@ -1,9 +1,9 @@
 import React from 'react'
+import { PredicateTip } from './predicate-tip'
 import { Icons } from '../../components/icons'
 import { Tip } from '../../components/tip'
 import type { ProgramSimulation } from '../../lib/api'
 import type { ProgramTemplateInfo } from '../../lib/api'
-import { describePredicate } from '../../../shared/program-board'
 import { cellKey, changeTip, type BoardCell, type BoardRow, type CellRef } from './model'
 import { issueTip, worst, type IssueIndex } from './issues'
 import { cellLens, fmtDay, fmtWhen, rowStatus, type CellLens, type RowState } from './lens'
@@ -166,14 +166,14 @@ function TitleCell({
       {(a || sev) && (
         <div className="pb-strip">
           {a?.eligible && (
-            <Tip label={`Only if: ${describePredicate(a.eligible)}`} focusable>
+            <PredicateTip title="Sent only if" predicate={a.eligible}>
               <Icons.Filter />
-            </Tip>
+            </PredicateTip>
           )}
           {a?.satisfied && (
-            <Tip label={`Done when: ${describePredicate(a.satisfied)}`} focusable>
+            <PredicateTip title="Done when" predicate={a.satisfied}>
               <Icons.CheckCircle />
-            </Tip>
+            </PredicateTip>
           )}
           {a?.requires && a.requires.length > 0 && (
             <Tip label={`After: ${a.requires.map((r) => titles.get(r) ?? r).join(', ')}`} focusable>

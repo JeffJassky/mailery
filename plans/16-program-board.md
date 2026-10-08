@@ -72,8 +72,10 @@ Row = `[status] [title + icon strip] [attempt cells…]`
 - **Title** — action title (one line, ellipsis). Muted priority number before
   it in mono, small.
 - **Icon strip** under the title, only icons that apply:
-  - `filter` — has `eligible`; tooltip "Only if: <describePredicate>"
-  - `check-circle` — `satisfied`; tooltip "Done when: <describePredicate>"
+  - `filter` — has `eligible`; tooltip "Sent only if …" as an outline
+    (`outlinePredicate`): one condition per line in plain words
+    ("access lapsed: no"), nested "one of:" / "none of:" groups indented.
+  - `check-circle` — `satisfied`; tooltip "Done when …", same outline.
   - `link` — `requires`; tooltip "After: <titles>"
   - `refresh` — `cooldownDays`; tooltip "Retries after 30 days"
   - `pause` — `onExhaust: 'hold'`; tooltip "Blocks lower actions until done"

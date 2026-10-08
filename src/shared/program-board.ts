@@ -339,3 +339,128 @@ function negate(p: Pred): string {
   }
   return `not (${describe(p)})`
 }
+
+// ---------------------------------------------------------------------------
+// Predicate → readable outline (board tooltips)
+// ---------------------------------------------------------------------------
+
+/**
+ * A predicate as an outline a person can scan: one line per condition, groups
+ * for "all of" / "one of" / "none of". Fact names are humanised
+ * (`sells_products_online` → "sells products online"); booleans read
+ * "…: yes" / "…: no"; negations are folded into the condition where possible.
+ */
+export type PredicateOutline =
+  | { kind: 'line'; text: string }
+  | { kind: 'group'; mode: 'all' | 'any' | 'none' | 'not-all'; items: PredicateOutline[] }
+
+const humanize = (name: string): string => name.replace(/[_-]+/g, ' ').trim()
+const isDateLike = (v: unknown): boolean => typeof v === 'string' && Number.isNaN(Number(v)) && !Number.isNaN(Date.parse(v))
+const show = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v))
+const orList = (vs: unknown[]): string =>
+  vs.length <= 1 ? vs.map(show).join('') : `${vs.slice(0, -1).map(show).join(', ')} or ${show(vs[vs.length - 1])}`
+const line = (text: string): PredicateOutline => ({ kind: 'line', text })
+
+function factLine(leaf: Record<string, any>, negate: boolean): PredicateOutline | null {
+  const h = humanize(String(leaf.fact))
+  const ops = ['equals', 'in', 'gte', 'lte', 'exists'].filter((k) => k in leaf)
+  if (ops.length === 0 || (ops.length === 1 && leaf.equals === true)) return line(`${h}: ${negate ? 'no' : 'yes'}`)
+  if (ops.length === 1 && leaf.equals === false) return line(`${h}: ${negate ? 'yes' : 'no'}`)
+  if (ops.length === 1 && 'exists' in leaf) return line(`${h} is ${(leaf.exists === true) !== negate ? 'set' : 'not set'}`)
+  if (ops.length === 1 && 'equals' in leaf) {
+    if (leaf.equals === null) return line(`${h} is ${negate ? 'not empty' : 'empty'}`)
+    return line(`${h} is ${negate ? 'not ' : ''}${show(leaf.equals)}`)
+  }
+  if (ops.length === 1 && 'in' in leaf) return line(`${h} is ${negate ? 'not ' : ''}${orList(leaf.in)}`)
+  const dated = isDateLike(leaf.gte) || isDateLike(leaf.lte)
+  if (ops.length === 2 && 'gte' in leaf && 'lte' in leaf && !negate) {
+    return line(`${h} is between ${show(leaf.gte)} and ${show(leaf.lte)}`)
+  }
+  if (ops.length === 1 && 'gte' in leaf) {
+    if (negate) return line(`${h} is ${dated ? 'before' : 'below'} ${show(leaf.gte)}`)
+    return line(`${h} is ${dated ? 'on or after' : 'at least'} ${show(leaf.gte)}`)
+  }
+  if (ops.length === 1 && 'lte' in leaf) {
+    if (negate) return line(`${h} is ${dated ? 'after' : 'above'} ${show(leaf.lte)}`)
+    return line(`${h} is ${dated ? 'on or before' : 'at most'} ${show(leaf.lte)}`)
+  }
+  return null // several operators: handled by the caller as a group
+}
+
+function eventLine(name: string, happened: boolean, withinDays: unknown): PredicateOutline {
+  const n = typeof withinDays === 'number' && withinDays > 0 ? withinDays : 0
+  const when = n === 0 ? '' : n === 1 ? ' in the last day' : ` in the last ${n} days`
+  return line(`"${name}" ${happened ? 'happened' : "hasn't happened"}${when}`)
+}
+
+function outline(p: any, negate: boolean): PredicateOutline {
+  if (p && typeof p === 'object') {
+    if ('fact' in p) {
+      const one = factLine(p, negate)
+      if (one) return one
+      // Several operators on one fact: each is its own condition.
+      const parts = (['equals', 'in', 'gte', 'lte', 'exists'] as const)
+        .filter((k) => k in p)
+        .map((k) => factLine({ fact: p.fact, [k]: p[k] }, false)!)
+      return negate ? { kind: 'group', mode: 'not-all', items: parts } : { kind: 'group', mode: 'all', items: parts }
+    }
+    if ('hasFiredEvent' in p) return eventLine(p.hasFiredEvent, !negate, p.withinDays)
+    if ('notHasFiredEvent' in p) return eventLine(p.notHasFiredEvent, negate, p.withinDays)
+    if ('not' in p) return outline(p.not, !negate)
+    if ('all' in p || 'any' in p) {
+      const isAll = 'all' in p
+      const kids: any[] = isAll ? p.all : p.any
+      if (kids.length === 0) return line(isAll !== negate ? 'always' : 'never')
+      if (kids.length === 1) return outline(kids[0], negate)
+      if (negate) {
+        // not(any) = none of; not(all) = not all of. Children stay positive.
+        return { kind: 'group', mode: isAll ? 'not-all' : 'none', items: flatten(kids, isAll ? 'all' : 'any') }
+      }
+      return { kind: 'group', mode: isAll ? 'all' : 'any', items: flatten(kids, isAll ? 'all' : 'any') }
+    }
+  }
+  return line(JSON.stringify(p))
+}
+
+/** Children of a group; a nested group of the same kind is merged into it. */
+function flatten(kids: any[], mode: 'all' | 'any'): PredicateOutline[] {
+  const out: PredicateOutline[] = []
+  for (const k of kids) {
+    const o = outline(k, false)
+    if (o.kind === 'group' && o.mode === mode) out.push(...o.items)
+    else out.push(o)
+  }
+  return out
+}
+
+export function outlinePredicate(p: Predicate): PredicateOutline {
+  return outline(p, false)
+}
+
+const GROUP_WORDS: Record<'all' | 'any' | 'none' | 'not-all', string> = {
+  all: 'all of',
+  any: 'one of',
+  none: 'none of',
+  'not-all': 'not all of',
+}
+
+/** The outline as plain text (screen readers, copy): "Title all of:\n• a\n• one of:\n  – b". */
+export function outlineText(title: string, o: PredicateOutline): string {
+  if (o.kind === 'line') return `${title}: ${o.text}`
+  const lines = [`${title} ${GROUP_WORDS[o.mode]}:`]
+  const walk = (items: PredicateOutline[], depth: number) => {
+    for (const it of items) {
+      const pad = '  '.repeat(depth)
+      const mark = depth === 0 ? '•' : '–'
+      if (it.kind === 'line') lines.push(`${pad}${mark} ${it.text}`)
+      else {
+        lines.push(`${pad}${mark} ${GROUP_WORDS[it.mode]}:`)
+        walk(it.items, depth + 1)
+      }
+    }
+  }
+  walk(o.items, 0)
+  return lines.join('\n')
+}
+
+export const OUTLINE_GROUP_WORDS = GROUP_WORDS

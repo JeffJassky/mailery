@@ -14,6 +14,7 @@ export function Tip({
   children,
   focusable = false,
   className,
+  content,
 }: {
   /** Plain text; "\n" starts a new line. Empty label renders the child untouched. */
   label: string | null | undefined
@@ -21,6 +22,8 @@ export function Tip({
   /** Make a non-interactive child reachable by keyboard so the tip can be read. */
   focusable?: boolean
   className?: string
+  /** Rich bubble content; `label` stays the accessible text. */
+  content?: React.ReactNode
 }) {
   const id = React.useRef(`tip-${++nextId}`).current
   const wrap = React.useRef<HTMLSpanElement>(null)
@@ -90,7 +93,7 @@ export function Tip({
             className="tip-bubble"
             style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
           >
-            {label}
+            {content ?? label}
           </span>,
           document.body,
         )}
