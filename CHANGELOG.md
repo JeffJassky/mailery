@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.21.0 — Categories, contact policy and Programs
+
+Additive. No forced data migration: every new field is optional, every new collection is created by index sync on init, and every new config key defaults to off.
+
+### Added
+
+- **Categories and the preference page.** `MailerConfig.categories`; a `category` on marketing templates; `category:<id>` suppression scopes; a hosted preference page; `mailer.getPreferences` / `mailer.setPreferences`; `List-ID` on categorised mail.
+- **Contact policy** (`MailerConfig.contactPolicy`): minimum gap, rolling cap, quiet hours and source priority across flows, broadcasts, one-offs and Programs. Contention defers a send; expiry cancels it with `exitReason: 'policy_expired'`.
+- **Programs.** Definitions with prioritised actions, attempt ladders, `requires`, cooldowns, sunset and holdout; `factsAdapter`; the tick, scheduler and decision log; `mailer.saveProgramDraft`, `publishProgram`, `setProgramEnabled`, `enterProgram`, `tickProgram`, `abortProgram`, `getProgramState`. Guide: `docs/guide/programs.md`.
+- **Programs surface.** Admin and agent routes (`/programs`: list, save draft, publish with 422 issues, enable, disable, detail, runs, run with decisions, state, stats by arm, force tick, abort, enter); admin screens (list, detail with JSON editor and funnel, run view with decision timeline).
+- **`mailery doctor`** (read-only upgrade check, non-zero on anything that would make a Program tick fail) and **`mailery backfill-categories --map slug=category[,...] [--dry-run]`**.
+
+### Changed — check before upgrading
+
+- **One semantic shift, and only when you opt in.** Giving a marketing template a `category` changes that template's unsubscribe link from "all marketing" to "this category". Templates without a category are unchanged. The one-click token still carries a signed `marketing` scope, so a rollback to 0.20 opts the person out of marketing rather than failing.
+- **`setProgramEnabled(slug, true)` ignores earlier entry events.** It moves the entry and Facts Changed watermarks to now. Accounts that should already be in the Program must be entered deliberately with `mailer.enterProgram(slug, subjectId)`, or the admin *Enter* box, or `POST /programs/:slug/enter`.
+- `defaultOptIn: false` categories are rejected at init (opt-out categories only).
+- A Program's templates must be marketing and carry the program's own `category`, otherwise publish fails.
+
+### Per-host checklist
+
+1. **Bump and run `doctor`.** `yarn add mailery@0.21.0`, then `npx mailery doctor` (with `MAILER_MONGODB_URI` and `MAILER_MONGODB_DB`; add `--categories a,b` once you have declared some). Deploy. Behaviour is unchanged.
+2. **Declare categories and backfill.** Add `categories` to the config, then `npx mailery backfill-categories --map welcome-1=lifecycle.onboarding,... --dry-run`, and again without `--dry-run`. The preference page goes live for categorised mail. Run `doctor --categories` to confirm.
+3. **Set `contactPolicy`.** Watch the deferred counts in the admin for a week before tightening.
+4. **Only if you use Programs:** add a `factsAdapter`; seed the Program disabled (`saveProgramDraft`, `publishProgram`); preview with `enterProgram` on a test account and Force tick (admin or `POST /programs/:slug/runs/:subjectId/tick`); then enable with `holdoutPct` set. Enabling does not replay earlier entry events: backfill existing accounts with `enterProgram`.
+
 ## 0.20.0 — Own Mongo connection, subjects as written
 
 ### Added

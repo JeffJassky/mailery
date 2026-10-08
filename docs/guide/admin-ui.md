@@ -32,7 +32,7 @@ To use a different path (`/dashboard/email`, `/internal/mailer`, etc.) you can:
 
 ## Screens
 
-The SPA has 15 screens organized in four sidebar sections:
+The SPA has 18 screens organized in four sidebar sections:
 
 **Overview**
 - Dashboard — KPIs (sends, deliverability, open rate, click rate), health, recent flows / sends / audit
@@ -41,6 +41,8 @@ The SPA has 15 screens organized in four sidebar sections:
 **Compose**
 - Flows — list + detail with step editor
 - Templates — list + Maily WYSIWYG editor (Design / MJML / HTML / Plain text / Preview tabs) with live content linter + Mail-Tester deliverability check
+- Categories — the declared preference categories and how many templates use each (read-only; edit them in `MailerConfig.categories`)
+- Programs — see [Programs screens](#programs-screens) below
 - Broadcasts — list + composer with segment builder + confirmation gate
 
 **Audience**
@@ -51,6 +53,20 @@ The SPA has 15 screens organized in four sidebar sections:
 **Activity**
 - Sends — log with status filter, click-through to send detail
 - Audit log — every mutation, filterable by actor / action / resource
+
+## Programs screens
+
+**Programs list.** One row per program: enabled dot, name, category, published version (with a `draft` badge when an unpublished draft exists) and run counts by status. *New program* takes a definition as JSON and saves it as a disabled draft.
+
+**Program detail** has four tabs and Enable / Disable in the header (Enable needs a published version and `factsAdapter`).
+- *Actions* — the published actions as a table: priority, attempts, `requires`, the `eligible` and `satisfied` predicates as compact JSON, and `onExhaust`.
+- *Definition* — a JSON editor (the same Monaco component as the template editor) over the draft, or the published definition when there is no draft. *Save draft* stores it; *Publish* saves, validates and publishes, and when validation fails it lists every issue with its path (nothing is published). Past versions are listed underneath.
+- *Funnel* — per action, treatment next to holdout: evaluated, chosen, sent, satisfied, plus runs and completion rate per arm.
+- *Runs* — filter by status and arm, paginated; click a row for the run view. *Enter* adds a subject by id without an entry event, which is how you backfill existing accounts after enabling (enabling does not replay earlier entry events).
+
+**Run view.** The action grid (status, attempts out of the ladder length, ladder number, last sent, `completedAt`, cooldown), the run's arm and sunset stage, and the decision timeline, newest first. Each decision shows when, the trigger, the reason in words, what was chosen, and every candidate with `eligible`, `satisfied`, `blockedBy` and rank, so "why did / didn't this send" is answerable from one screen. *Force tick* runs one tick now (it still obeys the gap, contact policy and holdout); *Abort* exits the run and cancels its queued sends.
+
+See [Programs](/guide/programs) for the model, and the [`mailery doctor`](/guide/programs#doctor-and-backfill) CLI to check a deploy before enabling one.
 
 ## Health screen
 

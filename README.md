@@ -91,6 +91,9 @@ A self-hosted library you `npm install` into your Express + MongoDB app. Fire ev
 - **Typed host variables** — declare a zod schema + resolver (`defineVars`) and templates get your product data at the root (`{{user.name}}`, `{{firstActiveTopic.title}}`), with editor autocomplete and lint checks driven by the same schema.
 - **Delivery windows** on flow send steps — weekdays-only (Saturday lands → Monday sends), time-of-day delivery, optionally in the contact's timezone.
 - **Agent API** — a bearer-token JSON surface built for automation: verify every template as real contacts, send through the real pipeline and wait for delivery, simulate a flow against a contact, walk a canary run step by step in production, arm a flow for future events only. See [docs/reference/agent-api](https://jeffjassky.github.io/mailery/reference/agent-api).
+- **Categories and a preference page** (0.21) — declare opt-out categories, put a category on a marketing template, and its unsubscribe link becomes "stop this category", with a hosted preference page. Transactional mail stays outside preferences.
+- **Contact policy** (0.21) — one marketing email at a time per address: minimum gap, rolling cap and quiet hours across flows, broadcasts and Programs, deferring rather than dropping.
+- **Programs** (0.21) — next-best-action email: a prioritised checklist of things an account still has to do, one email at a time about the top unfinished one, with reminder ladders, sunsetting, a holdout arm and a decision log that answers "why did / didn't this send". Admin screens, agent API, and `mailery doctor` / `mailery backfill-categories` for upgrades. See [docs/guide/programs](https://jeffjassky.github.io/mailery/guide/programs).
 - **React admin SPA** (Vite-bundled, served as static assets — no build step in your app) — including template preview as any real contact (cycle with ←/→) and test sends with real resolved variables.
 
 ## Status & roadmap

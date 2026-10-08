@@ -29,7 +29,7 @@ export function Sidebar({
 }) {
   const Item = ({ icon: Ic, label, badge, screen }: any) => (
     <div
-      className={'sidebar-link' + (route.screen === screen ? ' active' : '')}
+      className={'sidebar-link' + (route.screen === screen || (screen === 'programs' && route.screen.startsWith('program-')) ? ' active' : '')}
       onClick={() => setRoute({ screen })}
     >
       <Ic className="icon" />
@@ -63,6 +63,7 @@ export function Sidebar({
           <Item icon={Icons.Flows} label="Flows" screen="flows" badge={formatCount(counts?.flows)} />
           <Item icon={Icons.Template} label="Templates" screen="templates" badge={formatCount(counts?.templates)} />
           <Item icon={Icons.Tag} label="Categories" screen="categories" />
+          <Item icon={Icons.Rocket} label="Programs" screen="programs" />
           <Item icon={Icons.Broadcast} label="Broadcasts" screen="broadcasts" badge={formatCount(counts?.broadcasts)} />
         </nav>
       </div>

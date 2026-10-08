@@ -64,6 +64,40 @@ export const api = {
   pauseFlow: (slug: string) => json<{ ok: boolean }>(`/flows/${slug}/pause`, { method: 'POST' }),
   resumeFlow: (slug: string) => json<{ ok: boolean }>(`/flows/${slug}/resume`, { method: 'POST' }),
 
+  // Programs (0.21)
+  programs: () => json<ProgramListRow[]>('/programs'),
+  program: (slug: string) => json<ProgramDetail>(`/programs/${encodeURIComponent(slug)}`),
+  createProgram: (definition: unknown, notes?: string) =>
+    json<{ ok: boolean; slug: string }>('/programs', { method: 'POST', body: JSON.stringify(notes ? { definition, notes } : definition) }),
+  saveProgramDraft: (slug: string, definition: unknown) =>
+    json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}`, { method: 'PATCH', body: JSON.stringify(definition) }),
+  publishProgram: (slug: string) =>
+    json<{ ok: boolean; version: number }>(`/programs/${encodeURIComponent(slug)}/publish`, { method: 'POST' }),
+  enableProgram: (slug: string) => json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}/enable`, { method: 'POST' }),
+  disableProgram: (slug: string) => json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}/disable`, { method: 'POST' }),
+  programStats: (slug: string) => json<ProgramStatsPayload>(`/programs/${encodeURIComponent(slug)}/stats`),
+  programRuns: (slug: string, q: { status?: string; arm?: string; limit?: number; skip?: number } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') qs.set(k, String(v))
+    return json<{ runs: any[]; total: number; limit: number; skip: number }>(`/programs/${encodeURIComponent(slug)}/runs?${qs}`)
+  },
+  programRun: (slug: string, subjectId: string, q: { limit?: number; skip?: number } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) qs.set(k, String(v))
+    return json<{ run: any; decisions: any[]; total: number; limit: number; skip: number }>(
+      `/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}?${qs}`,
+    )
+  },
+  tickProgramRun: (slug: string, subjectId: string) =>
+    json<{ ok: boolean; result: any }>(`/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}/tick`, { method: 'POST' }),
+  abortProgramRun: (slug: string, subjectId: string, reason?: string) =>
+    json<{ ok: boolean; aborted: boolean; cancelledSends: number }>(
+      `/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}/abort`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  enterProgram: (slug: string, subjectId: string) =>
+    json<{ ok: boolean; created: boolean }>(`/programs/${encodeURIComponent(slug)}/enter`, { method: 'POST', body: JSON.stringify({ subjectId }) }),
+
   // Templates
   categories: () => json<Array<{ id: string; label: string; description?: string; defaultOptIn?: boolean }>>('/categories'),
   templates: () => json<any[]>('/templates'),
@@ -512,4 +546,34 @@ export interface DashboardPayload {
   recentFlows: any[]
   recentSends: any[]
   recentAudit: any[]
+}
+
+export interface ProgramListRow {
+  slug: string
+  name: string
+  version: number
+  enabled: boolean
+  draft: boolean
+  category: string | null
+  publishedAt: string | null
+  runs: { active: number; completed: number; exited: number; sunset: number; total: number }
+}
+
+export interface ProgramDetail {
+  slug: string
+  version: number
+  enabled: boolean
+  published: any | null
+  publishedAt: string | null
+  publishedBy: string | null
+  draft: { definition: any; notes: string; lastModifiedBy: string; lastModifiedAt: string } | null
+  versions: Array<{ version: number; publishedAt: string; publishedBy: string }>
+}
+
+export interface ProgramArmFunnel { evaluated: number; chosen: number; sent: number; satisfied: number }
+export interface ProgramStatsPayload {
+  slug: string
+  version: number
+  actions: Array<{ actionId: string; title: string | null; treatment: ProgramArmFunnel; holdout: ProgramArmFunnel }>
+  runs: Record<'treatment' | 'holdout', { total: number; byStatus: Record<string, number>; completed: number; completionRate: number | null }>
 }
