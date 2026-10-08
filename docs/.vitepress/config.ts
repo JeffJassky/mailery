@@ -62,6 +62,7 @@ export default defineConfig({
             { text: 'Templates', link: '/guide/templates' },
             { text: 'Broadcasts', link: '/guide/broadcasts' },
             { text: 'Contact policy', link: '/guide/contact-policy' },
+            { text: 'Programs', link: '/guide/programs' },
             { text: 'Suppression & unsubscribe', link: '/guide/suppression' },
             { text: 'Tracking', link: '/guide/tracking' },
           ],

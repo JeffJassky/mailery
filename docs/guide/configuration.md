@@ -194,6 +194,25 @@ prefer it.
 
 Unset (the default), nothing changes. Set, every marketing send is checked at dispatch against what that address has already been sent: it goes, waits, or is dropped. Transactional mail is never touched. Invalid values (a zone that is not IANA, a malformed `HH:mm`, `count < 1`) throw at `Mailer.init`. Rules, defaults and the timezone chain are in [Contact policy](./contact-policy).
 
+## Programs
+
+```ts
+{
+  factsAdapter: {
+    declare: { shopify_connected: { type: 'boolean' }, last_session_at: { type: 'date' } },
+    resolve: async (accountId) => ({ shopify_connected: await isConnected(accountId), last_session_at: await lastSeen(accountId) }),
+    recipients: async (accountId, rule) => loadContacts(accountId, rule),
+  },
+  programs: {
+    batchSize: 200,                 // runs ticked per mailer tick
+    leaseMs: 60_000,                // one run's tick lease; a crashed worker's lease frees itself after this
+    decisionRetentionDays: null,    // null = keep decision rows forever
+  },
+}
+```
+
+Both are optional. `factsAdapter` is required before a program can be enabled, and registers the `Facts Changed` event. `declare` types the facts programs may read, `resolve(subjectId)` returns their current values (host state only, never derived from `mailer_*`), and `recipients(subjectId, rule)` returns the contacts to email (`'owners' | 'admins' | 'all_members'` or `{ adapter }`). Without them the Programs scheduler returns at its first indexed read. See [Programs](./programs).
+
 ## Compliance
 
 ```ts

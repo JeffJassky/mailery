@@ -75,6 +75,19 @@ a topic) work for users who belong to many of them: the event carries the
 scope, the person stays the contact. See
 [Flows → Event parameters](./flows#event-parameters-scoped-flows).
 
+## Program events (account-scoped)
+
+[Programs](./programs) are about an account, not a contact, but `mailer_events` are keyed by `externalId`. Program entry, exit, completion and fact-change events therefore use **`externalId = subjectId`** (the account id) and carry `properties.subjectType: 'account'`:
+
+```ts
+await mailer.fire('Created', accountId, { subjectType: 'account' })   // a program with entry.eventName 'Created' enters this account
+await mailer.fire('Upgraded', accountId, { subjectType: 'account' })  // listed in exit.eventNames: ends the run
+```
+
+Flows ignore these events unless a flow trigger names them, and a program only sees events whose `externalId` is its subject, so one event name can serve both. Do not use an account id that is also a contact id.
+
+`Facts Changed` is the one reserved name: fire it with the account id when something a program reads has changed (a connection finished, setup completed) and the account's run ticks now instead of at its scheduled time. Mailery registers it with `dedupePolicy: 'every-time'` when `factsAdapter` is configured, and it takes no payload. When a program completes, mailery fires its `exit.onComplete.fireEvent` once (`dedupeKey: program:<slug>:<subjectId>:complete`, properties `{ subjectType: 'account', programSlug }`), so another program or flow can chain off it.
+
 ## Naming conventions
 
 Event names are case-sensitive strings, free-form. The convention is title-case with spaces: `'Created'`, `'Hit Free Limit'`, `'Viewed Storyboard'`. Pick a vocabulary and stick to it — flows and segments reference these names verbatim.
