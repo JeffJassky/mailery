@@ -174,7 +174,7 @@ abortFlow(
 ): Promise<{ abortedRuns: number; cancelledSends: number }>
 ```
 
-Aborts every active run of the flow for that contact, immediately. Exits the runs (`exitReason: 'aborted_by_host:<reason>'`) — including runs parked in a `wait`, whose delayed wake-up then no-ops — and cancels any of the flow's emails still sitting undispatched in the send queue (`queued`, or `failed` awaiting retry → `cancelled`). Writes an audit row (`flow.abort`).
+Aborts every active run of the flow for that contact, immediately. Exits the runs (`exitReason: 'aborted_by_host:<reason>'`) — including runs parked in a `wait`, whose delayed wake-up then no-ops — and cancels any of the flow's emails still sitting undispatched in the send queue (`queued`, `failed` awaiting retry, or `deferred` by the [contact policy](../guide/contact-policy) → `cancelled`; a deferred send is cancelled even when its run has already completed and is counted in `cancelledSends`). Writes an audit row (`flow.abort`).
 
 Call it from the same handler that processes the business event:
 

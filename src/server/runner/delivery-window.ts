@@ -81,7 +81,7 @@ function isValidTimezone(tz: string): boolean {
   return ok
 }
 
-interface LocalParts {
+export interface LocalParts {
   y: number
   mo: number
   d: number
@@ -112,7 +112,7 @@ function formatterFor(tz: string): Intl.DateTimeFormat {
   return f
 }
 
-function localParts(date: Date, tz: string): LocalParts {
+export function localParts(date: Date, tz: string): LocalParts {
   const parts: Record<string, string> = {}
   for (const p of formatterFor(tz).formatToParts(date)) parts[p.type] = p.value
   return {
@@ -127,7 +127,7 @@ function localParts(date: Date, tz: string): LocalParts {
 }
 
 /** UTC instant for a wall-clock time in `tz`. Two passes to converge across DST. */
-function utcFromLocal(y: number, mo: number, d: number, hh: number, mi: number, tz: string): Date {
+export function utcFromLocal(y: number, mo: number, d: number, hh: number, mi: number, tz: string): Date {
   let ts = Date.UTC(y, mo - 1, d, hh, mi, 0)
   for (let i = 0; i < 2; i++) {
     const p = localParts(new Date(ts), tz)
@@ -139,7 +139,7 @@ function utcFromLocal(y: number, mo: number, d: number, hh: number, mi: number, 
 }
 
 /** Add days to a local calendar date (normalizes month/year rollover). */
-function addLocalDays(p: LocalParts, days: number): { y: number; mo: number; d: number } {
+export function addLocalDays(p: LocalParts, days: number): { y: number; mo: number; d: number } {
   const dt = new Date(Date.UTC(p.y, p.mo - 1, p.d + days))
   return { y: dt.getUTCFullYear(), mo: dt.getUTCMonth() + 1, d: dt.getUTCDate() }
 }

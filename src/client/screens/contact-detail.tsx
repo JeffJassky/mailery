@@ -4,6 +4,7 @@ import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
+import { sendStatusNote } from '../lib/send-status'
 
 export function ContactDetail({ id }: any) {
   const { data, loading, error, refetch } = useLive(() => api.contact(id), [id])
@@ -94,7 +95,10 @@ function ContactBody({ data }: { data: any }) {
                   sends.slice(0, 10).map((s: any, i: number) => (
                     <tr key={String(s._id ?? i)}>
                       <td className="mono text-xs">{s.templateSlug}</td>
-                      <td><StatusPill status={s.status} /></td>
+                      <td>
+                        <StatusPill status={s.status} />
+                        {sendStatusNote(s) && <div className="text-xs subtle">{sendStatusNote(s)}</div>}
+                      </td>
                       <td className="tabular">{s.openCount ?? 0}</td>
                       <td className="tabular">{s.clickCount ?? 0}</td>
                       <td className="text-xs subtle">{s.queuedAt ? formatRel(s.queuedAt) : ''}</td>

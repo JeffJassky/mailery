@@ -18,7 +18,8 @@ import type {
   ProgramDefinition,
 } from '../shared/types.js'
 import type { ProgramDoc } from './models/index.js'
-import type { ProgramTickResult } from './runner/programs/index.js'
+import { programSendHooks, type ProgramTickResult } from './runner/programs/index.js'
+import { flowSendHooks } from './runner/flow-hooks.js'
 import type { ProgramValidationIssue } from './programs/validate.js'
 import { notImplemented } from './not-implemented.js'
 import {
@@ -120,6 +121,7 @@ export class Mailer {
       config: this.config,
       handlebarsHelpers: this.config.handlebarsHelpers,
       audit: (entry) => this.audit(entry),
+      sendHooks: { flow: flowSendHooks, program: programSendHooks },
     }
   }
 
@@ -712,10 +714,7 @@ export class Mailer {
     filter: { externalId: string; flowId?: ObjectId } & Record<string, unknown>,
     exitReason: string,
   ): Promise<{ abortedRuns: number; cancelledSends: number }> {
-    const runs = await this.collections.flowRuns
-      .find({ ...filter, status: 'active' })
-      .toArray()
-    if (runs.length === 0) return { abortedRuns: 0, cancelledSends: 0 }
+    const runs = await this.collections.flowRuns.find({ ...filter, status: 'active' }).toArray()
 
     for (const run of runs) {
       await exitFlowRun(run, exitReason, this.runnerContext)
@@ -725,12 +724,27 @@ export class Mailer {
     // past send steps but not yet dispatched (provider retry backoff, tripped
     // circuit breaker, stranded-send sweep). 'failed' is included because the
     // send queue re-dispatches failed sends on retry.
-    const cancelled = await this.collections.sends.updateMany(
-      { flowRunId: { $in: runs.map((r) => r._id!) }, status: { $in: ['queued', 'failed'] } },
-      { $set: { status: 'cancelled', errorMessage: `cancelled: ${exitReason}`, updatedAt: new Date() } },
-    )
+    const stopped = runs.length
+      ? await this.collections.sends.updateMany(
+          { flowRunId: { $in: runs.map((r) => r._id!) }, status: { $in: ['queued', 'failed', 'deferred'] } },
+          { $set: { status: 'cancelled', errorMessage: `cancelled: ${exitReason}`, updatedAt: new Date() } },
+        )
+      : { modifiedCount: 0 }
 
-    return { abortedRuns: runs.length, cancelledSends: cancelled.modifiedCount }
+    // A send the contact policy is holding for later outlives its run: the
+    // step that produced it has long since advanced (the run may have
+    // completed). Aborting still has to stop it.
+    const others = await this.collections.flowRuns
+      .find({ ...filter, status: { $ne: 'active' } }, { projection: { _id: 1 } })
+      .toArray()
+    const heldBack = others.length
+      ? await this.collections.sends.updateMany(
+          { flowRunId: { $in: others.map((r) => r._id!) }, status: 'deferred' },
+          { $set: { status: 'cancelled', errorMessage: `cancelled: ${exitReason}`, updatedAt: new Date() } },
+        )
+      : { modifiedCount: 0 }
+
+    return { abortedRuns: runs.length, cancelledSends: stopped.modifiedCount + heldBack.modifiedCount }
   }
 
   /**
