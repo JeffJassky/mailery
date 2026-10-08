@@ -82,6 +82,14 @@ export interface DeliveryWindow {
   timeOfDay?: string
   useContactTimezone?: boolean
   timezone?: string
+  /**
+   * Programs only (plans/17 F2). Replace `timeOfDay` with the subject's
+   * `usual_session_hour_utc` fact (integer 0–23, UTC) when it is valid;
+   * `timeOfDay` stays the fallback.
+   */
+  useSessionHour?: boolean
+  /** Programs only. Minutes added to the usual hour (negative = earlier). Default 0. */
+  sessionHourOffsetMinutes?: number
 }
 
 export type FlowStep =
@@ -128,6 +136,7 @@ export type Predicate =
    * neither `undefined` nor `null`. Rejected in flow steps at publish.
    */
   | FactPredicate
+  | SinceEntryPredicate
 
 export interface FactPredicate {
   fact: string
@@ -136,6 +145,19 @@ export interface FactPredicate {
   lte?: number | string
   in?: Array<string | number | boolean | null>
   exists?: boolean
+  /** Date facts only. True when the fact is at least this many days before `now`. An unset / null fact → false. */
+  minAgeDays?: number
+  /** Date facts only. True when the fact is less than this many days before `now`. An unset / null fact → false. */
+  maxAgeDays?: number
+}
+
+/**
+ * Program predicates only (plans/17 F1): days since the run entered
+ * (`run.enteredAt`; `now` in a facts-only simulation). `minDays`: at least this
+ * many days have passed. `maxDays`: fewer than this many have. At least one key.
+ */
+export interface SinceEntryPredicate {
+  sinceEntry: { minDays?: number; maxDays?: number }
 }
 
 // Categories (0.21) -----------------------------------------------------------
@@ -164,6 +186,17 @@ export interface PreferenceState {
   marketing: boolean
   /** One entry per declared category. False when marketing is false. */
   categories: Record<string, boolean>
+  /** Expiry of a live `marketing_pause` suppression; null when not paused (plans/17 F3). */
+  pausedUntil: Date | null
+}
+
+/** `MailerConfig.preferences` (plans/17 F3). */
+export interface PreferencesConfig {
+  /**
+   * Pause lengths offered on the preference page, in days. Default [7, 14, 30].
+   * An empty array hides the control. Each entry an integer 1–365, no duplicates.
+   */
+  pauseDays?: number[]
 }
 
 /** `mailer.setPreferences(email, prefs)` — the preference page's save. */
@@ -201,6 +234,13 @@ export interface ContactPolicy {
      * stale. Default 72.
      */
     deferral?: { maxHours: number }
+    /**
+     * Inclusive local calendar ranges ('YYYY-MM-DD') with no marketing sends,
+     * in the recipient's zone (same chain as quiet hours). A send that lands
+     * inside one is deferred to the local midnight after the range; that
+     * deferral never expires (plans/17 F5).
+     */
+    blackoutDates?: Array<{ from: string; to: string; label?: string }>
   }
   /**
    * Highest priority first. When a lower-priority send meets a pending
@@ -230,8 +270,11 @@ export type RecipientRule = 'owners' | 'admins' | 'all_members' | { adapter: str
  * Host adapter that answers "what is true about this subject right now" and
  * "who should hear about it". Required when any Program is enabled.
  *
- * Reserved fact name: `last_session_at` (date) — read by
- * `policy.suppressIfSessionWithinHours` and by the sunset engagement check.
+ * Reserved fact names:
+ *   `last_session_at` (date) — read by `policy.suppressIfSessionWithinHours`
+ *     and by the sunset engagement check.
+ *   `usual_session_hour_utc` (number, integer 0–23) — the UTC hour the subject
+ *     is most often active; read by `delivery.useSessionHour` (plans/17 F2).
  * Optional fact `timezone` (string, IANA) — copied to `send.timezoneHint`.
  */
 export interface FactsAdapter {
@@ -292,6 +335,12 @@ export interface ProgramPolicy {
   /** `last_session_at` within this many hours → silent tick (`session-suppressed`). */
   suppressIfSessionWithinHours?: number
   sunset?: ProgramSunset
+  /**
+   * Gap before the next send when the subject made progress since the last
+   * one — an action completed, or a human click on a program email. Used in
+   * place of `minGapDays` / the attempt gap when it is shorter (plans/17 F4).
+   */
+  progressGapDays?: number
 }
 
 /**

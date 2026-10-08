@@ -37,7 +37,25 @@ export async function getPreferences(
   const marketing = !scopes.has('all') && !scopes.has('marketing')
   const out: Record<string, boolean> = {}
   for (const c of categories) out[c.id] = marketing && !scopes.has(`category:${c.id}`)
-  return { marketing, categories: out }
+  return { marketing, categories: out, pausedUntil: null } // pausedUntil: PR C (plans/17 F3)
+}
+
+/**
+ * Pause all marketing email to `email` for `days` days (plans/17 F3): one
+ * `marketing_pause` row (reason 'paused') with `expiresAt`; pausing again
+ * replaces it. Never touches unsubscribe rows.
+ */
+export async function pauseMarketing(
+  _collections: Collections,
+  _email: string,
+  _opts: { days: number; source: string; now?: Date },
+): Promise<{ pausedUntil: Date }> {
+  throw new Error('pauseMarketing: not implemented (plans/17 PR C)')
+}
+
+/** Delete the address's `marketing_pause` rows (by email or emailHash). */
+export async function resumeMarketing(_collections: Collections, _email: string): Promise<{ resumed: boolean }> {
+  throw new Error('resumeMarketing: not implemented (plans/17 PR C)')
 }
 
 export interface PreferenceWriteResult {

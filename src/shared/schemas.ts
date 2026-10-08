@@ -395,6 +395,16 @@ export const programPredicateSchema: z.ZodType<unknown> = z.lazy(() =>
         lte: z.union([z.number(), z.string()]).optional(),
         in: z.array(factValueSchema).max(100).optional(),
         exists: z.boolean().optional(),
+        minAgeDays: z.number().min(0).max(3650).optional(),
+        maxAgeDays: z.number().min(0).max(3650).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        sinceEntry: z
+          .object({ minDays: z.number().min(0).max(3650).optional(), maxDays: z.number().min(0).max(3650).optional() })
+          .strict()
+          .refine((x) => x.minDays !== undefined || x.maxDays !== undefined, { message: 'sinceEntry needs minDays or maxDays' }),
       })
       .strict(),
     z.object({ hasFiredEvent: z.string().min(1), withinDays: z.number().int().positive().optional() }).strict(),
@@ -411,6 +421,8 @@ const deliveryWindowSchema = z
     timeOfDay: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:mm').optional(),
     useContactTimezone: z.boolean().optional(),
     timezone: z.string().optional(),
+    useSessionHour: z.boolean().optional(),
+    sessionHourOffsetMinutes: z.number().int().min(-720).max(720).optional(),
   })
   .strict()
 
@@ -467,6 +479,7 @@ export const programDefinitionSchema = z
         minGapDays: z.number().positive().max(365),
         delivery: deliveryWindowSchema.optional(),
         suppressIfSessionWithinHours: z.number().positive().max(24 * 365).optional(),
+        progressGapDays: z.number().positive().max(365).optional(),
         sunset: z
           .object({
             slowAfter: z.number().int().min(1),

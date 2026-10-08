@@ -45,6 +45,7 @@ export type ProgramNextReason =
   | 'session-suppressed'
   | 'min-gap'
   | 'delivery-window'
+  | 'blackout'
   | 'no-recipients'
 
 export interface ProgramSimulationCandidate<D = Date> {
@@ -132,6 +133,10 @@ export type ProgramLintCode =
   | 'priority-tie'
   | 'sunset-early'
   | 'no-cta'
+  /** plans/17 F2: `useSessionHour` without a `timeOfDay` fallback. */
+  | 'session-hour-fallback'
+  /** plans/17 F4: `progressGapDays` ≥ `minGapDays`, so it never applies. */
+  | 'progress-gap-not-shorter'
 
 export interface ProgramLintIssue {
   severity: 'error' | 'warning'

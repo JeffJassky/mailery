@@ -17,8 +17,9 @@ export function toEpochMs(v: unknown): number {
   return Number.NaN
 }
 
-/** Pure fact-leaf evaluation. See `FactPredicate` for operator semantics. */
-export function evaluateFactPredicate(leaf: FactPredicate, facts: Facts): boolean {
+/** Pure fact-leaf evaluation. See `FactPredicate` for operator semantics. `now` anchors `minAgeDays` / `maxAgeDays`. */
+export function evaluateFactPredicate(leaf: FactPredicate, facts: Facts, now: Date = new Date()): boolean {
+  void now // plans/17 F1: age operators are implemented in PR A
   const v = facts[leaf.fact]
   const hasEquals = 'equals' in leaf && leaf.equals !== undefined
   const hasOperator =
@@ -55,10 +56,26 @@ function comparable(v: unknown, bound: number | string): number {
  * `externalId = subjectId`; `all` / `any` / `not` recursively. Any other leaf
  * throws (publish validation keeps them out).
  */
-export async function evaluateProgramPredicate(
-  pred: Predicate,
-  ctx: { facts: Facts; subjectId: string; collections: Collections; now: Date },
-): Promise<boolean> {
+export interface ProgramPredicateContext {
+  facts: Facts
+  subjectId: string
+  collections: Collections
+  now: Date
+  /** `run.enteredAt`; `now` in a facts-only simulation. Anchors `sinceEntry` (plans/17 F1). */
+  enteredAt: Date
+}
+
+/**
+ * The earliest instant strictly after `after` at which a time-based leaf in
+ * `pred` (`minAgeDays`, `maxAgeDays`, `sinceEntry.minDays`, `sinceEntry.maxDays`)
+ * changes value, or null when there is none. Pure. Event leaves (`withinDays`)
+ * are ignored. plans/17 F1.
+ */
+export function nextPredicateFlipAt(_pred: Predicate, _facts: Facts, _enteredAt: Date, _after: Date): Date | null {
+  throw new Error('nextPredicateFlipAt: not implemented (plans/17 PR A)')
+}
+
+export async function evaluateProgramPredicate(pred: Predicate, ctx: ProgramPredicateContext): Promise<boolean> {
   const p = pred as any
   if (p && typeof p === 'object') {
     if ('fact' in p) return evaluateFactPredicate(p as FactPredicate, ctx.facts)

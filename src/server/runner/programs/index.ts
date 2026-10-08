@@ -34,7 +34,9 @@ export {
 } from './common.js'
 export { tickProgramRun } from './tick.js'
 export { enterProgram, abortProgramRun, getProgramChecklist } from './entry.js'
-export { evaluateFactPredicate, evaluateProgramPredicate } from './predicate.js'
+export { evaluateFactPredicate, evaluateProgramPredicate, nextPredicateFlipAt } from './predicate.js'
+export type { ProgramPredicateContext } from './predicate.js'
+export { programDeliveryWindow, programSendTime } from './window.js'
 export { programSendHooks, programRenderVars } from './hooks.js'
 
 export type ProgramTickTrigger = ProgramDecisionDoc['trigger']

@@ -197,9 +197,9 @@ describe('contact detail carries preference state', () => {
   it('admin and agent contact detail include preferences', async () => {
     await H.mailer.setPreferences('cat@test.example', { categories: { [P]: false } })
     const agent = await call('GET', '/contacts/c1')
-    expect(agent.body.preferences).toEqual({ marketing: true, categories: { [C]: true, [P]: false } })
+    expect(agent.body.preferences).toEqual({ marketing: true, categories: { [C]: true, [P]: false }, pausedUntil: null })
     const admin = await call('GET', '/api/contacts/c1')
-    expect(admin.body.preferences).toEqual({ marketing: true, categories: { [C]: true, [P]: false } })
+    expect(admin.body.preferences).toEqual({ marketing: true, categories: { [C]: true, [P]: false }, pausedUntil: null })
   })
 })
 

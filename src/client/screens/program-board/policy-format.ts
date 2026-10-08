@@ -1,8 +1,8 @@
 /** Policy chips: icon + short value, tooltip carries label and the full value. */
 import type { ProgramDefinition, RecipientRule } from '../../../shared/types'
 
-export type ChipKey = 'gap' | 'window' | 'quiet' | 'sunset' | 'holdout' | 'recipients' | 'entry' | 'exit' | 'complete'
-export type ChipIcon = 'Clock' | 'Calendar' | 'Moon' | 'Sunset' | 'Split' | 'Users' | 'LogIn' | 'LogOut' | 'Flag'
+export type ChipKey = 'gap' | 'progress' | 'window' | 'quiet' | 'sunset' | 'holdout' | 'recipients' | 'entry' | 'exit' | 'complete'
+export type ChipIcon = 'Clock' | 'Rocket' | 'Calendar' | 'Moon' | 'Sunset' | 'Split' | 'Users' | 'LogIn' | 'LogOut' | 'Flag'
 
 export interface PolicyChip {
   key: ChipKey
@@ -22,6 +22,11 @@ export function recipientsLabel(r: RecipientRule): string {
 
 export function gapChip(days: number): PolicyChip {
   return { key: 'gap', icon: 'Clock', value: `${trimNum(days)}d`, tip: `Min gap between emails: ${plural(days, 'day', 'days')}` }
+}
+
+/** plans/17 F4: `policy.progressGapDays`. Icon Rocket, value `Nd`, tip `Gap after progress: N day(s)`. */
+export function progressChip(_days: number | undefined): PolicyChip | null {
+  return null // implemented in PR B
 }
 
 export function windowChip(d: ProgramDefinition['policy']['delivery']): PolicyChip | null {

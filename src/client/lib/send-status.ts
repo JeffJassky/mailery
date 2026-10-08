@@ -4,6 +4,7 @@ const REASONS: Record<string, string> = {
   min_gap: 'minimum gap since the last email',
   rolling_cap: 'rolling send cap reached',
   quiet_hours: 'quiet hours',
+  blackout: 'blackout dates',
   priority: 'a higher-priority email is due first',
 }
 

@@ -13,6 +13,7 @@ export const REASON_WORDS: Record<ProgramNextReason, string> = {
   holdout: 'Holdout: logged, not sent',
   'min-gap': 'Waiting for the gap',
   'delivery-window': 'Waiting for the window',
+  blackout: 'Blackout dates',
   'session-suppressed': 'Recently active',
   'in-flight': 'Previous email in flight',
   'none-eligible': 'Nothing to send',
@@ -136,7 +137,7 @@ export type Summary =
   | { kind: 'next'; state: RowState; title: string; attempt: number; atText: string; words: string }
   | { kind: 'none'; words: string }
 
-const WAITS: ReadonlySet<ProgramNextReason> = new Set(['send', 'holdout', 'min-gap', 'delivery-window', 'session-suppressed', 'in-flight'])
+const WAITS: ReadonlySet<ProgramNextReason> = new Set(['send', 'holdout', 'min-gap', 'delivery-window', 'blackout', 'session-suppressed', 'in-flight'])
 
 export function summarize(sim: Sim, titles: ReadonlyMap<string, string>): Summary {
   const n = sim.next

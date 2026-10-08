@@ -101,7 +101,7 @@ async function tickLeased(
   // 2. facts: exactly one resolve per tick. A throw propagates; the lease is released by the caller.
   const facts: Facts = await adapter.resolve(run.subjectId)
   await renewLease(ctx, runId, worker) // the host call may have been slow
-  const predCtx = { facts, subjectId: run.subjectId, collections: C, now }
+  const predCtx = { facts, subjectId: run.subjectId, collections: C, now, enteredAt: run.enteredAt }
 
   /** Run-document changes accumulated by this tick, applied once in `finish`. */
   const runSet: Record<string, unknown> = {}

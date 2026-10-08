@@ -66,7 +66,7 @@ export const programSendHooks: SendOriginHooks = {
     const facts = await adapter.resolve(info.subjectId) // a throw fails the send closed
     guardFacts.set(send, facts)
     const now = new Date()
-    const predCtx = { facts, subjectId: info.subjectId, collections: C, now }
+    const predCtx = { facts, subjectId: info.subjectId, collections: C, now, enteredAt: run.enteredAt }
 
     const done = run.actions?.[action.id]?.completedAt != null || (await evaluateProgramPredicate(action.satisfied, predCtx))
     if (done) {

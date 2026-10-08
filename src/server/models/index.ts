@@ -354,7 +354,7 @@ export interface ContactLockDoc {
   expiresAt: Date
 }
 
-export type ContactPolicyReason = 'min_gap' | 'rolling_cap' | 'quiet_hours' | 'priority'
+export type ContactPolicyReason = 'min_gap' | 'rolling_cap' | 'quiet_hours' | 'priority' | 'blackout'
 
 export interface SendProgramInfo {
   slug: string

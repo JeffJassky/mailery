@@ -32,6 +32,8 @@ export interface SuppressionResult {
   suppressed: boolean
   scope?: string
   reason?: string
+  /** The matching row's expiry (a pause, a temporary suppression); null/absent when permanent. */
+  expiresAt?: Date | null
 }
 
 export async function isSuppressed(

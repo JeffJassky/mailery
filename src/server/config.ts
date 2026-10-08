@@ -9,6 +9,7 @@ import type {
   ContactAdapter,
   ContactPolicy,
   FactsAdapter,
+  PreferencesConfig,
   MailProvider,
 } from '../shared/types.js'
 import type { QueueDriverConfig } from './queues/types.js'
@@ -470,6 +471,8 @@ export interface MailerConfig {
   /** Host facts + recipients for Programs. Required before a program can be enabled. */
   factsAdapter?: FactsAdapter
   programs?: ProgramsConfig
+  /** Preference-page options (plans/17 F3). Unset → defaults; `pauseDays: []` hides the pause control. */
+  preferences?: PreferencesConfig
 }
 
 export interface ProgramsConfig {
@@ -558,6 +561,18 @@ export const PROGRAMS_DEFAULTS = {
   batchSize: 200,
   leaseMs: 60_000,
   decisionRetentionDays: null as number | null,
+}
+
+export const PREFERENCES_DEFAULTS = {
+  pauseDays: [7, 14, 30] as readonly number[],
+}
+
+/**
+ * Init-time check for `MailerConfig.preferences` (plans/17 F3): every
+ * `pauseDays` entry an integer 1–365, no duplicates. Throws listing every problem.
+ */
+export function assertValidPreferences(_prefs: PreferencesConfig | undefined): void {
+  // Implemented in PR C (plans/17-cadence-controls.md).
 }
 
 export const CONTACT_POLICY_DEFAULTS = {

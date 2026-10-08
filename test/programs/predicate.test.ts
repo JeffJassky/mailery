@@ -92,7 +92,7 @@ describe('evaluateProgramPredicate', () => {
   })
 
   const ev = (pred: any, f: Facts = facts) =>
-    evaluateProgramPredicate(pred, { facts: f, subjectId: 'acct-1', collections: H.mailer.collections, now })
+    evaluateProgramPredicate(pred, { facts: f, subjectId: 'acct-1', collections: H.mailer.collections, now, enteredAt: now })
 
   it('fact leaves', async () => {
     expect(await ev({ fact: 'yes' })).toBe(true)

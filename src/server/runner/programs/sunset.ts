@@ -17,14 +17,18 @@ export function sunsetStageFor(def: ProgramDefinition, unanswered: number): 0 | 
 /**
  * Gap before the attempt at index `attemptIndex` of `action` (or the program
  * gap when `action` is undefined, e.g. the sunset ask), widened by
- * `slowFactor` at stage ≥ 1.
+ * `slowFactor` at stage ≥ 1. With `progress` (an action completed or a human
+ * click since the last send) and `policy.progressGapDays` set, the gap is the
+ * smaller of the two (plans/17 F4).
  */
 export function gapMs(
   def: ProgramDefinition,
   action: ProgramAction | undefined,
   attemptIndex: number,
   stage: number,
+  progress = false,
 ): number {
+  void progress // plans/17 F4: implemented in PR B
   const days = action?.attempts[attemptIndex]?.minGapDays ?? def.policy.minGapDays
   const factor = stage >= 1 && def.policy.sunset ? def.policy.sunset.slowFactor : 1
   return days * DAY_MS * factor

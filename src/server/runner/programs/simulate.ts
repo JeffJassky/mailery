@@ -110,7 +110,7 @@ export async function simulateProgram(
   }
   // Event predicates read this subject's events; a facts-only simulation has none.
   const evaluate: Evaluate = (at, actions) =>
-    evaluateCandidates(def, actions, { facts, subjectId: subjectId ?? '', collections: C, now: at })
+    evaluateCandidates(def, actions, { facts, subjectId: subjectId ?? '', collections: C, now: at, enteredAt: run?.enteredAt ?? now })
 
   const exited = run ? await hasExitEvent(ctx, def, run) : false
   const evaluation = await evaluate(now, book.actions)

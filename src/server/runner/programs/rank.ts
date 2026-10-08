@@ -7,7 +7,7 @@
 import type { Facts, ProgramAction, ProgramDefinition } from '../../../shared/types.js'
 import type { Collections, ProgramBlockedBy, ProgramDecisionCandidate, ProgramRunActionState } from '../../models/index.js'
 import { DAY_MS } from './common.js'
-import { evaluateProgramPredicate } from './predicate.js'
+import { evaluateProgramPredicate, type ProgramPredicateContext } from './predicate.js'
 
 export interface CandidateWork {
   action: ProgramAction
@@ -41,7 +41,7 @@ export interface CandidateEvaluation {
 export async function evaluateCandidates(
   def: ProgramDefinition,
   runActions: Record<string, ProgramRunActionState> | undefined,
-  predCtx: { facts: Facts; subjectId: string; collections: Collections; now: Date },
+  predCtx: ProgramPredicateContext,
 ): Promise<CandidateEvaluation> {
   const { now } = predCtx
   const nowMs = now.getTime()

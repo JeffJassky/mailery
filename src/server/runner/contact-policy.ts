@@ -146,6 +146,15 @@ function quietPeriodEnd(at: Date, start: string, end: string, timezone: string):
   return utcFromLocal(day.y, day.mo, day.d, Math.floor(e / 60), e % 60, timezone)
 }
 
+/**
+ * If the local date of `at` in `timezone` falls inside any of `dates`
+ * (inclusive 'YYYY-MM-DD' ranges), the local midnight after the last
+ * consecutive range; else null. Pure. plans/17 F5.
+ */
+export function blackoutEnd(_at: Date, _dates: Array<{ from: string; to: string }> | undefined, _timezone: string): Date | null {
+  throw new Error('blackoutEnd: not implemented (plans/17 PR B)')
+}
+
 /** contact.timezone → send.timezoneHint → policy defaultTimezone → 'UTC'. Invalid zones are skipped. */
 export function resolvePolicyTimezone(
   contactTz: string | null | undefined,

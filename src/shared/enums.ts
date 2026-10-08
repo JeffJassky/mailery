@@ -65,7 +65,15 @@ export const TEMPLATE_BODY_FORMATS: readonly TemplateBodyFormat[] = ['multipart'
  * `category:<id>` (0.21) blocks only marketing mail whose template carries
  * that category. INVARIANT 22.
  */
-export type SuppressionScope = 'all' | 'marketing' | 'transactional' | CategoryScope
+/**
+ * `marketing_pause` (plans/17 F3): a recipient's own pause of all marketing
+ * email, always with `expiresAt`. Blocks exactly what `marketing` blocks;
+ * written only by `mailer.pauseMarketing`, never by an unsubscribe.
+ */
+export type SuppressionScope = 'all' | 'marketing' | 'transactional' | 'marketing_pause' | CategoryScope
+
+/** Scopes an unsubscribe (and its token) may carry: every scope but a pause. */
+export type UnsubscribeScope = Exclude<SuppressionScope, 'marketing_pause'>
 
 /** A category-scoped suppression, e.g. `category:lifecycle.onboarding`. */
 export type CategoryScope = `category:${string}`
@@ -118,6 +126,8 @@ export type ProgramArm = 'treatment' | 'holdout'
  *   holdout             — chose a candidate; holdout arm, no provider call
  *   policy-silence      — written onto the decision by the dispatch hook when
  *                         the contact policy deferred or dropped its send
+ *   blackout            — gap elapsed, waiting for a contact-policy blackout
+ *                         range to end (plans/17 F5)
  */
 export type ProgramDecisionReason =
   | 'highest-rank'
@@ -132,6 +142,7 @@ export type ProgramDecisionReason =
   | 'sunset'
   | 'holdout'
   | 'policy-silence'
+  | 'blackout'
 
 export type SuppressionReason =
   | 'unsubscribed'
@@ -140,6 +151,8 @@ export type SuppressionReason =
   | 'manual'
   | 'list_cleaning'
   | 'gdpr_forget'
+  /** A `marketing_pause` row (plans/17 F3). */
+  | 'paused'
 
 export type FlowRunStatus = 'active' | 'completed' | 'exited' | 'failed'
 

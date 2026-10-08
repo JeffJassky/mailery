@@ -94,3 +94,31 @@ describe('events', () => {
 it('an unknown leaf falls back to its JSON', () => {
   expect(d({ hasTag: 'vip' })).toBe('{"hasTag":"vip"}')
 })
+
+// plans/17-cadence-controls.md F1 — relative-time leaves. Fact names are humanised
+// and a trailing " at" / " date" / " on" is dropped for the age phrases.
+describe('relative time', () => {
+  it.each([
+    [{ fact: 'signed_up_at', minAgeDays: 3 }, 'signed up at least 3 days ago'],
+    [{ fact: 'signed_up_at', maxAgeDays: 7 }, 'signed up in the last 7 days'],
+    [{ fact: 'signed_up_at', minAgeDays: 3, maxAgeDays: 7 }, 'signed up between 3 and 7 days ago'],
+    [{ fact: 'trial_started_on', minAgeDays: 1 }, 'trial started at least 1 day ago'],
+    [{ fact: 'created_date', maxAgeDays: 1 }, 'created in the last day'],
+    [{ fact: 'last_order', minAgeDays: 30 }, 'last order at least 30 days ago'],
+    [{ sinceEntry: { minDays: 3 } }, 'at least 3 days into the program'],
+    [{ sinceEntry: { maxDays: 7 } }, 'in the first 7 days of the program'],
+    [{ sinceEntry: { minDays: 3, maxDays: 7 } }, 'between 3 and 7 days into the program'],
+    [{ sinceEntry: { minDays: 1 } }, 'at least 1 day into the program'],
+    [{ sinceEntry: { maxDays: 1 } }, 'in the first day of the program'],
+    [{ not: { fact: 'signed_up_at', minAgeDays: 3 } }, 'signed up less than 3 days ago'],
+    [{ not: { fact: 'signed_up_at', maxAgeDays: 7 } }, 'signed up 7 or more days ago'],
+    [{ not: { fact: 'signed_up_at', minAgeDays: 3, maxAgeDays: 7 } }, 'signed up not between 3 and 7 days ago'],
+    [{ not: { sinceEntry: { minDays: 3 } } }, 'less than 3 days into the program'],
+    [{ not: { sinceEntry: { maxDays: 7 } } }, 'after the first 7 days of the program'],
+    [{ not: { sinceEntry: { minDays: 3, maxDays: 7 } } }, 'not between 3 and 7 days into the program'],
+    [{ all: [{ sinceEntry: { minDays: 2 } }, { fact: 'a' }] }, 'at least 2 days into the program and a'],
+    [{ fact: 'signed_up_at', exists: true, minAgeDays: 3 }, 'signed_up_at is set and signed up at least 3 days ago'],
+  ])('%j → %s', (p, want) => {
+    expect(d(p)).toBe(want)
+  })
+})

@@ -111,3 +111,40 @@ describe('groups', () => {
     })
   })
 })
+
+// plans/17-cadence-controls.md F1 — relative-time leaves.
+describe('relative time', () => {
+  it.each([
+    [{ fact: 'signed_up_at', minAgeDays: 3 }, 'signed up at least 3 days ago'],
+    [{ fact: 'signed_up_at', maxAgeDays: 7 }, 'signed up in the last 7 days'],
+    [{ fact: 'signed_up_at', minAgeDays: 3, maxAgeDays: 7 }, 'signed up between 3 and 7 days ago'],
+    [{ fact: 'trial_started_on', minAgeDays: 1 }, 'trial started at least 1 day ago'],
+    [{ fact: 'created_date', maxAgeDays: 1 }, 'created in the last day'],
+    [{ sinceEntry: { minDays: 3 } }, 'at least 3 days into the program'],
+    [{ sinceEntry: { maxDays: 7 } }, 'in the first 7 days of the program'],
+    [{ sinceEntry: { minDays: 3, maxDays: 7 } }, 'between 3 and 7 days into the program'],
+    [{ sinceEntry: { maxDays: 1 } }, 'in the first day of the program'],
+    [{ not: { fact: 'signed_up_at', minAgeDays: 3 } }, 'signed up less than 3 days ago'],
+    [{ not: { fact: 'signed_up_at', maxAgeDays: 7 } }, 'signed up 7 or more days ago'],
+    [{ not: { fact: 'signed_up_at', minAgeDays: 3, maxAgeDays: 7 } }, 'signed up not between 3 and 7 days ago'],
+    [{ not: { sinceEntry: { minDays: 3 } } }, 'less than 3 days into the program'],
+    [{ not: { sinceEntry: { maxDays: 7 } } }, 'after the first 7 days of the program'],
+    [{ not: { sinceEntry: { minDays: 3, maxDays: 7 } } }, 'not between 3 and 7 days into the program'],
+  ])('%j → %s', (p, want) => {
+    expect(text(p)).toBe(want)
+  })
+
+  it('an age operator beside another operator becomes its own line', () => {
+    expect(o({ fact: 'signed_up_at', exists: true, minAgeDays: 3 })).toEqual({
+      kind: 'group',
+      mode: 'all',
+      items: [{ kind: 'line', text: 'signed up at is set' }, { kind: 'line', text: 'signed up at least 3 days ago' }],
+    })
+  })
+
+  it('reads inside a group', () => {
+    expect(outlineText('Sent only if', o({ all: [{ sinceEntry: { minDays: 2 } }, { fact: 'access_lapsed', equals: false }] }))).toBe(
+      'Sent only if all of:\n• at least 2 days into the program\n• access lapsed: no',
+    )
+  })
+})

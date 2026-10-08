@@ -103,3 +103,12 @@ describe('summarize / reasonWords', () => {
     expect(summarize(sim({ next: { reason: 'no-recipients', actionId: 'a', attempt: 1, templateSlug: 't', at: null } }), titles)).toEqual({ kind: 'none', words: 'No one to email' })
   })
 })
+
+describe('blackout (plans/17 F5)', () => {
+  it('has words and counts as a wait', () => {
+    expect(reasonWords('blackout')).toBe('Blackout dates')
+    const s = sim({ next: { reason: 'blackout', actionId: 'a', attempt: 1, templateSlug: 't', at: '2026-11-28T10:00:00.000Z' } })
+    expect(summarize(s, titles)).toMatchObject({ kind: 'next', state: 'cooldown', title: 'Alpha', words: 'Blackout dates' })
+    expect(cellLens(s, new Map(), 'a', 1)).toMatchObject({ kind: 'next', reason: 'blackout', text: 'Blackout dates' })
+  })
+})

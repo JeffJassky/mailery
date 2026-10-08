@@ -46,6 +46,9 @@ export const DECLARE = {
   playbooks_run: { type: 'number' },
   last_session_at: { type: 'date' },
   timezone: { type: 'string' },
+  // plans/17: relative-time conditions and the usual-hour delivery window
+  signed_up_at: { type: 'date' },
+  usual_session_hour_utc: { type: 'number' },
 } as const
 
 export interface ProgramHarness {

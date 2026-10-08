@@ -57,6 +57,7 @@ import {
 import {
   assertValidCategories,
   assertValidContactPolicy,
+  assertValidPreferences,
   resolveConfig,
   type MailerConfig,
   type ResolvedConfig,
@@ -70,7 +71,7 @@ import { EventRegistry } from './events.js'
 import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
 import { applyUnsubscribe, clearUnsubscribeSuppressions } from './unsubscribe.js'
-import { getPreferences, setPreferences } from './preferences.js'
+import { getPreferences, pauseMarketing, resumeMarketing, setPreferences } from './preferences.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -262,6 +263,7 @@ export class Mailer {
     }
     assertValidCategories(input.categories)
     assertValidContactPolicy(input.contactPolicy)
+    assertValidPreferences(input.preferences)
     if (input.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
       assertNoReservedVarKeys(input.varsAdapter)
@@ -667,6 +669,39 @@ export class Mailer {
       action: 'contact.preferences',
       resource: { collection: 'mailer_suppressions' },
       diffSummary: `${email.toLowerCase()}: opted out [${result.optedOut.join(', ')}] opted in [${result.optedIn.join(', ')}]`,
+    })
+    return result
+  }
+
+  /**
+   * Pause all marketing email to an address for `days` days (plans/17 F3):
+   * a `marketing_pause` suppression with `expiresAt`. `days` must be an integer
+   * 1–365. Audited as `contact.pause`.
+   */
+  async pauseMarketing(email: string, opts: { days: number; source?: string }): Promise<{ pausedUntil: Date }> {
+    if (!Number.isInteger(opts.days) || opts.days < 1 || opts.days > 365) {
+      throw new Error('pauseMarketing: days must be an integer from 1 to 365')
+    }
+    const source = opts.source ?? 'api'
+    const result = await pauseMarketing(this.collections, email, { days: opts.days, source })
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.pause',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: paused ${opts.days} days until ${result.pausedUntil.toISOString()}`,
+    })
+    return result
+  }
+
+  /** Lift a pause early. Audited as `contact.resume`. */
+  async resumeMarketing(email: string, opts: { source?: string } = {}): Promise<{ resumed: boolean }> {
+    const source = opts.source ?? 'api'
+    const result = await resumeMarketing(this.collections, email)
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.resume',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: ${result.resumed ? 'resumed' : 'was not paused'}`,
     })
     return result
   }

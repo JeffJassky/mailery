@@ -11,12 +11,12 @@
  */
 
 import crypto from 'node:crypto'
-import type { SuppressionScope } from '../shared/enums.js'
+import type { SuppressionScope, UnsubscribeScope } from '../shared/enums.js'
 import { categoryIdSchema } from '../shared/schemas.js'
 
 export interface UnsubscribeTokenPayload {
   email: string
-  scope: SuppressionScope
+  scope: UnsubscribeScope
   expiresAt: Date
   /** The send the link was rendered into (24 hex chars). Optional. */
   sendId?: string
@@ -34,7 +34,8 @@ export interface UnsubscribeTokenPayload {
  * carries a category, else its signed `scope`. Old tokens (no `c`) therefore
  * keep meaning what they meant.
  */
-export function tokenScope(payload: UnsubscribeTokenPayload): SuppressionScope {
+export function tokenScope(payload: UnsubscribeTokenPayload): UnsubscribeScope {
+  // A pause is never an unsubscribe scope: tokens are signed with 'marketing' or 'all'.
   return payload.category ? `category:${payload.category}` : payload.scope
 }
 

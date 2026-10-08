@@ -156,7 +156,7 @@ async function optOut(email: string, scope: string, reason: 'unsubscribed' | 'ma
 describe('mailer.getPreferences', () => {
   it('everything on by default; transactional never listed', async () => {
     const prefs = await H.mailer.getPreferences('fresh@example.com')
-    expect(prefs).toEqual({ marketing: true, categories: { [C]: true, [P]: true, [W]: true } })
+    expect(prefs).toEqual({ marketing: true, categories: { [C]: true, [P]: true, [W]: true }, pausedUntil: null })
     expect(JSON.stringify(prefs)).not.toContain('transactional')
   })
 
@@ -165,6 +165,7 @@ describe('mailer.getPreferences', () => {
     expect(await H.mailer.getPreferences('cat@example.com')).toEqual({
       marketing: true,
       categories: { [C]: true, [P]: false, [W]: true },
+      pausedUntil: null,
     })
   })
 
