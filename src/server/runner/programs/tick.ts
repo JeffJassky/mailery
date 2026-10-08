@@ -7,13 +7,11 @@
 
 import { ObjectId } from 'mongodb'
 
-import type { Facts, ProgramAction, ProgramDefinition } from '../../../shared/types.js'
+import type { Facts, ProgramDefinition } from '../../../shared/types.js'
 import type {
-  ProgramBlockedBy,
   ProgramDecisionCandidate,
   ProgramDecisionDoc,
   ProgramDoc,
-  ProgramRunActionState,
   ProgramRunDoc,
   SendDoc,
 } from '../../models/index.js'
@@ -34,7 +32,8 @@ import {
 } from './common.js'
 import { countAcceptedSend } from './hooks.js'
 import { acquireLease, LeaseLostError, PROCESS_WORKER, releaseLease, renewLease } from './lease.js'
-import { evaluateProgramPredicate, toEpochMs } from './predicate.js'
+import { toEpochMs } from './predicate.js'
+import { evaluateCandidates, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 import type { ProgramTickOptions, ProgramTickResult } from './index.js'
 
@@ -83,16 +82,6 @@ export async function tickProgramRun(
 
 // ---------------------------------------------------------------------------
 
-interface ActionWork {
-  action: ProgramAction
-  initial: ProgramRunActionState | null
-  st: ProgramRunActionState
-  eligible: boolean
-  satisfied: boolean
-  blockedBy: ProgramBlockedBy
-  rank?: number
-}
-
 async function tickLeased(
   ctx: RunnerContext,
   run: ProgramRunDoc,
@@ -116,7 +105,7 @@ async function tickLeased(
 
   /** Run-document changes accumulated by this tick, applied once in `finish`. */
   const runSet: Record<string, unknown> = {}
-  const works: ActionWork[] = []
+  const works: CandidateWork[] = []
 
   // Working copies of the sunset state (engagement and holdout acceptance change them).
   let unanswered = run.unansweredAttempts
@@ -237,97 +226,12 @@ async function tickLeased(
     }
   }
 
-  // 4. evaluate actions in priority order (desc; ties: definition order).
-  const ordered = def.actions
-    .map((action, index) => ({ action, index }))
-    .sort((x, y) => y.action.priority - x.action.priority || x.index - y.index)
-    .map((x) => x.action)
+  // 4. evaluate actions in priority order, rank them, and 5. check completion.
+  const evaluation = await evaluateCandidates(def, run.actions, predCtx)
+  const { newlySatisfied, ranked, done } = evaluation
+  works.push(...evaluation.works)
+  const candidatesRows = evaluation.candidates
 
-  const newlySatisfied: string[] = []
-  for (const action of ordered) {
-    const initial = run.actions?.[action.id] ?? null
-    const st: ProgramRunActionState = initial ? { ...initial } : freshActionState(action)
-    st.version = action.version
-    let satisfied = st.completedAt != null
-    if (!satisfied && (await evaluateProgramPredicate(action.satisfied, predCtx))) {
-      // Monotonic (INVARIANT 21): written once, never cleared.
-      satisfied = true
-      st.completedAt = now
-      newlySatisfied.push(action.id)
-    }
-    if (satisfied) st.status = 'satisfied'
-    const eligible = action.eligible ? await evaluateProgramPredicate(action.eligible, predCtx) : true
-    works.push({ action, initial, st, eligible, satisfied, blockedBy: null })
-  }
-
-  const satisfiedIds = new Set(works.filter((w) => w.satisfied).map((w) => w.action.id))
-  let holdArmed = false
-  let rank = 0
-  for (const w of works) {
-    const { action, st } = w
-    if (w.satisfied) {
-      w.blockedBy = 'satisfied'
-      continue
-    }
-    if (holdArmed) {
-      w.blockedBy = 'hold'
-      continue
-    }
-    const unmet = (action.requires ?? []).find((id) => !satisfiedIds.has(id))
-    if (unmet !== undefined) {
-      w.blockedBy = `requires:${unmet}`
-      continue
-    }
-    if (!w.eligible) {
-      w.blockedBy = 'ineligible'
-      continue
-    }
-    if (st.status === 'cooldown') {
-      if (st.cooldownUntil && st.cooldownUntil.getTime() > nowMs) {
-        w.blockedBy = 'cooldown'
-        if (action.onExhaust === 'hold') holdArmed = true
-        continue
-      }
-      // Cooldown over: a fresh ladder.
-      st.attempts = 0
-      st.ladder += 1
-      st.status = 'pending'
-      st.exhaustedAt = null
-      st.cooldownUntil = null
-    }
-    if (st.attempts >= action.attempts.length) {
-      st.exhaustedAt = st.exhaustedAt ?? now
-      if (action.cooldownDays) {
-        st.status = 'cooldown'
-        st.cooldownUntil = new Date(nowMs + action.cooldownDays * DAY_MS)
-        w.blockedBy = 'cooldown'
-      } else {
-        st.status = 'exhausted'
-        w.blockedBy = 'exhausted'
-      }
-      if (action.onExhaust === 'hold') holdArmed = true
-      continue
-    }
-    st.status = 'pending'
-    st.exhaustedAt = null
-    w.rank = ++rank
-  }
-
-  const candidatesRows: ProgramDecisionCandidate[] = works.map((w) => ({
-    actionId: w.action.id,
-    actionVersion: w.action.version,
-    priority: w.action.priority,
-    eligible: w.eligible,
-    satisfied: w.satisfied,
-    blockedBy: w.blockedBy,
-    ...(w.rank !== undefined ? { rank: w.rank } : {}),
-  }))
-  const ranked = works.filter((w) => w.rank !== undefined)
-
-  // 5. completion.
-  const done = works.every(
-    (w) => w.satisfied || (w.blockedBy === 'exhausted' && w.action.onExhaust === 'skip' && !w.action.cooldownDays),
-  )
   if (done) {
     const fire = def.exit.onComplete?.fireEvent
     if (fire) {
@@ -620,19 +524,6 @@ async function tickLeased(
 
 // ---------------------------------------------------------------------------
 
-function freshActionState(action: ProgramAction): ProgramRunActionState {
-  return {
-    status: 'pending',
-    attempts: 0,
-    ladder: 1,
-    lastSentAt: null,
-    completedAt: null,
-    exhaustedAt: null,
-    cooldownUntil: null,
-    version: action.version,
-  }
-}
-
 const DATE_FIELDS = ['lastSentAt', 'exhaustedAt', 'cooldownUntil'] as const
 const PLAIN_FIELDS = ['status', 'attempts', 'ladder', 'version'] as const
 
@@ -643,7 +534,7 @@ const PLAIN_FIELDS = ['status', 'attempts', 'ladder', 'version'] as const
  * and states the run has never seen go through `settleActionDates` instead, so
  * a `completedAt` the dispatch guard set meanwhile is never overwritten.
  */
-function actionDiffs(works: ActionWork[]): Record<string, unknown> {
+function actionDiffs(works: CandidateWork[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const w of works) {
     if (!w.initial) continue
@@ -663,7 +554,7 @@ function actionDiffs(works: ActionWork[]): Record<string, unknown> {
  * can also write: a brand-new action state is created only if the run still
  * has none, and `completedAt` is set only while it is still null.
  */
-async function settleActionDates(C: RunnerContext['collections'], runId: ObjectId, works: ActionWork[]): Promise<void> {
+async function settleActionDates(C: RunnerContext['collections'], runId: ObjectId, works: CandidateWork[]): Promise<void> {
   for (const w of works) {
     const key = `actions.${w.action.id}`
     if (!w.initial) {

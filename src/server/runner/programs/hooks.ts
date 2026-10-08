@@ -309,10 +309,6 @@ export async function programRenderVars(send: SendDoc, ctx: RunnerContext): Prom
   const facts: Facts = guardFacts.get(send) ?? (ctx.config.factsAdapter ? await ctx.config.factsAdapter.resolve(info.subjectId) : {})
   guardFacts.delete(send)
 
-  const isAsk = info.actionId === SUNSET_ASK_ACTION_ID
-  const action = def?.actions.find((a) => a.id === info.actionId)
-  const total = isAsk ? 1 : (action?.attempts.length ?? info.attempt)
-
   const first = await C.sends
     .find(
       { 'program.runId': info.runId, 'program.actionId': info.actionId, 'program.ladder': info.ladder },
@@ -322,6 +318,25 @@ export async function programRenderVars(send: SendDoc, ctx: RunnerContext): Prom
     .limit(1)
     .next()
   const daysSinceFirst = first ? Math.max(0, Math.floor((Date.now() - first.queuedAt.getTime()) / DAY_MS)) : 0
+
+  return buildProgramRenderVars(def, info, facts, daysSinceFirst)
+}
+
+/**
+ * Pure core of `programRenderVars`, also used
+ * by the template preview's `program` option. `actionId` may be
+ * `$sunset-ask`. Unknown action ids fall back to the id as title and
+ * `total = attempt`.
+ */
+export function buildProgramRenderVars(
+  def: ProgramDefinition | null,
+  info: { slug: string; actionId: string; attempt: number },
+  facts: Facts,
+  daysSinceFirst: number,
+): Record<string, unknown> {
+  const isAsk = info.actionId === SUNSET_ASK_ACTION_ID
+  const action = def?.actions.find((a) => a.id === info.actionId)
+  const total = isAsk ? 1 : (action?.attempts.length ?? info.attempt)
 
   return {
     program: { slug: info.slug },
@@ -333,23 +348,4 @@ export async function programRenderVars(send: SendDoc, ctx: RunnerContext): Prom
     attempt: { n: info.attempt, total, isLast: info.attempt >= total, daysSinceFirst },
     facts,
   }
-}
-
-/**
- * Pure core of `programRenderVars` (board WP-A moves the body here), also used
- * by the template preview's `program` option. `actionId` may be
- * `$sunset-ask`. Unknown action ids fall back to the id as title and
- * `total = attempt`.
- */
-export function buildProgramRenderVars(
-  def: ProgramDefinition | null,
-  info: { slug: string; actionId: string; attempt: number },
-  facts: Facts,
-  daysSinceFirst: number,
-): Record<string, unknown> {
-  void def
-  void info
-  void facts
-  void daysSinceFirst
-  throw new Error('buildProgramRenderVars: not implemented (board WP-A)')
 }
