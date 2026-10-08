@@ -7,7 +7,7 @@
 import type { Facts, ProgramAction, ProgramDefinition } from '../../../shared/types.js'
 import type { Collections, ProgramBlockedBy, ProgramDecisionCandidate, ProgramRunActionState } from '../../models/index.js'
 import { DAY_MS } from './common.js'
-import { evaluateProgramPredicate, type ProgramPredicateContext } from './predicate.js'
+import { evaluateProgramPredicate, nextPredicateFlipAt, type ProgramPredicateContext } from './predicate.js'
 
 export interface CandidateWork {
   action: ProgramAction
@@ -150,4 +150,22 @@ export function freshActionState(action: ProgramAction): ProgramRunActionState {
     cooldownUntil: null,
     version: action.version,
   }
+}
+
+/**
+ * The earliest instant after `after` at which a time-based leaf in any
+ * not-yet-satisfied action's `eligible` or `satisfied` predicate changes value
+ * (plans/17 F1), or null. Used to wake a run that has nothing to send.
+ */
+export function nextActionFlipAt(works: CandidateWork[], facts: Facts, enteredAt: Date, after: Date): Date | null {
+  let best: Date | null = null
+  for (const w of works) {
+    if (w.satisfied) continue
+    for (const pred of [w.action.eligible, w.action.satisfied]) {
+      if (!pred) continue
+      const f = nextPredicateFlipAt(pred, facts, enteredAt, after)
+      if (f && (!best || f.getTime() < best.getTime())) best = f
+    }
+  }
+  return best
 }

@@ -309,7 +309,9 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
  3. exit: an exit.eventNames event for externalId=subjectId with occurredAt > run.entryEventAt
        → status exited, exitReason 'event:<name>', cancel the run's queued/deferred/held
          sends (exitReason run_inactive), reason 'exited'
- 4. evaluate actions in priority order (desc; ties: definition order):
+ 4. evaluate actions in priority order (desc; ties: definition order). The predicate
+    context carries `now` and `enteredAt` (= run.enteredAt; plans/17 F1), so
+    `minAgeDays`/`maxAgeDays` and `sinceEntry` read the tick's clock:
       satisfied: completedAt already set, or `satisfied` holds now (sets completedAt once)
                                                          → blockedBy 'satisfied'
       a held action above is exhausted/cooling           → blockedBy 'hold'
@@ -331,7 +333,8 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
     status sunset → active. Opens never count.
  7. status sunset (no engagement)                        → reason 'sunset'
  8. chosen = first candidate; at sunset stage 2 with the ask not yet sent,
-    chosen = '$sunset-ask' (the ask template). No candidate → reason 'none-eligible'.
+    chosen = '$sunset-ask' (the ask template). No candidate → reason 'none-eligible';
+    its nextTickAt is min(now + minGapDays, earliest time-leaf flip) (plans/17 F1).
  9. run.inFlight still has a non-terminal send (queued/sending/deferred/held) → 'in-flight'
     (terminal → clear inFlight; counting already happened in the dispatch hook)
 10. last_session_at within suppressIfSessionWithinHours  → 'session-suppressed'
@@ -351,7 +354,8 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
 `nextTickAt` by outcome: sent/holdout → lastSentAt + effective gap; min-gap /
 delivery-window → the instant the constraint lifts; session-suppressed →
 last_session_at + window; in-flight → now + 1h; none-eligible / no-recipients →
-now + minGapDays; sunset → now + minGapDays × slowFactor; contact-policy deferral (via
+now + minGapDays (none-eligible is capped by the earliest relative-time flip of any
+unsatisfied action's `eligible`/`satisfied`, plans/17 F1); sunset → now + minGapDays × slowFactor; contact-policy deferral (via
 hook) → the send's notBefore.
 
 Dispatch hooks (`sendHooks.program`): the guard re-verifies (§5.6). `onOutcome`:
@@ -656,6 +660,13 @@ from earlier sections, these win.
 - **Open items resolved**: `decisionRetentionDays` default null (keep); `Facts Changed`
   carries no payload (always resolve); preference page reuses the unsub page shell;
   admin name "Programs".
+
+- **Relative-time conditions** (plans/17 F1): `minAgeDays` / `maxAgeDays` on date facts
+  and the program-only `sinceEntry` leaf. Real-number days; unknown dates are false for
+  both age operators. `nextPredicateFlipAt` (pure) gives the next instant a time leaf
+  changes; a `none-eligible` tick wakes at `min(now + minGapDays, flip)` and the
+  simulator at `min(earliestCooldown, flip)` (null when neither exists). Event leaves
+  have no flip time. `enteredAt` is run state, not a fact (invariant 20).
 
 ## 15. Open items (historical)
 - `decisionRetentionDays` default: none vs 180. Decide at build.

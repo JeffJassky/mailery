@@ -33,7 +33,7 @@ import {
 import { countAcceptedSend } from './hooks.js'
 import { acquireLease, LeaseLostError, PROCESS_WORKER, releaseLease, renewLease } from './lease.js'
 import { toEpochMs } from './predicate.js'
-import { evaluateCandidates, type CandidateWork } from './rank.js'
+import { evaluateCandidates, nextActionFlipAt, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 import type { ProgramTickOptions, ProgramTickResult } from './index.js'
 
@@ -293,7 +293,9 @@ async function tickLeased(
     return silent('sunset', new Date(nowMs + def.policy.minGapDays * DAY_MS * factor))
   }
   if (!first) {
-    return silent('none-eligible', new Date(nowMs + def.policy.minGapDays * DAY_MS))
+    const flip = nextActionFlipAt(works, facts, run.enteredAt, now)
+    const gapEnd = nowMs + def.policy.minGapDays * DAY_MS
+    return silent('none-eligible', new Date(flip ? Math.min(gapEnd, flip.getTime()) : gapEnd))
   }
 
   // 9. in flight.

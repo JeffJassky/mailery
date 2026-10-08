@@ -169,6 +169,11 @@ function checkPredicateFacts(
     issues.push({ path: `${path}.fact`, message: `fact "${p.fact}" is not declared by the facts adapter` })
     return
   }
+  for (const op of ['minAgeDays', 'maxAgeDays'] as const) {
+    if (p[op] !== undefined && decl.type !== 'date') {
+      issues.push({ path: `${path}.${op}`, message: `${op} needs a date fact; "${p.fact}" is ${decl.type}` })
+    }
+  }
   const values: unknown[] = []
   if ('equals' in p) values.push(p.equals)
   if (Array.isArray(p.in)) values.push(...p.in)

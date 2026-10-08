@@ -25,7 +25,7 @@ import { isSuppressed } from '../suppression.js'
 import type { RunnerContext } from '../index.js'
 import { DAY_MS, HOUR_MS, holdoutArm, sendIsInFlight, timezoneFact } from './common.js'
 import { toEpochMs } from './predicate.js'
-import { evaluateCandidates, type CandidateEvaluation, type CandidateWork } from './rank.js'
+import { evaluateCandidates, nextActionFlipAt, type CandidateEvaluation, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 
 export type ProgramSimulationErrorCode = 'not_found' | 'no_definition' | 'no_facts_adapter' | 'invalid_input'
@@ -109,14 +109,15 @@ export async function simulateProgram(
     status: run?.status ?? 'active',
   }
   // Event predicates read this subject's events; a facts-only simulation has none.
+  const enteredAt = run?.enteredAt ?? now
   const evaluate: Evaluate = (at, actions) =>
-    evaluateCandidates(def, actions, { facts, subjectId: subjectId ?? '', collections: C, now: at, enteredAt: run?.enteredAt ?? now })
+    evaluateCandidates(def, actions, { facts, subjectId: subjectId ?? '', collections: C, now: at, enteredAt })
 
   const exited = run ? await hasExitEvent(ctx, def, run) : false
   const evaluation = await evaluate(now, book.actions)
   const candidates = candidateRows(evaluation.works)
-  const next = await decideNext(ctx, { def, facts, subjectId, run, arm, book, exited, now, evaluation, candidates })
-  const { sequence, sequenceEnd } = await project(ctx, def, facts, evaluate, { book, exited, now, horizonDays: opts.horizonDays })
+  const next = await decideNext(ctx, { def, facts, enteredAt, subjectId, run, arm, book, exited, now, evaluation, candidates })
+  const { sequence, sequenceEnd } = await project(ctx, def, facts, evaluate, { enteredAt, book, exited, now, horizonDays: opts.horizonDays })
 
   return {
     source,
@@ -174,6 +175,10 @@ function earliestCooldown(works: CandidateWork[], at: Date): Date | null {
     .filter((d): d is Date => !!d && d.getTime() > at.getTime())
     .map((d) => d.getTime())
   return times.length ? new Date(Math.min(...times)) : null
+}
+
+function earlier(a: Date | null, b: Date | null): Date | null {
+  return a && b ? (a.getTime() <= b.getTime() ? a : b) : (a ?? b)
 }
 
 /** Why a program cannot send this template, in the tick's words; null when it can. */
@@ -236,6 +241,7 @@ function sendTimeFor(
 interface NextArgs {
   def: ProgramDefinition
   facts: Facts
+  enteredAt: Date
   subjectId: string | undefined
   run: ProgramRunDoc | null
   arm: 'treatment' | 'holdout'
@@ -272,7 +278,7 @@ async function decideNext(ctx: RunnerContext, a: NextArgs): Promise<ProgramSimul
     at,
     ...(detail ? { detail } : {}),
   })
-  if (!choice) return chosen('none-eligible', earliestCooldown(evaluation.works, now))
+  if (!choice) return chosen('none-eligible', earlier(earliestCooldown(evaluation.works, now), nextActionFlipAt(evaluation.works, a.facts, a.enteredAt, now)))
 
   if (run?.inFlight) {
     const rows = await ctx.collections.sends.find({ _id: { $in: run.inFlight.sendIds } }).toArray()
@@ -317,7 +323,7 @@ async function project(
   def: ProgramDefinition,
   facts: Facts,
   evaluate: Evaluate,
-  o: { book: Book; exited: boolean; now: Date; horizonDays: number },
+  o: { enteredAt: Date; book: Book; exited: boolean; now: Date; horizonDays: number },
 ): Promise<{ sequence: ProgramSimulationStep[]; sequenceEnd: ProgramSimulation['sequenceEnd'] }> {
   const sequence: ProgramSimulationStep[] = []
   const end = (sequenceEnd: ProgramSimulation['sequenceEnd']) => ({ sequence, sequenceEnd })
@@ -339,7 +345,7 @@ async function project(
 
     const choice = chooseNext(def, ev.ranked, book)
     if (!choice) {
-      const wake = earliestCooldown(ev.works, t)
+      const wake = earlier(earliestCooldown(ev.works, t), nextActionFlipAt(ev.works, facts, o.enteredAt, t))
       if (!wake) return end('none-eligible')
       t = wake
       continue

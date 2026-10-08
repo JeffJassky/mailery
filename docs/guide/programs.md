@@ -74,6 +74,8 @@ const activation: ProgramDefinition = {
 | Leaf | Meaning |
 | --- | --- |
 | `{ fact, equals? , gte?, lte?, in?, exists? }` | Tests one fact. Every operator present must hold. With no operator it is a truthiness test. `gte`/`lte` take a number, or an ISO string / epoch ms for date facts. `exists: true` means neither missing nor `null`. |
+| `{ fact, minAgeDays?, maxAgeDays? }` | Date facts only (publish rejects other types). `minAgeDays: n` holds once the fact is at least `n` days before now; `maxAgeDays: n` while it is less than `n` days before now. Days are real numbers, not rounded. A missing, `null` or unparseable date is false for both; a future date has a negative age. They combine with the other operators on the leaf. Example: `{ fact: 'signed_up_at', minAgeDays: 3 }`. |
+| `{ sinceEntry: { minDays?, maxDays? } }` | Days since the run entered the program. `minDays: n` holds once `n` days have passed, `maxDays: n` while fewer than `n` have. At least one is required. Programs only. In a facts-only simulation the run enters now. |
 | `{ hasFiredEvent: name, withinDays? }` / `{ notHasFiredEvent: name }` | Events fired with `externalId` = the subject id. |
 | `{ all }`, `{ any }`, `{ not }` | Combinators. |
 
@@ -130,7 +132,7 @@ A run is ticked when its `nextTickAt` arrives (the mailer tick scans for due run
 
 Every tick that gets past step 3 writes a decision row, including silent ones. The row lists every candidate with `blockedBy` (`satisfied`, `ineligible`, `requires:<id>`, `exhausted`, `cooldown`, `hold`) so "why didn't they get X" is always answerable.
 
-When the next tick happens: after a send, `lastSentAt` plus the gap for the next attempt; for `min-gap` and `delivery-window`, the instant the constraint lifts; for `session-suppressed`, the session time plus the window; while a send is in flight, an hour; with nothing to do or no recipients, `minGapDays`; when sunset, `minGapDays × slowFactor`; when the contact policy defers the send, its `notBefore`.
+When the next tick happens: after a send, `lastSentAt` plus the gap for the next attempt; for `min-gap` and `delivery-window`, the instant the constraint lifts; for `session-suppressed`, the session time plus the window; while a send is in flight, an hour; with nothing to do, the earlier of `minGapDays` and the next moment a relative-time condition (`minAgeDays`, `maxAgeDays`, `sinceEntry`) changes value, so a run waiting for "day 3" wakes on day 3; with no recipients, `minGapDays`; when sunset, `minGapDays × slowFactor`; when the contact policy defers the send, its `notBefore`.
 
 ## Attempts are consumed by accepted sends only
 

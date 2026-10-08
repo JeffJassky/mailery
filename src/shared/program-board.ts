@@ -263,11 +263,50 @@ function unwrap(p: Pred): Pred {
   }
 }
 
+
+// plans/17 F1: relative-time phrases, shared by describePredicate and outlinePredicate.
+const days = (n: number): string => `${n} ${n === 1 ? 'day' : 'days'}`
+
+/** "signed_up_at" → "signed up": humanised, with a trailing " at" / " date" / " on" dropped. */
+function ageSubject(fact: string): string {
+  const h = fact.replace(/[_-]+/g, ' ').trim()
+  const t = h.replace(/ (at|date|on)$/, '')
+  return t || h
+}
+
+const AGE_KEYS = ['minAgeDays', 'maxAgeDays'] as const
+const hasAgeOp = (p: Pred): boolean => AGE_KEYS.some((k) => p[k] !== undefined)
+
+function agePhrase(p: Pred, negate: boolean): string {
+  const h = ageSubject(String(p.fact))
+  const lo = p.minAgeDays as number | undefined
+  const hi = p.maxAgeDays as number | undefined
+  if (lo !== undefined && hi !== undefined) return `${h} ${negate ? 'not ' : ''}between ${lo} and ${hi} days ago`
+  if (lo !== undefined) return negate ? `${h} less than ${days(lo)} ago` : `${h} at least ${days(lo)} ago`
+  const n = hi as number
+  if (negate) return `${h} ${n} or more days ago`
+  return `${h} in the last ${n === 1 ? 'day' : `${n} days`}`
+}
+
+function entryPhrase(p: Pred, negate: boolean): string {
+  const lo = p.sinceEntry?.minDays as number | undefined
+  const hi = p.sinceEntry?.maxDays as number | undefined
+  if (lo !== undefined && hi !== undefined) return `${negate ? 'not ' : ''}between ${lo} and ${hi} days into the program`
+  if (lo !== undefined) return negate ? `less than ${days(lo)} into the program` : `at least ${days(lo)} into the program`
+  const n = hi as number
+  if (negate) return `after the first ${n === 1 ? 'day' : `${n} days`} of the program`
+  return `in the first ${n === 1 ? 'day' : `${n} days`} of the program`
+}
+
+/** Keys of a fact leaf other than the fact name and the age operators. */
+const nonAgeKeys = (p: Pred): string[] => Object.keys(p).filter((k) => k !== 'fact' && !(AGE_KEYS as readonly string[]).includes(k) && p[k] !== undefined)
+
 const isGroup = (p: Pred, kind: 'all' | 'any') => Array.isArray(p?.[kind])
 
 function describe(p: Pred): string {
   if (p && typeof p === 'object') {
     if ('fact' in p) return factText(p)
+    if ('sinceEntry' in p) return entryPhrase(p, false)
     if ('hasFiredEvent' in p) return eventText(p.hasFiredEvent, p.withinDays, true)
     if ('notHasFiredEvent' in p) return eventText(p.notHasFiredEvent, p.withinDays, false)
     if ('all' in p) return groupText(p.all, 'all')
@@ -321,6 +360,7 @@ function factParts(p: Pred): string[] {
   else if (p.gte !== undefined) parts.push(`${f} ≥ ${p.gte}`)
   else if (p.lte !== undefined) parts.push(`${f} ≤ ${p.lte}`)
   if (p.exists !== undefined) parts.push(`${f} is ${p.exists ? '' : 'not '}set`)
+  if (hasAgeOp(p)) parts.push(agePhrase(p, false))
   return parts.length ? parts : [f]
 }
 
@@ -334,8 +374,10 @@ function negate(p: Pred): string {
     if ('not' in p) return describe(unwrap(p.not))
     if ('hasFiredEvent' in p) return eventText(p.hasFiredEvent, p.withinDays, false)
     if ('notHasFiredEvent' in p) return eventText(p.notHasFiredEvent, p.withinDays, true)
+    if ('sinceEntry' in p) return entryPhrase(p, true)
     if ('fact' in p) {
       const f = p.fact as string
+      if (hasAgeOp(p) && nonAgeKeys(p).length === 0) return agePhrase(p, true)
       const keys = Object.keys(p).filter((k) => k !== 'fact' && p[k] !== undefined)
       if (keys.length === 0 || (keys.length === 1 && p.equals === true)) return `not ${f}`
       if (keys.length === 1 && p.equals === false) return f
@@ -400,7 +442,16 @@ function eventLine(name: string, happened: boolean, withinDays: unknown): Predic
 
 function outline(p: any, negate: boolean): PredicateOutline {
   if (p && typeof p === 'object') {
+    if ('sinceEntry' in p) return line(entryPhrase(p, negate))
     if ('fact' in p) {
+      if (hasAgeOp(p)) {
+        if (nonAgeKeys(p).length === 0) return line(agePhrase(p, negate))
+        const others = (['equals', 'in', 'gte', 'lte', 'exists'] as const)
+          .filter((k) => k in p)
+          .map((k) => factLine({ fact: p.fact, [k]: p[k] }, false)!)
+        const items = [...others, line(agePhrase(p, false))]
+        return negate ? { kind: 'group', mode: 'not-all', items } : { kind: 'group', mode: 'all', items }
+      }
       const one = factLine(p, negate)
       if (one) return one
       // Several operators on one fact: each is its own condition.

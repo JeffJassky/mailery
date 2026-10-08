@@ -19,11 +19,11 @@ export function toEpochMs(v: unknown): number {
 
 /** Pure fact-leaf evaluation. See `FactPredicate` for operator semantics. `now` anchors `minAgeDays` / `maxAgeDays`. */
 export function evaluateFactPredicate(leaf: FactPredicate, facts: Facts, now: Date = new Date()): boolean {
-  void now // plans/17 F1: age operators are implemented in PR A
   const v = facts[leaf.fact]
+  const hasAge = leaf.minAgeDays !== undefined || leaf.maxAgeDays !== undefined
   const hasEquals = 'equals' in leaf && leaf.equals !== undefined
   const hasOperator =
-    hasEquals || leaf.gte !== undefined || leaf.lte !== undefined || leaf.in !== undefined || leaf.exists !== undefined
+    hasEquals || leaf.gte !== undefined || leaf.lte !== undefined || leaf.in !== undefined || leaf.exists !== undefined || hasAge
 
   if (!hasOperator) return Boolean(v)
 
@@ -35,6 +35,14 @@ export function evaluateFactPredicate(leaf: FactPredicate, facts: Facts, now: Da
   if (leaf.in !== undefined && !leaf.in.some((x) => looselyEqual(v, x))) return false
   if (leaf.gte !== undefined && !(comparable(v, leaf.gte) >= toEpochMs(leaf.gte))) return false
   if (leaf.lte !== undefined && !(comparable(v, leaf.lte) <= toEpochMs(leaf.lte))) return false
+  if (hasAge) {
+    // Age in real days; an unknown date is neither old enough nor recent.
+    const at = toEpochMs(v)
+    if (!Number.isFinite(at)) return false
+    const ageMs = now.getTime() - at
+    if (leaf.minAgeDays !== undefined && !(ageMs >= leaf.minAgeDays * DAY_MS)) return false
+    if (leaf.maxAgeDays !== undefined && !(ageMs < leaf.maxAgeDays * DAY_MS)) return false
+  }
   return true
 }
 
@@ -71,14 +79,40 @@ export interface ProgramPredicateContext {
  * changes value, or null when there is none. Pure. Event leaves (`withinDays`)
  * are ignored. plans/17 F1.
  */
-export function nextPredicateFlipAt(_pred: Predicate, _facts: Facts, _enteredAt: Date, _after: Date): Date | null {
-  throw new Error('nextPredicateFlipAt: not implemented (plans/17 PR A)')
+export function nextPredicateFlipAt(pred: Predicate, facts: Facts, enteredAt: Date, after: Date): Date | null {
+  const afterMs = after.getTime()
+  let best = Number.POSITIVE_INFINITY
+  const consider = (anchorMs: number, days: number | undefined) => {
+    if (days === undefined || !Number.isFinite(anchorMs)) return
+    const t = anchorMs + days * DAY_MS
+    if (t > afterMs && t < best) best = t
+  }
+  const walk = (p: any): void => {
+    if (!p || typeof p !== 'object') return
+    if ('fact' in p) {
+      const at = toEpochMs(facts[p.fact])
+      consider(at, p.minAgeDays)
+      consider(at, p.maxAgeDays)
+    } else if ('sinceEntry' in p) {
+      consider(enteredAt.getTime(), p.sinceEntry?.minDays)
+      consider(enteredAt.getTime(), p.sinceEntry?.maxDays)
+    } else if ('all' in p) for (const sub of p.all) walk(sub)
+    else if ('any' in p) for (const sub of p.any) walk(sub)
+    else if ('not' in p) walk(p.not)
+  }
+  walk(pred)
+  return Number.isFinite(best) ? new Date(best) : null
 }
 
 export async function evaluateProgramPredicate(pred: Predicate, ctx: ProgramPredicateContext): Promise<boolean> {
   const p = pred as any
   if (p && typeof p === 'object') {
-    if ('fact' in p) return evaluateFactPredicate(p as FactPredicate, ctx.facts)
+    if ('fact' in p) return evaluateFactPredicate(p as FactPredicate, ctx.facts, ctx.now)
+    if ('sinceEntry' in p) {
+      const days = (ctx.now.getTime() - ctx.enteredAt.getTime()) / DAY_MS
+      const { minDays, maxDays } = p.sinceEntry as { minDays?: number; maxDays?: number }
+      return (minDays === undefined || days >= minDays) && (maxDays === undefined || days < maxDays)
+    }
     if ('hasFiredEvent' in p) return firedEvent(ctx, p.hasFiredEvent, p.withinDays)
     if ('notHasFiredEvent' in p) return !(await firedEvent(ctx, p.notHasFiredEvent, p.withinDays))
     if ('all' in p) {
@@ -92,7 +126,7 @@ export async function evaluateProgramPredicate(pred: Predicate, ctx: ProgramPred
     if ('not' in p) return !(await evaluateProgramPredicate(p.not as Predicate, ctx))
   }
   throw new Error(
-    `program predicates support fact, hasFiredEvent, notHasFiredEvent, all, any and not; got ${JSON.stringify(Object.keys(p ?? {}))}`,
+    `program predicates support fact, sinceEntry, hasFiredEvent, notHasFiredEvent, all, any and not; got ${JSON.stringify(Object.keys(p ?? {}))}`,
   )
 }
 
