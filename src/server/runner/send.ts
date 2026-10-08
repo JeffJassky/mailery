@@ -265,7 +265,12 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   // dispatches to one address cannot both read an empty history.
   let release: (() => Promise<void>) | null = null
   if (contactPolicyApplies(ctx, send)) {
-    release = await acquireRecipientLock(ctx, send.emailAtSend)
+    try {
+      release = await acquireRecipientLock(ctx, send.emailAtSend)
+    } catch (err: any) {
+      await releaseClaimAfterError(send, `contact policy lock error: ${String(err?.message ?? err)}`, ctx)
+      throw err
+    }
     if (!release) {
       // The address stayed busy for the whole wait. Hand the claim back and retry shortly.
       await ctx.collections.sends.updateOne({ _id: send._id }, { $set: { status: 'queued', updatedAt: new Date() } })
@@ -607,7 +612,7 @@ async function releaseClaimAfterError(send: SendDoc, reason: string, ctx: Runner
  * already written, so a throwing hook is logged rather than propagated: a
  * retry could not claim the send again and would only mask the real outcome.
  */
-async function emitOutcome(
+export async function emitOutcome(
   send: SendDoc,
   patch: Partial<SendDoc>,
   outcome: SendOutcome,

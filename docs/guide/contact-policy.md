@@ -65,14 +65,20 @@ When a send meets a *pending* send to the same address from a strictly higher-pr
 
 ## Concurrent sends
 
-Two marketing sends to one address dispatched at the same moment would both see an empty history. Dispatch therefore takes a short per-recipient lock (collection `mailer_contact_locks`, one row per address, expiring on its own) from the decision until the send is final. The second send waits, then sees the first, and defers. A crashed worker's lock expires after two minutes.
+Two marketing sends to one address dispatched at the same moment would both see an empty history. Dispatch therefore takes a short per-recipient lock (collection `mailer_contact_locks`, one row per address) from the decision until the send is final, including render and the provider call.
+
+- The lock expires after **60 seconds**, and the holder renews it every **15 seconds** while it works, so a slow provider call never lets a second dispatch in.
+- A crashed worker stops renewing, so its lock frees the address within 60 seconds. A TTL index also removes abandoned rows.
+- Only the owner can release or renew a lock.
+- A waiting dispatch polls for up to **45 seconds**, then hands the send back to the queue (retry in 5 seconds). If taking the lock errors, the send is marked `failed` so the queue's retry re-claims it.
 
 ## Watching it
 
 - Admin UI: deferred sends show an amber **Deferred** status with the reason and release time on the Sends list, the send detail page and the contact page. Dropped sends show **Cancelled** with `policy expired`.
 - API: `GET /sends?status=deferred` lists them; each row carries `notBefore`, `policyDeferral` and `exitReason`.
 - Counts: `db.mailer_sends.aggregate([{ $match: { status: 'deferred' } }, { $group: { _id: '$policyDeferral.reason', n: { $sum: 1 } } }])`. A growing `quiet_hours` or `rolling_cap` count is the policy working; a growing count of `cancelled` with `exitReason: 'policy_expired'` means the rules are tighter than `deferral.maxHours` allows.
-- Aborting a flow (`abortFlow`, `abortAllFlows`) cancels its deferred sends too.
+- Aborting a flow (`abortFlow`, `abortAllFlows`) cancels its deferred sends too, even when the run has already completed, and reports each to the flow's `onOutcome` as `cancelled`.
+- Cancelling a broadcast cancels its deferred sends; a broadcast's stop rules treat deferred sends as still pending.
 
 ## Limits
 

@@ -600,7 +600,7 @@ export async function cancelBroadcast(
 ): Promise<{ broadcast: BroadcastDoc; cancelledSends: number }> {
   const b = await loadBroadcast(mailer, slug)
   if (b.status === 'cancelled') return { broadcast: b, cancelledSends: 0 }
-  const pending = await mailer.collections.sends.countDocuments({ broadcastId: b._id, status: { $in: ['queued', 'held'] } })
+  const pending = await mailer.collections.sends.countDocuments({ broadcastId: b._id, status: { $in: ['queued', 'held', 'deferred'] } })
   if ((b.status === 'sent' || b.status === 'failed') && pending === 0) {
     throw new BroadcastOperationError('already_finished', `broadcast is ${b.status} with nothing left to send; there is nothing to cancel`, 409)
   }
@@ -609,14 +609,14 @@ export async function cancelBroadcast(
   // queue (a whole broadcast, once dispatch had run) still went out.
   const now = new Date()
   const cancelled = await mailer.collections.sends.updateMany(
-    { broadcastId: b._id, status: { $in: ['queued', 'held'] } },
+    { broadcastId: b._id, status: { $in: ['queued', 'held', 'deferred'] } },
     { $set: { status: 'cancelled', errorMessage: `cancelled: broadcast cancelled by ${actor}`, updatedAt: now } },
   )
   await mailer.audit({
     actor,
     action: 'broadcast.cancel',
     resource: { collection: 'mailer_broadcasts', id: b._id, slug: b.slug },
-    diffSummary: `was ${b.status}; cancelled ${cancelled.modifiedCount} queued/held send(s)`,
+    diffSummary: `was ${b.status}; cancelled ${cancelled.modifiedCount} queued/held/deferred send(s)`,
   })
   const after = await mailer.collections.broadcasts.findOne({ _id: b._id })
   return { broadcast: after ?? b, cancelledSends: cancelled.modifiedCount }

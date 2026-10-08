@@ -224,4 +224,4 @@ With [`contactPolicy`](./contact-policy) configured, a flow's marketing send can
 - **Pause** (admin UI): `enabled: false`. No new entrants. In-flight runs continue.
 - **Stop** (admin UI): `enabled: false` AND bulk-exit all active runs.
 - **Cancel one run**: from the contact detail page, click "Cancel" on the active run.
-- **`abortFlow` / `abortAllFlows`** also cancel the run's sends that are still `queued`, `failed` or `deferred` by the contact policy (a deferred send is cancelled even if its run has already completed).
+- **`abortFlow` / `abortAllFlows`** also cancel the run's sends that are still `queued`, `failed` or `deferred` by the contact policy (a deferred send is cancelled even if its run has already completed). Each cancelled send is reported to the `flow` hook's `onOutcome` as `cancelled`.
