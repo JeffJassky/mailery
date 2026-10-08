@@ -22,6 +22,8 @@ import {
   type DraftBodySource,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { templateCategoryIssue } from '../templates/category.js'
+import { parseCategoryInput } from '../templates/category-input.js'
 import { lintTemplate, type LintResult } from '../templates/linter.js'
 import { validateHtmlSource, type HtmlSourceIssue } from '../templates/html-source.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
@@ -395,6 +397,14 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
     }),
   )
 
+  // ----- Categories (read-only; the source of truth is MailerConfig) --------
+  r.get(
+    '/categories',
+    asyncHandler(async (_req, res) => {
+      res.json(mailer.config.categories ?? [])
+    }),
+  )
+
   // ----- Templates ----------------------------------------------------------
   r.get(
     '/templates',
@@ -472,7 +482,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         c.flowRuns.find({ externalId, status: 'active' }).sort({ nextActionAt: 1 }).limit(50).toArray(),
       ])
       if (!contact) return res.status(404).json({ error: 'not_found' })
-      return res.json({ contact, subscription, recentEvents, recentSends, activeRuns })
+      const categories = mailer.config.categories ?? []
+      const preferences = categories.length > 0 ? await mailer.getPreferences(contact.email) : undefined
+      return res.json({ contact, subscription, recentEvents, recentSends, activeRuns, ...(preferences ? { preferences } : {}) })
     }),
   )
 
@@ -1136,11 +1148,17 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
     '/templates',
     asyncHandler(async (req, res) => {
       const { slug, name, kind, subject, preheader, fromName, fromEmail } = req.body ?? {}
+      const categoryInput = parseCategoryInput(req.body?.category)
+      if ('error' in categoryInput) return res.status(400).json({ error: 'validation_failed', message: categoryInput.error })
       if (!slug || !name || !kind) {
         return res.status(400).json({ error: 'validation_failed', message: 'slug, name, kind required' })
       }
       if (kind !== 'marketing' && kind !== 'transactional') {
         return res.status(400).json({ error: 'validation_failed', message: 'kind must be marketing or transactional' })
+      }
+      if (categoryInput.provided) {
+        const issue = templateCategoryIssue(kind, categoryInput.value, mailer.config.categories)
+        if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
       }
       const resolvedFromEmail =
         fromEmail ??
@@ -1162,6 +1180,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           name,
           description: '',
           kind,
+          ...(categoryInput.provided && categoryInput.value ? { category: categoryInput.value } : {}),
           fromName:
             fromName ??
             (kind === 'transactional' ? mailer.config.transactionalFromDefaults?.name : undefined) ??
@@ -1214,6 +1233,16 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       const { subject, preheader, mjml, html, editorJson, notes, name, fromName, fromEmail, replyTo, kind, bodyFormat, trackOpens, trackClicks } = req.body ?? {}
 
+      // Category rule on the resulting (kind, category) pair, before any write.
+      const categoryInput = parseCategoryInput(req.body?.category)
+      if ('error' in categoryInput) return res.status(400).json({ error: 'validation_failed', message: categoryInput.error })
+      const resultingKind = kind === 'marketing' || kind === 'transactional' ? kind : tpl.kind
+      const resultingCategory = categoryInput.provided ? categoryInput.value : (tpl.category ?? null)
+      if (categoryInput.provided || resultingKind !== tpl.kind) {
+        const issue = templateCategoryIssue(resultingKind, resultingCategory, mailer.config.categories)
+        if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
+      }
+
       // Mongo refuses to $set a dotted 'draft.xxx' path when 'draft' is
       // currently null (script-seeded / never-drafted templates land here) —
       // seed a base draft object first so the dot-path $set below has
@@ -1253,6 +1282,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (typeof fromEmail === 'string') set.fromEmail = fromEmail
       if (typeof replyTo === 'string' || replyTo === null) set.replyTo = replyTo
       if (kind === 'marketing' || kind === 'transactional') set.kind = kind
+      if (categoryInput.provided && categoryInput.value) set.category = categoryInput.value
 
       // Validate resulting (kind, fromEmail) against the senderDomains registry
       // whenever either field is being touched.
@@ -1272,7 +1302,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (typeof trackOpens === 'boolean') set.trackOpens = trackOpens
       if (typeof trackClicks === 'boolean') set.trackClicks = trackClicks
 
-      await c.templates.updateOne({ _id: tpl._id }, { $set: set })
+      await c.templates.updateOne(
+        { _id: tpl._id },
+        categoryInput.provided && categoryInput.value === null ? { $set: set, $unset: { category: '' } } : { $set: set },
+      )
       await mailer.audit({
         actor: (req as any).actor,
         action: 'template.draft.update',
@@ -1534,6 +1567,14 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const draft = tpl.draft
       if (!draft) return res.status(400).json({ error: 'no_draft' })
 
+      // Category rule (0.21): the stored category (or one supplied with the
+      // publish) must be valid for the template's kind and declared.
+      const publishCategory = parseCategoryInput(req.body?.category)
+      if ('error' in publishCategory) return res.status(400).json({ error: 'validation_failed', message: publishCategory.error })
+      const effectiveCategory = publishCategory.provided ? publishCategory.value : (tpl.category ?? null)
+      const categoryIssue = templateCategoryIssue(tpl.kind, effectiveCategory, mailer.config.categories)
+      if (categoryIssue) return res.status(400).json({ error: 'validation_failed', message: categoryIssue })
+
       // Short-circuit sender-domain check — preserves the pre-linter 400
       // sender_domain_invalid contract so external callers (and the SPA's
       // own publish modal) can key on it without conflating with lint errors.
@@ -1657,7 +1698,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
             publishedAt: now,
             publishedBy: (req as any).actor,
             updatedAt: now,
+            ...(publishCategory.provided && publishCategory.value ? { category: publishCategory.value } : {}),
           },
+          ...(publishCategory.provided && publishCategory.value === null ? { $unset: { category: '' } } : {}),
         },
       )
       await mailer.audit({

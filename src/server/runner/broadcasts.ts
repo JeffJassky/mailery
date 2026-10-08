@@ -175,6 +175,7 @@ export async function* eligibleRecipientPages(
   broadcast: Pick<BroadcastDoc, 'segmentDefinition' | 'order'>,
   kind: TemplateKind,
   ctx: RunnerContext,
+  category?: string | null,
 ): AsyncGenerator<Contact[]> {
   const { hostFilter, postFilters } = planSegment(broadcast.segmentDefinition)
   const sort = broadcast.order ?? undefined
@@ -190,7 +191,7 @@ export async function* eligibleRecipientPages(
     })
     if (page.contacts.length === 0) break
     const passed = (await applyPostFilters(page.contacts, postFilters, ctx)).filter((c) => isSendableEmail(c.email))
-    const suppressed = await suppressedEmails(ctx.collections, passed.map((c) => c.email), kind)
+    const suppressed = await suppressedEmails(ctx.collections, passed.map((c) => c.email), kind, category)
     yield passed.filter((c) => !suppressed.has(c.email.toLowerCase()))
     if (!page.nextCursor) break
     cursor = page.nextCursor
@@ -230,6 +231,7 @@ export async function countBroadcastRecipients(
   broadcast: Pick<BroadcastDoc, '_id' | 'segmentDefinition' | 'order' | 'recipientCap'>,
   kind: TemplateKind,
   ctx: RunnerContext,
+  category?: string | null,
 ): Promise<BroadcastRecipientCount> {
   const t0 = Date.now()
   const { hostFilter } = planSegment(broadcast.segmentDefinition)
@@ -239,7 +241,7 @@ export async function countBroadcastRecipients(
   ])
   let eligible = 0
   let alreadySent = 0
-  for await (const page of eligibleRecipientPages(broadcast, kind, ctx)) {
+  for await (const page of eligibleRecipientPages(broadcast, kind, ctx, category)) {
     eligible += page.length
     if (broadcast._id) alreadySent += (await alreadyDispatched(ctx, broadcast._id, page)).size
   }
@@ -315,7 +317,7 @@ async function dispatchBroadcast(broadcast: BroadcastDoc, ctx: RunnerContext): P
   let capReached = false
 
   try {
-    for await (const eligible of eligibleRecipientPages(b, template.kind, ctx)) {
+    for await (const eligible of eligibleRecipientPages(b, template.kind, ctx, template.category)) {
       if (!(await holdsLease())) return
       // Enqueueing into a tripped breaker only builds a backlog that fires
       // the moment someone resets it. Pause instead, and let resume decide.
@@ -449,6 +451,7 @@ function buildSendDoc(
     broadcastId: broadcast._id!,
     manualSendBy: null,
     kind: template.kind,
+    ...(template.category ? { category: template.category } : {}),
     provider: template.providerOverride ?? ctx.config.defaultProvider,
     providerMessageId: null,
     fromName: template.fromName,

@@ -77,6 +77,10 @@ export async function applyUnsubscribe(
     { upsert: true },
   )
 
+  // A category opt-out is not an unsubscribe from the list: the recipient is
+  // still subscribed to the rest of marketing (0.21).
+  if (input.scope.startsWith('category:')) return
+
   await collections.subscriptions.updateOne(
     { emailAtSubscribe: normalized },
     {

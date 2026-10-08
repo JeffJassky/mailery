@@ -12,6 +12,7 @@
 
 import crypto from 'node:crypto'
 import type { SuppressionScope } from '../shared/enums.js'
+import { categoryIdSchema } from '../shared/schemas.js'
 
 export interface UnsubscribeTokenPayload {
   email: string
@@ -48,6 +49,7 @@ export function signUnsubscribeToken(
     s: payload.scope,
     x: payload.expiresAt.getTime(),
     ...(payload.sendId && SEND_ID_RE.test(payload.sendId) ? { i: payload.sendId } : {}),
+    ...(payload.category ? { c: payload.category } : {}),
   })
   const bodyB64 = b64url(Buffer.from(body, 'utf8'))
   const hmac = crypto.createHmac('sha256', secret).update(bodyB64).digest()
@@ -73,7 +75,7 @@ export function verifyUnsubscribeToken(
   if (expected.length !== actual.length) return null
   if (!crypto.timingSafeEqual(expected, actual)) return null
 
-  let body: { e?: string; s?: string; x?: number; i?: unknown }
+  let body: { e?: string; s?: string; x?: number; i?: unknown; c?: unknown }
   try {
     body = JSON.parse(b64urlDecode(bodyB64).toString('utf8'))
   } catch {
@@ -83,11 +85,16 @@ export function verifyUnsubscribeToken(
   if (body.x < now.getTime()) return null
   if (body.s !== 'all' && body.s !== 'marketing' && body.s !== 'transactional') return null
 
+  // `c` (0.21): present means it must be a well-formed category id. A signed
+  // but malformed value is a rejected token, not a silently widened opt-out.
+  if (body.c !== undefined && !categoryIdSchema.safeParse(body.c).success) return null
+
   return {
     email: body.e,
     scope: body.s,
     expiresAt: new Date(body.x),
     ...(typeof body.i === 'string' && SEND_ID_RE.test(body.i) ? { sendId: body.i } : {}),
+    ...(typeof body.c === 'string' ? { category: body.c } : {}),
   }
 }
 

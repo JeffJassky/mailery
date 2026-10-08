@@ -57,6 +57,7 @@ import { EventRegistry } from './events.js'
 import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
 import { applyUnsubscribe, clearUnsubscribeSuppressions } from './unsubscribe.js'
+import { getPreferences, setPreferences } from './preferences.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -627,8 +628,8 @@ export class Mailer {
    * Current opt-in state for an address across declared categories. Reads
    * `mailer_suppressions` only; transactional is never listed.
    */
-  async getPreferences(_email: string): Promise<PreferenceState> {
-    return notImplemented('Mailer.getPreferences', 'PR2')
+  async getPreferences(email: string): Promise<PreferenceState> {
+    return getPreferences(this.collections, this.config.categories ?? [], email)
   }
 
   /**
@@ -637,11 +638,19 @@ export class Mailer {
    * `contact.preferences`. See `server/preferences.ts`.
    */
   async setPreferences(
-    _email: string,
-    _update: PreferenceUpdate,
-    _opts: { source?: string } = {},
+    email: string,
+    update: PreferenceUpdate,
+    opts: { source?: string } = {},
   ): Promise<{ optedOut: string[]; optedIn: string[] }> {
-    return notImplemented('Mailer.setPreferences', 'PR2')
+    const source = opts.source ?? 'api'
+    const result = await setPreferences(this.collections, this.config.categories ?? [], email, update, { source })
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.preferences',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: opted out [${result.optedOut.join(', ')}] opted in [${result.optedIn.join(', ')}]`,
+    })
+    return result
   }
 
   // -------------------------------------------------------------------------
@@ -836,6 +845,7 @@ export class Mailer {
       broadcastId: null,
       manualSendBy: 'sendOneOff',
       kind: template.kind,
+      ...(template.category ? { category: template.category } : {}),
       provider: providerName,
       providerMessageId: null,
       fromName: template.fromName,
