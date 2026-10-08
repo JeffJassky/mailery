@@ -24,6 +24,7 @@ import { getBucketStatus, recordHealthCounter } from './health.js'
 import { pauseBroadcast } from './broadcast-control.js'
 import { acquireRecipientLock, applyContactPolicy, contactPolicyApplies } from './contact-policy.js'
 import { sendOrigin, type SendOutcome } from './send-hooks.js'
+import { programRenderVars } from './programs/hooks.js'
 import type { RunnerContext } from './index.js'
 
 export async function handleSend(
@@ -347,8 +348,17 @@ async function deliver(
       flowSlug: run?.flowSlug,
       eventName: run?.triggerEvent?.name,
       eventProperties: run?.triggerEvent?.properties,
+      // Program sends (0.21): which program/action/attempt, and the subject.
+      ...(send.program
+        ? {
+            program: { slug: send.program.slug, actionId: send.program.actionId, attempt: send.program.attempt },
+            subjectId: send.program.subjectId,
+          }
+        : {}),
     })
     renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id), template.category)
+    // Program sends (0.21): program/action/attempt/facts. Mailery's keys win over host vars.
+    if (send.program) Object.assign(renderCtx, await programRenderVars(send, ctx))
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
   } catch (err: any) {
     await markFailed(send, `render error: ${String(err?.message ?? err)}`, ctx)
