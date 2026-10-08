@@ -61,6 +61,7 @@ export default defineConfig({
             { text: 'Flows', link: '/guide/flows' },
             { text: 'Templates', link: '/guide/templates' },
             { text: 'Broadcasts', link: '/guide/broadcasts' },
+            { text: 'Contact policy', link: '/guide/contact-policy' },
             { text: 'Suppression & unsubscribe', link: '/guide/suppression' },
             { text: 'Tracking', link: '/guide/tracking' },
           ],

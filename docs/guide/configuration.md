@@ -175,6 +175,25 @@ prefer it.
 }
 ```
 
+## Contact policy
+
+```ts
+{
+  contactPolicy: {
+    marketing: {
+      minGapHours: 20,
+      maxPerRollingDays: { days: 7, count: 3 },
+      quietHours: { start: '21:00', end: '08:00' },
+      defaultTimezone: 'America/New_York',
+      deferral: { maxHours: 72 },
+    },
+    sourcePriority: ['transactional', 'flow', 'oneoff', 'broadcast', 'program'],
+  },
+}
+```
+
+Unset (the default), nothing changes. Set, every marketing send is checked at dispatch against what that address has already been sent: it goes, waits, or is dropped. Transactional mail is never touched. Invalid values (a zone that is not IANA, a malformed `HH:mm`, `count < 1`) throw at `Mailer.init`. Rules, defaults and the timezone chain are in [Contact policy](./contact-policy).
+
 ## Compliance
 
 ```ts

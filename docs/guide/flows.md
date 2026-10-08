@@ -215,8 +215,13 @@ Editing a flow doesn't affect contacts already in it. Each `flow_run` pins `flow
 
 To force in-flight runs to switch to a new version: exit them via the admin UI, then re-fire the trigger event.
 
+## Contact policy and flow sends
+
+With [`contactPolicy`](./contact-policy) configured, a flow's marketing send can be **deferred**: the send row is created as usual and the step advances, but the email waits (status `deferred`, with a `notBefore` time) until the recipient's gap, cap and quiet hours allow it. The flow does not wait for it; later steps run on their own schedule. When the deferral ends the flow's abort check runs again, so a run aborted in the meantime never sends. A send held past `deferral.maxHours` is cancelled with `exitReason: 'policy_expired'`.
+
 ## Pausing & stopping
 
 - **Pause** (admin UI): `enabled: false`. No new entrants. In-flight runs continue.
 - **Stop** (admin UI): `enabled: false` AND bulk-exit all active runs.
 - **Cancel one run**: from the contact detail page, click "Cancel" on the active run.
+- **`abortFlow` / `abortAllFlows`** also cancel the run's sends that are still `queued`, `failed` or `deferred` by the contact policy (a deferred send is cancelled even if its run has already completed).

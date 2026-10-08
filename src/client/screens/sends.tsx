@@ -3,6 +3,7 @@ import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
+import { sendStatusNote } from '../lib/send-status'
 
 export function Sends({ setRoute }: any) {
   const { data: sends, loading, error, refetch } = useLive(() => api.sends())
@@ -41,6 +42,7 @@ export function Sends({ setRoute }: any) {
                     <td>
                       <StatusPill status={s.status} />
                       {s.bounceType && <span className="text-xs subtle" style={{ marginLeft: 6 }}>· {s.bounceType}</span>}
+                      {sendStatusNote(s) && <div className="text-xs subtle">{sendStatusNote(s)}</div>}
                     </td>
                     <td>{s.flowSlug ? <span className="tag">{s.flowSlug}</span> : <span className="subtle text-xs">—</span>}</td>
                     <td className="num tabular">{s.openCount ?? 0}</td>

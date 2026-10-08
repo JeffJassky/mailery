@@ -343,6 +343,17 @@ export interface SendDoc {
   program?: SendProgramInfo | null
 }
 
+/**
+ * Short-lived per-recipient mutex for the contact policy stage (0.21).
+ * `_id` is the lower-cased address, so at most one holder exists; `expiresAt`
+ * bounds a crashed holder and a TTL index clears abandoned rows.
+ */
+export interface ContactLockDoc {
+  _id: string
+  owner: string
+  expiresAt: Date
+}
+
 export type ContactPolicyReason = 'min_gap' | 'rolling_cap' | 'quiet_hours' | 'priority'
 
 export interface SendProgramInfo {
@@ -920,6 +931,7 @@ export interface Collections {
   programVersions: Collection<ProgramVersionDoc>
   programRuns: Collection<ProgramRunDoc>
   programDecisions: Collection<ProgramDecisionDoc>
+  contactLocks: Collection<ContactLockDoc>
 }
 
 export function getCollections(db: Db, prefix = 'mailer_'): Collections {
@@ -951,6 +963,7 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
     programVersions: db.collection<ProgramVersionDoc>(`${prefix}program_versions`),
     programRuns: db.collection<ProgramRunDoc>(`${prefix}program_runs`),
     programDecisions: db.collection<ProgramDecisionDoc>(`${prefix}program_decisions`),
+    contactLocks: db.collection<ContactLockDoc>(`${prefix}contact_locks`),
   }
 }
 
@@ -1097,6 +1110,8 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { runId: 1, at: -1 } },
       { key: { programSlug: 1, at: -1 } },
     ]),
+    // 0.21 contact-policy mutex: abandoned locks clear themselves.
+    c.contactLocks.createIndexes([{ key: { expiresAt: 1 }, expireAfterSeconds: 0 }]),
   ])
 
   // One-shot migrations — run after indexes are in place so any DELETE

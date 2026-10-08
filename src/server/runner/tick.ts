@@ -16,6 +16,7 @@ import { runPostmasterPull } from './postmaster.js'
 import { runSndsPull } from './snds.js'
 import { pruneDmarcFailures } from './dmarc.js'
 import { drainPendingUnsubscribes } from './pending-unsubs.js'
+import { releaseDueDeferredSends } from './contact-policy.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 
@@ -74,6 +75,10 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   })
   await sweepStrandedSends(ctx).catch((err) => {
     console.error('mailery: stranded-send sweep failed', err)
+  })
+  // 0.21: a deferred send whose delayed job was lost still goes out.
+  await releaseDueDeferredSends(ctx).catch((err) => {
+    console.error('mailery: deferred-send release failed', err)
   })
   await drainOutbox(ctx).catch((err) => {
     console.error('mailery: outbox drain failed', err)

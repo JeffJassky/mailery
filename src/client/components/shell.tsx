@@ -164,6 +164,8 @@ export function StatusPill({ status }: { status: string }) {
     bounced: { cls: 'red', label: 'Bounced' },
     failed: { cls: 'red', label: 'Failed' },
     suppressed: { cls: 'amber', label: 'Suppressed' },
+    deferred: { cls: 'amber', label: 'Deferred' },
+    cancelled: { cls: 'neutral', label: 'Cancelled' },
     complained: { cls: 'red', label: 'Complained' },
     enabled: { cls: 'green', label: 'Enabled' },
     disabled: { cls: 'neutral', label: 'Disabled' },
