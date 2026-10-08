@@ -29,6 +29,15 @@ export function computeDeliveryTime(
   if (window.timeOfDay) {
     const [hh, mm] = window.timeOfDay.split(':').map(Number) as [number, number]
     const local = localParts(candidate, tz)
+    // A slot just before midnight keeps its grace after midnight: if yesterday's
+    // slot is within grace (and yesterday was an allowed day), send now.
+    const y = addLocalDays(local, -1)
+    const yesterdaySlot = utcFromLocal(y.y, y.mo, y.d, hh, mm, tz)
+    const sinceYesterday = candidate.getTime() - yesterdaySlot.getTime()
+    if (sinceYesterday >= 0 && sinceYesterday <= TIME_OF_DAY_GRACE_MS) {
+      const yWeekday = localParts(yesterdaySlot, tz).weekday
+      if (!window.weekdaysOnly || (yWeekday !== 'Sat' && yWeekday !== 'Sun')) return candidate
+    }
     const todaySlot = utcFromLocal(local.y, local.mo, local.d, hh, mm, tz)
     if (candidate.getTime() < todaySlot.getTime()) {
       candidate = todaySlot

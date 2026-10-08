@@ -288,6 +288,8 @@ describe('a human click wakes the run', () => {
       return r.nextTickAt.getTime() <= Date.now()
     })
     expect(woken).toBe(true)
+    // …and records the wake so a tick already in flight cannot overwrite it away.
+    expect((await getRun(P, slug, subjectId))!.wakeRequestedAt).toBeInstanceOf(Date)
     // …and the woken tick, two days later, uses the progress gap.
     advance(2 * DAY)
     expect(await tickProgram(P.H.ctx, slug, subjectId)).toMatchObject({ reason: 'highest-rank', chosen: 'connect-shopify', attempt: 2 })

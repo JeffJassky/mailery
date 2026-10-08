@@ -66,7 +66,7 @@ A deferred send is not history, so it does not push other sends back; only what 
 
 A blackout never drops a send. Expiry is judged on the time the other rules produced, before the blackout, and the deferral past a blackout never expires. A policy whose `marketing` holds only `blackoutDates` is a live policy.
 
-Flows, broadcasts and one-offs need nothing extra: their sends defer at dispatch and the origin's guard re-runs on release. Programs check the same ranges in the tick, so the board and `simulateProgram` show the true next send (reason `blackout`). Transactional mail is untouched.
+Flows, broadcasts and one-offs need nothing extra: their sends defer at dispatch and the origin's guard re-runs on release. Programs check the same ranges in the tick, so the board and `simulateProgram` show the true next send (reason `blackout`). Transactional mail is untouched. The program tick judges blackout dates in the subject's `timezone` fact zone, while dispatch uses the contact's zone first; when the two differ the send may defer once more at dispatch (it never drops).
 
 ## Priority
 

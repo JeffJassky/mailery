@@ -315,6 +315,11 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
           reason: decision.reason,
           firstDeferredAt: prior?.firstDeferredAt ?? now,
           count: (prior?.count ?? 0) + 1,
+          ...(decision.reason === 'blackout'
+            ? { blackoutEndedAt: decision.notBefore }
+            : prior?.blackoutEndedAt
+              ? { blackoutEndedAt: prior.blackoutEndedAt }
+              : {}),
         }
         await ctx.collections.sends.updateOne(
           { _id: send._id },

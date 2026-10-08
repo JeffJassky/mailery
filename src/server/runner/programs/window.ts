@@ -68,6 +68,10 @@ export function programSendTime(
       t = at
       break
     }
+    if (end.getTime() <= at.getTime()) {
+      t = at // a step that does not advance: stop rather than loop
+      break
+    }
     blackoutMoved = true
     t = end
   }

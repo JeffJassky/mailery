@@ -127,7 +127,7 @@ export function decideContactPolicy(input: ContactPolicyInput): ContactPolicyDec
 
   // blackout — a defer past the calendar range, then quiet hours again
   const blackout = blackoutEnd(new Date(st.t), m.blackoutDates, input.timezone)
-  if (blackout !== null) {
+  if (blackout !== null && blackout.getTime() > st.t) {
     st.t = blackout.getTime()
     st.reason = 'blackout'
     if (m.quietHours) {
@@ -164,6 +164,22 @@ function quietPeriodEnd(at: Date, start: string, end: string, timezone: string):
 }
 
 /**
+ * The first instant of a local calendar date. Where DST starts at local
+ * midnight (America/Santiago) 00:00 does not exist and `utcFromLocal` lands
+ * on the previous day, so walk forward in 15-minute steps to the first instant
+ * whose local date is the requested one.
+ */
+function startOfLocalDay(y: number, mo: number, d: number, timezone: string): Date {
+  let t = utcFromLocal(y, mo, d, 0, 0, timezone)
+  for (let i = 0; i < 6 * 4; i++) {
+    const p = localParts(t, timezone)
+    if (p.y === y && p.mo === mo && p.d === d) return t
+    t = new Date(t.getTime() + 15 * 60_000)
+  }
+  return t
+}
+
+/**
  * If the local date of `at` in `timezone` falls inside any of `dates`
  * (inclusive 'YYYY-MM-DD' ranges), the local midnight after the last
  * consecutive range; else null. Pure. plans/17 F5.
@@ -183,7 +199,7 @@ export function blackoutEnd(at: Date, dates: Array<{ from: string; to: string }>
     const nd = new Date(Date.UTC(y, mo - 1, d + 1))
     const next = key(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate())
     hits = covering(next)
-    if (hits.length === 0) return utcFromLocal(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate(), 0, 0, timezone)
+    if (hits.length === 0) return startOfLocalDay(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate(), timezone)
     last = hits.reduce((acc, r) => (r.to > acc ? r.to : acc), next)
   }
   return null
@@ -263,7 +279,8 @@ export async function applyContactPolicy(
     now,
     kind: send.kind,
     origin,
-    queuedAt: send.queuedAt,
+    // Expiry runs from the end of the last blackout deferral, so a blackout never eats the budget.
+    queuedAt: send.policyDeferral?.blackoutEndedAt && send.policyDeferral.blackoutEndedAt > send.queuedAt ? send.policyDeferral.blackoutEndedAt : send.queuedAt,
     timezone,
     history,
     pending,

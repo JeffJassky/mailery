@@ -32,7 +32,7 @@ import {
 import { countAcceptedSend } from './hooks.js'
 import { acquireLease, LeaseLostError, PROCESS_WORKER, releaseLease, renewLease } from './lease.js'
 import { toEpochMs } from './predicate.js'
-import { evaluateCandidates, nextActionFlipAt, type CandidateWork } from './rank.js'
+import { earliestCooldown, evaluateCandidates, nextActionFlipAt, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 import { programSendTime } from './window.js'
 import type { ProgramTickOptions, ProgramTickResult } from './index.js'
@@ -287,15 +287,24 @@ async function tickLeased(
   const silent = (reason: ProgramDecisionDoc['reason'], nextTickAt: Date) =>
     finish({ reason, chosen: chosenId, attempt: attemptNo, candidates: candidatesRows, nextTickAt })
 
+  // A none-eligible tick wakes at the earliest of the gap, a cooldown end and a
+  // predicate flip — what the simulator projects.
+  const noneEligibleWake = () => {
+    let wake = nowMs + def.policy.minGapDays * DAY_MS
+    const cool = earliestCooldown(works, now)
+    if (cool) wake = Math.min(wake, cool.getTime())
+    const flip = nextActionFlipAt(works, facts, run.enteredAt, now)
+    if (flip) wake = Math.min(wake, flip.getTime())
+    return new Date(wake)
+  }
+
   // 7. sunset (no engagement): silent.
   if (runStatus === 'sunset') {
     const factor = sunset ? sunset.slowFactor : 1
     return silent('sunset', new Date(nowMs + def.policy.minGapDays * DAY_MS * factor))
   }
   if (!first) {
-    const flip = nextActionFlipAt(works, facts, run.enteredAt, now)
-    const gapEnd = nowMs + def.policy.minGapDays * DAY_MS
-    return silent('none-eligible', new Date(flip ? Math.min(gapEnd, flip.getTime()) : gapEnd))
+    return silent('none-eligible', noneEligibleWake())
   }
 
   // 9. in flight.
@@ -416,7 +425,7 @@ async function tickLeased(
       const row = candidatesRows.find((r) => r.actionId === first.action.id)
       if (row) row.blockedBy = 'ineligible'
     }
-    return silent('none-eligible', new Date(nowMs + def.policy.minGapDays * DAY_MS))
+    return silent('none-eligible', noneEligibleWake())
   }
   if (!template) throw new Error('unreachable')
   const holdout = run.arm === 'holdout'

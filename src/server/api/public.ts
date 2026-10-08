@@ -296,7 +296,8 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         if (!isBotUserAgent(ua, botRe)) {
           await mailer.collections.programRuns.updateOne(
             { _id: send.program.runId, status: { $in: ['active', 'sunset'] } },
-            { $min: { nextTickAt: new Date() } },
+            // wakeRequestedAt lets a tick already in progress notice the wake (as for Facts Changed).
+            { $min: { nextTickAt: new Date() }, $set: { wakeRequestedAt: new Date() } },
           )
         }
       } catch (err) {

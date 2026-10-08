@@ -336,6 +336,12 @@ export interface SendDoc {
     reason: ContactPolicyReason
     firstDeferredAt: Date
     count: number
+    /**
+     * When the most recent blackout deferral ended. Deferral expiry
+     * (`deferral.maxHours`) is measured from max(queuedAt, this), so a
+     * blackout can never use up the budget and cause a drop after release.
+     */
+    blackoutEndedAt?: Date
   } | null
   /** IANA zone the contact policy falls back to when the contact has none (Programs: the `timezone` fact). */
   timezoneHint?: string | null

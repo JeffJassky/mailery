@@ -24,7 +24,7 @@ import { isSuppressed } from '../suppression.js'
 import type { RunnerContext } from '../index.js'
 import { DAY_MS, HOUR_MS, holdoutArm, sendIsInFlight, timezoneFact } from './common.js'
 import { toEpochMs } from './predicate.js'
-import { evaluateCandidates, nextActionFlipAt, type CandidateEvaluation, type CandidateWork } from './rank.js'
+import { earliestCooldown, earlier, evaluateCandidates, nextActionFlipAt, type CandidateEvaluation, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 import { programSendTime } from './window.js'
 
@@ -166,19 +166,6 @@ async function hasExitEvent(ctx: RunnerContext, def: ProgramDefinition, run: Pro
     { projection: { _id: 1 } },
   )
   return !!ev
-}
-
-/** The earliest cooldown end after `at`, or null. */
-function earliestCooldown(works: CandidateWork[], at: Date): Date | null {
-  const times = works
-    .map((w) => w.st.cooldownUntil)
-    .filter((d): d is Date => !!d && d.getTime() > at.getTime())
-    .map((d) => d.getTime())
-  return times.length ? new Date(Math.min(...times)) : null
-}
-
-function earlier(a: Date | null, b: Date | null): Date | null {
-  return a && b ? (a.getTime() <= b.getTime() ? a : b) : (a ?? b)
 }
 
 /** Why a program cannot send this template, in the tick's words; null when it can. */

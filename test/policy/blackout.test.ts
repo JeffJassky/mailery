@@ -51,6 +51,12 @@ describe('blackoutEnd', () => {
     // Clocks fall back on 2026-11-01 in New York: midnight after the range is EST (UTC−5).
     expect(blackoutEnd(d('2026-10-31T12:00:00Z'), [{ from: '2026-10-31', to: '2026-11-01' }], 'America/New_York')).toEqual(d('2026-11-02T05:00:00Z'))
   })
+  it('a zone whose DST starts at local midnight still ends on the next local date (Santiago)', () => {
+    // Santiago springs forward 2026-09-06 00:00 → 01:00: local 00:00 does not exist.
+    const end = blackoutEnd(d('2026-09-05T14:00:00Z'), [{ from: '2026-09-05', to: '2026-09-05' }], 'America/Santiago')! // 10:00 local
+    expect(end).toEqual(d('2026-09-06T04:00:00Z')) // 01:00 -03 on the 6th
+    expect(blackoutEnd(end, [{ from: '2026-09-05', to: '2026-09-05' }], 'America/Santiago')).toBeNull()
+  })
   it('no ranges → null', () => {
     expect(blackoutEnd(d('2026-11-26T15:00:00Z'), undefined, 'UTC')).toBeNull()
     expect(blackoutEnd(d('2026-11-26T15:00:00Z'), [], 'UTC')).toBeNull()
@@ -114,6 +120,14 @@ describe('decideContactPolicy — blackout', () => {
       notBefore: d('2026-03-13T04:00:00Z'),
       reason: 'blackout',
     })
+  })
+  it('Santiago: a send at 23:30 local on the blackout day is deferred to the 6th local, after now', () => {
+    const now = d('2026-09-06T02:30:00Z') // 23:30 -03 on the 5th
+    const out = decideContactPolicy(input({ policy: only({ blackoutDates: [{ from: '2026-09-05', to: '2026-09-05' }] }), now, timezone: 'America/Santiago' }))
+    expect(out.action).toBe('defer')
+    if (out.action !== 'defer') return
+    expect(out.notBefore.getTime()).toBeGreaterThan(now.getTime())
+    expect(out.notBefore).toEqual(d('2026-09-06T04:00:00Z'))
   })
   it('a marketing block with only blackoutDates is a live policy', () => {
     expect(decideContactPolicy(input({ policy: { marketing: { blackoutDates: RANGE } } }))).toMatchObject({ action: 'defer' })
@@ -208,6 +222,51 @@ describe('dispatchSend during a blackout', () => {
     freezeAt('2026-11-28T15:00:00Z')
     const id = await contact()
     expect((await oneOff(id, 'mkt')).status).toBe('sent')
+  })
+})
+
+describe('dispatchSend — a blackout never turns into a drop after release', () => {
+  let H: TestMailerHarness
+  beforeAll(async () => {
+    H = await createTestMailer({
+      config: {
+        contactPolicy: {
+          marketing: { minGapHours: 24, deferral: { maxHours: 72 }, blackoutDates: [{ from: '2026-12-24', to: '2026-12-26' }], defaultTimezone: 'UTC' },
+        },
+      },
+    })
+    await H.seedTemplate({ slug: 'mkt', kind: 'marketing', subject: 'News' })
+  }, 120_000)
+  afterAll(async () => {
+    restoreClock()
+    if (H) await H.stop()
+  })
+  afterEach(() => restoreClock())
+
+  it('the second send is deferred by min_gap after the blackout, not dropped as policy_expired', async () => {
+    freezeAt('2026-12-24T10:00:00Z')
+    await H.seedContact({ externalId: 'bo1', email: 'bo1@example.com', tags: [], fields: {} })
+    const rows: ObjectId[] = []
+    for (const k of ['a', 'b']) {
+      await H.mailer.sendOneOff({ templateSlug: 'mkt', externalId: 'bo1', dedupeKey: `bo-${k}` })
+      rows.push((await H.mailer.collections.sends.findOne({ dedupeKey: `oneoff:bo-${k}` }))!._id as ObjectId)
+    }
+    for (const id of rows) await dispatchSend(id, H.ctx)
+    for (const id of rows) {
+      const s = (await H.mailer.collections.sends.findOne({ _id: id }))!
+      expect(s.status).toBe('deferred')
+      expect(s.notBefore).toEqual(d('2026-12-27T00:00:00Z'))
+    }
+    freezeAt('2026-12-27T00:00:00Z')
+    await dispatchSend(rows[0]!, H.ctx)
+    freezeAt('2026-12-27T00:30:00Z')
+    await dispatchSend(rows[1]!, H.ctx)
+    const first = (await H.mailer.collections.sends.findOne({ _id: rows[0] }))!
+    const second = (await H.mailer.collections.sends.findOne({ _id: rows[1] }))!
+    expect(first.status).toBe('sent')
+    expect(second.status).toBe('deferred')
+    expect(second.exitReason ?? null).toBeNull()
+    expect(second.policyDeferral).toMatchObject({ reason: 'min_gap' })
   })
 })
 

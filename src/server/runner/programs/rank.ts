@@ -169,3 +169,16 @@ export function nextActionFlipAt(works: CandidateWork[], facts: Facts, enteredAt
   }
   return best
 }
+
+/** The earliest cooldown end after `at`, or null. */
+export function earliestCooldown(works: CandidateWork[], at: Date): Date | null {
+  const times = works
+    .map((w) => w.st.cooldownUntil)
+    .filter((d): d is Date => !!d && d.getTime() > at.getTime())
+    .map((d) => d.getTime())
+  return times.length ? new Date(Math.min(...times)) : null
+}
+
+export function earlier(a: Date | null, b: Date | null): Date | null {
+  return a && b ? (a.getTime() <= b.getTime() ? a : b) : (a ?? b)
+}
