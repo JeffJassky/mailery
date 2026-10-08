@@ -31,6 +31,10 @@ export interface VarsResolveInfo {
    * Also available raw in templates as `{{event.*}}`.
    */
   eventProperties?: Record<string, unknown>
+  /** Program sends (0.21): which program, action and attempt this render is for. */
+  program?: { slug: string; actionId: string; attempt: number }
+  /** Program sends (0.21): the subject (account) the program is about. */
+  subjectId?: string
 }
 
 export interface VarsAdapter<S extends z.ZodType = z.ZodType> {

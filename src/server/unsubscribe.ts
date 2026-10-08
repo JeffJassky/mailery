@@ -14,6 +14,7 @@
 
 import type { Collections } from './models/index.js'
 import type { UnsubscribeInput } from '../shared/schemas.js'
+import type { CategoryScope, SuppressionScope } from '../shared/enums.js'
 import { sha256Hex } from './tokens.js'
 
 /**
@@ -32,10 +33,11 @@ import { sha256Hex } from './tokens.js'
 export async function clearUnsubscribeSuppressions(
   collections: Collections,
   email: string,
-  scope: 'marketing' | 'all',
+  scope: 'marketing' | 'all' | CategoryScope,
 ): Promise<number> {
-  const scopes: Array<'all' | 'marketing' | 'transactional'> =
-    scope === 'all' ? ['all', 'marketing', 'transactional'] : ['marketing', 'all']
+  // A category opt-in clears that category only (0.21).
+  const scopes: SuppressionScope[] =
+    scope === 'all' ? ['all', 'marketing', 'transactional'] : scope === 'marketing' ? ['marketing', 'all'] : [scope]
   const result = await collections.suppressions.deleteMany({
     email,
     reason: 'unsubscribed',

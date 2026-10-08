@@ -294,37 +294,84 @@ and no provider call, so the control denominator exists.
 
 ### 5.4 Tick
 
-Triggered by `nextTickAt` (scheduler scan, like flow waits) **or** by a host-fired
-fact-change event (`mailer.fire('Facts Changed', subjectId)` → immediate tick, bounded
-by `minGapDays`).
+Triggered by `nextTickAt` (scheduler scan, like flow waits), by entry (`trigger:
+'entry'`), by a host-fired `mailer.fire('Facts Changed', subjectId)` (wakes the run:
+`nextTickAt = now`, `trigger: 'facts_changed'`), or forced (`mailer.tickProgram`).
+
+Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
 
 ```
-1. lease run (findOneAndUpdate; skip if leased)            — no double ticks
-2. facts = resolve(subjectId); write snapshot
-3. exit check: exit.eventNames fired since enteredAt → exit run
-4. engagement: last_session_at / click / fact progress → reset unansweredAttempts
-5. sunset: apply stage (slow cadence / ask / suppress)
-6. session rule: last_session_at within suppressIfSessionWithinHours → reason session-suppressed
-7. for each action in priority order:
-     satisfied(facts)            → mark satisfied (completedAt once), blockedBy satisfied
-     requires any not satisfied  → blockedBy requires:<id>   (exhausted prereq still blocks)
-     !eligible(facts)            → blockedBy ineligible
-     cooldownUntil > now         → blockedBy cooldown
-     attempts >= attempts.length → mark exhausted; onExhaust=hold → stop loop, blockedBy hold for rest
-     else candidate
-8. chosen = first candidate; none → reason none-eligible
-     all actions satisfied/exhausted(skip) → status completed; fire exit.onComplete; stop
-9. arm = holdout → write holdout send row, reason holdout, no provider; else enqueue send
-10. send passes suppression → contact policy → provider. Attempt counter increments
-    ONLY when the send is accepted (status queued/sent). Deferred/dropped → unchanged.
-11. nextTickAt = max(lastAcceptedSendAt + minGapDays, next delivery window slot)
-12. release lease; write decision row
+ 0. program missing / unpublished / disabled → skipped 'disabled' (no decision row)
+    run.status ∉ {active, sunset}            → skipped 'inactive'
+ 1. lease: findOneAndUpdate where lease null or lease.until < now  → else skipped 'leased'
+    lease is released in `finally`, error or not
+ 2. facts = factsAdapter.resolve(subjectId)            (throws → propagate, lease released)
+ 3. exit: an exit.eventNames event for externalId=subjectId with occurredAt > run.entryEventAt
+       → status exited, exitReason 'event:<name>', cancel the run's queued/deferred/held
+         sends (exitReason run_inactive), reason 'exited'
+ 4. evaluate actions in priority order (desc; ties: definition order):
+      satisfied: completedAt already set, or `satisfied` holds now (sets completedAt once)
+                                                         → blockedBy 'satisfied'
+      a held action above is exhausted/cooling           → blockedBy 'hold'
+      a `requires` id not satisfied                      → blockedBy 'requires:<id>'
+      `eligible` false                                   → blockedBy 'ineligible'
+      status cooldown and cooldownUntil > now            → blockedBy 'cooldown'
+        (cooldownUntil ≤ now → re-open: attempts 0, ladder + 1, status pending)
+      attempts ≥ attempts.length → exhausted (or cooldown with cooldownUntil =
+        now + cooldownDays)                              → blockedBy 'exhausted' | 'cooldown'
+        onExhaust 'hold' arms `hold` for every lower action
+      else candidate, rank 1..n
+ 5. completion: every action satisfied, or exhausted with onExhaust 'skip' and no
+    cooldownDays → status completed, fire exit.onComplete once
+    (dedupeKey `program:<slug>:<subjectId>:complete`, properties {subjectType:'account',
+    programSlug}), reason 'completed'. Ineligible actions do NOT complete a run.
+ 6. engagement: an action newly satisfied this tick, `last_session_at` later than
+    (lastEngagementAt ?? enteredAt), or a non-bot click on any of the run's sends after
+    that instant → unansweredAttempts 0, sunsetStage 0, lastEngagementAt now,
+    status sunset → active. Opens never count.
+ 7. status sunset (no engagement)                        → reason 'sunset'
+ 8. chosen = first candidate; at sunset stage 2 with the ask not yet sent,
+    chosen = '$sunset-ask' (the ask template). No candidate → reason 'none-eligible'.
+ 9. run.inFlight still has a non-terminal send (queued/sending/deferred/held) → 'in-flight'
+    (terminal → clear inFlight; counting already happened in the dispatch hook)
+10. last_session_at within suppressIfSessionWithinHours  → 'session-suppressed'
+11. gap: (chosen attempt's minGapDays ?? policy.minGapDays) × (slowFactor if stage ≥ 1),
+    from run.lastSentAt                                   → 'min-gap'
+12. delivery window (policy.delivery; useContactTimezone reads the `timezone` fact)
+                                                          → 'delivery-window'
+13. recipients = factsAdapter.recipients(subjectId, rule), minus empty emails and
+    addresses suppressed for (marketing, program.category) → none: 'no-recipients'
+14. one send row per recipient, dedupeKey `program:<slug>:<subjectId>:<decisionId>:<externalId>`,
+    `program` subdoc, `category`, `timezoneHint` = `timezone` fact.
+      holdout arm → status 'holdout', no queue, simulated acceptance (below), reason 'holdout'
+      treatment   → status 'queued', enqueue, run.inFlight set, reason 'highest-rank'
+15. write run (nextTickAt strictly > now, lease cleared) and the decision row
 ```
+
+`nextTickAt` by outcome: sent/holdout → lastSentAt + effective gap; min-gap /
+delivery-window → the instant the constraint lifts; session-suppressed →
+last_session_at + window; in-flight → now + 1h; none-eligible / no-recipients →
+now + minGapDays; sunset → now + minGapDays × slowFactor; contact-policy deferral (via
+hook) → the send's notBefore.
+
+Dispatch hooks (`sendHooks.program`): the guard re-verifies (§5.6). `onOutcome`:
+`sent` → once per decision (guarded by `lastCountedDecisionId` and
+`send.program.counted`) increment the action's attempts, set lastSentAt (action and
+run), unansweredAttempts + 1, recompute sunsetStage, mark the ask sent (→ status sunset)
+for '$sunset-ask', set nextTickAt, decision.outcome sent. `deferred` → decision reason
+'policy-silence', outcome deferred + notBefore, run.nextTickAt = notBefore.
+`cancelled`/`suppressed`/`failed` → decision.outcome; clear inFlight when every send of
+the decision is terminal. None of those touch attempts.
 
 ### 5.5 Attempt accounting
-`attempts` increments on acceptance, never on evaluation. A tick that is suppressed by
-contact policy, quiet hours, session rule, sunset or holdout leaves action state
-unchanged. INVARIANT 18.
+`attempts` increments on acceptance, never on evaluation. A tick or send stopped by the
+contact policy (deferral or expiry), suppression, provider failure, the session rule or
+sunset leaves action state unchanged. INVARIANT 18.
+
+Holdout is a simulated acceptance: the holdout row stands in for the accepted send and
+the ladder advances exactly as in treatment. Without this the holdout arm would repeat
+attempt 1 forever and never reach later actions, and the two arms' decision logs would
+stop being comparable (§5.9 "decisions are made and logged identically").
 
 ### 5.6 Re-verify at dispatch
 Every Program send, including deferred ones, re-runs `satisfied` and `eligible` against
@@ -533,7 +580,56 @@ Programs (`subject: 'contact'`). Fallback actions. Digest/batching.
 
 ---
 
-## 14. Open items
+## 14. Contract refinements made in PR 1
+
+Decisions taken while writing the contract and tests (2026-10-07). Where these differ
+from earlier sections, these win.
+
+- **Tick order** is §5.4 above. Satisfaction is evaluated before engagement/sunset/
+  session so the checklist is fresh on every tick, including silent ones.
+- **Decision reasons** add `completed`, `exited`, `in-flight`, `min-gap`,
+  `delivery-window`, `no-recipients`. `policy-silence` is written by the dispatch hook.
+- **Holdout walks the ladder** (§5.5). The plan's "attempt unchanged under holdout"
+  test was replaced with "holdout and treatment produce identical decision sequences".
+- **Dedupe key** is per decision (`…:<decisionId>:<externalId>`), not per attempt: a
+  dropped or suppressed attempt is retried with the same attempt number.
+- **Program predicates** allow `fact`, `hasFiredEvent`, `notHasFiredEvent` (subject-
+  scoped), `all`, `any`, `not`. Contact-scoped leaves are rejected at publish and throw
+  at evaluation. Fact leaf semantics: `FactPredicate` in shared/types.ts.
+- **Publish validation** additionally requires every program template to be marketing
+  with `category === program.category` (else its unsubscribe link would not stop the
+  program), and `last_session_at` declared as a date when `suppressIfSessionWithinHours`
+  is set.
+- **Recipients** are filtered for suppression at tick time (no rows for opted-out
+  owners); dispatch re-checks as usual.
+- **Re-entry**: one run per (program, subject), ever, in 0.21.
+- **Template vars** for program sends are not added to `RESERVED_VAR_KEYS` (that would
+  break a host whose vars schema already has `facts` or `action` at init). On program
+  sends mailery's `program/action/attempt/facts` keys win over resolved vars.
+- **Categories**: `defaultOptIn: false` is rejected at init (opt-out categories only).
+  Token carries `c` beside signed `s: 'marketing'` so a rollback to 0.20 still opts out
+  (of all marketing). Malformed `c` → token rejected.
+- **Preferences API** is `mailer.getPreferences(email)` and
+  `mailer.setPreferences(email, { marketing?, categories? }, { source })`; the existing
+  `resubscribe({ externalId, scope })` and `unsubscribe(email, { scope })` accept
+  `category:<id>`. A category opt-out never changes `mailer_subscriptions.status`.
+- **Preference page form**: `POST /unsub/:token/preferences`, `action=save` with
+  `category=<id>` per checked box, or `action=unsubscribe-all`. With Mongo down: opt-outs
+  journaled; `unsubscribe-all` answers 200, `save` answers 503. Without categories
+  configured, `GET /unsub/:token` is byte-identical to 0.20.
+- **List-ID** is `<category>.<sender domain>` on categorised mail only.
+- **Contact policy** adds `defaultTimezone`; the tz chain is contact → `send.timezoneHint`
+  (Programs: the `timezone` fact) → `defaultTimezone` → UTC. `oneoff` is an origin;
+  default priority `transactional, flow, oneoff, broadcast, program`. Contention defers
+  by `minGapHours` (1h if unset). Expiry is measured from `queuedAt`. A dropped send is
+  `cancelled` with `exitReason: 'policy_expired'`.
+- **Send hooks** (`RunnerContext.sendHooks`) carry the re-verify guard and outcome
+  callbacks per origin; the guard runs after suppression and before the policy.
+- **Open items resolved**: `decisionRetentionDays` default null (keep); `Facts Changed`
+  carries no payload (always resolve); preference page reuses the unsub page shell;
+  admin name "Programs".
+
+## 15. Open items (historical)
 - `decisionRetentionDays` default: none vs 180. Decide at build.
 - Whether `Facts Changed` should carry a `facts` payload to skip a resolve.
 - Preference page styling: reuse the existing unsub page shell or new.

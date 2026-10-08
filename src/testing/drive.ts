@@ -21,6 +21,8 @@ import type { ObjectId } from 'mongodb'
 
 import { processNewlyFiredEventTriggers, sweepStrandedFlowRuns } from '../server/runner/index.js'
 import { dispatchSend } from '../server/runner/send.js'
+import { releaseDueDeferredSends } from '../server/runner/contact-policy.js'
+import { runProgramScheduler, tickProgramRun, type ProgramTickResult } from '../server/runner/programs/index.js'
 import type { RunnerContext } from '../server/runner/index.js'
 
 export interface DrainOptions {
@@ -68,6 +70,12 @@ export async function drain(ctx: RunnerContext, opts: DrainOptions = {}): Promis
 
     let didWork = false
 
+    // 0.21: Programs and contact-policy deferrals. Both are no-ops on a
+    // database with no enabled program and no deferred send.
+    const programs = await runProgramScheduler(ctx)
+    if (programs.ticked > 0) didWork = true
+    if ((await releaseDueDeferredSends(ctx)) > 0) didWork = true
+
     if (shouldDispatch) {
       const queued = await ctx.collections.sends
         .find({ status: 'queued' }, { projection: { _id: 1 } })
@@ -91,7 +99,14 @@ export async function drain(ctx: RunnerContext, opts: DrainOptions = {}): Promis
       status: 'active',
       nextActionAt: { $lte: new Date() },
     })
-    if (!didWork && due === 0) {
+    // A due program run with an enabled program is work the next round does.
+    const dueProgramRuns = programs.ticked > 0
+      ? await ctx.collections.programRuns.countDocuments({
+          status: { $in: ['active', 'sunset'] },
+          nextTickAt: { $lte: new Date() },
+        })
+      : 0
+    if (!didWork && due === 0 && dueProgramRuns === 0) {
       return { rounds, dispatched, errors, settled: true }
     }
   }
@@ -111,4 +126,20 @@ export async function dispatchQueued(ctx: RunnerContext): Promise<number> {
     await dispatchSend(row._id as ObjectId, ctx).catch(() => {})
   }
   return queued.length
+}
+
+/**
+ * Tick one subject's run in a program now (0.21), as the scheduler would.
+ * Throws when the subject has no run — enter it first (fire the entry event
+ * and `drain`, or `H.mailer.enterProgram`).
+ */
+export async function tickProgram(
+  ctx: RunnerContext,
+  slug: string,
+  subjectId: string,
+  opts: { now?: Date; trigger?: 'schedule' | 'entry' | 'facts_changed' | 'forced' } = {},
+): Promise<ProgramTickResult> {
+  const run = await ctx.collections.programRuns.findOne({ programSlug: slug, subjectId }, { projection: { _id: 1 } })
+  if (!run) throw new Error(`tickProgram: no run for program "${slug}" subject "${subjectId}"`)
+  return tickProgramRun(ctx, run._id as ObjectId, { now: opts.now ?? new Date(), trigger: opts.trigger ?? 'schedule' })
 }

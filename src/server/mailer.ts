@@ -12,7 +12,15 @@ import { ObjectId as ObjectIdCtor } from 'mongodb'
 import type {
   ContactAdapter,
   MailProvider,
+  PreferenceState,
+  PreferenceUpdate,
+  ProgramChecklistItem,
+  ProgramDefinition,
 } from '../shared/types.js'
+import type { ProgramDoc } from './models/index.js'
+import type { ProgramTickResult } from './runner/programs/index.js'
+import type { ProgramValidationIssue } from './programs/validate.js'
+import { notImplemented } from './not-implemented.js'
 import {
   abortAllFlowsInputSchema,
   abortFlowInputSchema,
@@ -33,7 +41,13 @@ import {
   type UnsubscribeInput,
   type UpsertSubscriptionInput,
 } from '../shared/schemas.js'
-import { resolveConfig, type MailerConfig, type ResolvedConfig } from './config.js'
+import {
+  assertValidCategories,
+  assertValidContactPolicy,
+  resolveConfig,
+  type MailerConfig,
+  type ResolvedConfig,
+} from './config.js'
 import {
   ensureIndexes,
   getCollections,
@@ -231,6 +245,8 @@ export class Mailer {
           + `Registered: ${registeredProviderNames(input.providers).join(', ') || '(none)'}`,
       )
     }
+    assertValidCategories(input.categories)
+    assertValidContactPolicy(input.contactPolicy)
     if (input.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
       assertNoReservedVarKeys(input.varsAdapter)
@@ -601,6 +617,93 @@ export class Mailer {
       })
     }
     return result
+  }
+
+  // -------------------------------------------------------------------------
+  // 0.21 — preferences (PR 2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Current opt-in state for an address across declared categories. Reads
+   * `mailer_suppressions` only; transactional is never listed.
+   */
+  async getPreferences(_email: string): Promise<PreferenceState> {
+    return notImplemented('Mailer.getPreferences', 'PR2')
+  }
+
+  /**
+   * Apply a preference update for an address (the preference page's save,
+   * also usable by a host settings screen). Audited as
+   * `contact.preferences`. See `server/preferences.ts`.
+   */
+  async setPreferences(
+    _email: string,
+    _update: PreferenceUpdate,
+    _opts: { source?: string } = {},
+  ): Promise<{ optedOut: string[]; optedIn: string[] }> {
+    return notImplemented('Mailer.setPreferences', 'PR2')
+  }
+
+  // -------------------------------------------------------------------------
+  // 0.21 — Programs (PR 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Save a program definition as the draft. Creates the program (disabled,
+   * version 0) when the slug is new. Structure is validated with
+   * `programDefinitionSchema`; semantic checks run at publish.
+   */
+  async saveProgramDraft(
+    _definition: ProgramDefinition,
+    _opts: { actor: string; notes?: string },
+  ): Promise<ProgramDoc> {
+    return notImplemented('Mailer.saveProgramDraft', 'PR4')
+  }
+
+  /**
+   * Validate the draft with `validateProgramDefinition` and publish it:
+   * `definition = draft.definition`, `version + 1`, snapshot to
+   * `mailer_program_versions`, draft cleared. Audited. Returns the issues
+   * instead of throwing when validation fails.
+   */
+  async publishProgram(
+    _slug: string,
+    _opts: { actor: string },
+  ): Promise<{ ok: true; version: number } | { ok: false; issues: ProgramValidationIssue[] }> {
+    return notImplemented('Mailer.publishProgram', 'PR4')
+  }
+
+  /** Enable or disable a published program. Enabling an unpublished program throws. Audited. */
+  async setProgramEnabled(_slug: string, _enabled: boolean, _opts: { actor: string }): Promise<void> {
+    return notImplemented('Mailer.setProgramEnabled', 'PR4')
+  }
+
+  /** Enter a subject into a program now, without an entry event (backfills, previews). */
+  async enterProgram(_slug: string, _subjectId: string): Promise<{ created: boolean }> {
+    return notImplemented('Mailer.enterProgram', 'PR4')
+  }
+
+  /**
+   * Run one tick for a subject's run now (admin "force tick", previews).
+   * Respects every rule a scheduled tick does — gap, policy, holdout — and
+   * writes a decision row with `trigger: 'forced'`.
+   */
+  async tickProgram(_slug: string, _subjectId: string): Promise<ProgramTickResult> {
+    return notImplemented('Mailer.tickProgram', 'PR4')
+  }
+
+  /** Same semantics as `abortFlow`, for one subject's Program run. Audited when it aborts something. */
+  async abortProgram(
+    _slug: string,
+    _subjectId: string,
+    _opts: { reason?: string } = {},
+  ): Promise<{ aborted: boolean; cancelledSends: number }> {
+    return notImplemented('Mailer.abortProgram', 'PR4')
+  }
+
+  /** Checklist for the host's in-app UI. Null when the subject has no run. §5.11. */
+  async getProgramState(_slug: string, _subjectId: string): Promise<ProgramChecklistItem[] | null> {
+    return notImplemented('Mailer.getProgramState', 'PR4')
   }
 
   private async abortActiveRuns(

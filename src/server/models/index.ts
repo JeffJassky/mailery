@@ -22,8 +22,13 @@ import type {
   BroadcastStatus,
   HealthStatus,
   FlowGoal,
+  SendExitReason,
+  ProgramRunStatus,
+  ProgramActionStatus,
+  ProgramArm,
+  ProgramDecisionReason,
 } from '../../shared/enums.js'
-import type { FlowStep, SegmentDefinition } from '../../shared/types.js'
+import type { FlowStep, SegmentDefinition, ProgramDefinition, Facts } from '../../shared/types.js'
 
 // ---------------------------------------------------------------------------
 // Document interfaces (per collection)
@@ -224,6 +229,13 @@ export interface TemplateDoc {
   tags: string[]
   /** Wire format for the body. Absent on documents written before 0.11. */
   bodyFormat?: TemplateBodyFormat
+  /**
+   * Marketing category (0.21) — a declared `MailerConfig.categories` id.
+   * Changes what the unsubscribe link and one-click POST opt out of: this
+   * category instead of all marketing. Rejected on transactional templates.
+   * Absent/null: uncategorised marketing, exactly as before 0.21.
+   */
+  category?: string | null
   trackOpens: boolean
   trackClicks: boolean
   stats: {
@@ -309,6 +321,49 @@ export interface SendDoc {
    * remains until then.
    */
   notBefore?: Date | null
+  /**
+   * Template category at enqueue (0.21). Informational — dispatch re-reads the
+   * template, so a category change between enqueue and dispatch applies.
+   */
+  category?: string | null
+  /** Why a never-sent row stopped (0.21). Set with `status: 'cancelled'`. */
+  exitReason?: SendExitReason | null
+  /**
+   * Contact-policy state (0.21), set when the policy deferred this send.
+   * `firstDeferredAt` never moves; `count` increments per deferral.
+   */
+  policyDeferral?: {
+    reason: ContactPolicyReason
+    firstDeferredAt: Date
+    count: number
+  } | null
+  /** IANA zone the contact policy falls back to when the contact has none (Programs: the `timezone` fact). */
+  timezoneHint?: string | null
+  /** Present on Program sends (0.21). See plans/15-programs.md §5.3. */
+  program?: SendProgramInfo | null
+}
+
+export type ContactPolicyReason = 'min_gap' | 'rolling_cap' | 'quiet_hours' | 'priority'
+
+export interface SendProgramInfo {
+  slug: string
+  subjectId: string
+  runId: ObjectId
+  /** `$sunset-ask` for the sunset ask email. */
+  actionId: string
+  actionVersion: number
+  /** 1-based position on the ladder. */
+  attempt: number
+  /** Ladder number for this action; increments when a cooldown re-opens it. */
+  ladder: number
+  /** Reserved; always 'default' in 0.21. */
+  variantId: 'default'
+  decisionId: ObjectId
+  /** Template `publishedAt` at decision time, as epoch ms. Null when never published. */
+  templateVersion: number | null
+  holdout: boolean
+  /** Set once the run's attempt counter has been advanced for this send's decision. */
+  counted?: boolean
 }
 
 export interface SuppressionDoc {
@@ -678,6 +733,162 @@ export interface ContactTagDoc {
 }
 
 // ---------------------------------------------------------------------------
+// Programs (0.21) — plans/15-programs.md §5.3
+// ---------------------------------------------------------------------------
+
+export interface ProgramDraft {
+  definition: ProgramDefinition
+  notes: string
+  lastModifiedBy: string
+  lastModifiedAt: Date
+}
+
+/**
+ * `mailer_programs`. The published definition lives in `definition`; edits go
+ * to `draft` until `publishProgram`. A program that was never published has
+ * `version: 0` and `definition: null` and never ticks.
+ */
+export interface ProgramDoc {
+  _id?: ObjectId
+  slug: string
+  /** Published definition; null until first publish. */
+  definition: ProgramDefinition | null
+  version: number
+  enabled: boolean
+  draft: ProgramDraft | null
+  /** Entry-scan watermark: events with `occurredAt` after this are considered. */
+  lastEntryScanAt: Date | null
+  /** Facts-Changed scan watermark. */
+  lastFactsScanAt: Date | null
+  publishedAt: Date | null
+  publishedBy: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+/** `mailer_program_versions`: immutable snapshot per publish. */
+export interface ProgramVersionDoc {
+  _id?: ObjectId
+  programId: ObjectId
+  slug: string
+  version: number
+  definition: ProgramDefinition
+  publishedAt: Date
+  publishedBy: string
+}
+
+export interface ProgramRunActionState {
+  status: ProgramActionStatus
+  /** Accepted sends on the current ladder (holdout: simulated acceptances). */
+  attempts: number
+  /** Starts at 1; increments when a cooldown re-opens the ladder. */
+  ladder: number
+  lastSentAt: Date | null
+  /** First time `satisfied` held. Never cleared. INVARIANT 21. */
+  completedAt: Date | null
+  exhaustedAt: Date | null
+  cooldownUntil: Date | null
+  /** Action version seen at the last tick. */
+  version: number
+}
+
+/** `mailer_program_runs`: one per (programSlug, subjectId). */
+export interface ProgramRunDoc {
+  _id?: ObjectId
+  programSlug: string
+  /** Program version at the last tick (runs always use the latest published definition). */
+  programVersion: number
+  subjectId: string
+  status: ProgramRunStatus
+  arm: ProgramArm
+  /** Keyed by action id. Actions added after entry appear on first evaluation. */
+  actions: Record<string, ProgramRunActionState>
+  /** Accepted sends since `lastEngagementAt`. Drives sunset. */
+  unansweredAttempts: number
+  lastEngagementAt: Date | null
+  sunsetStage: 0 | 1 | 2
+  /** True once the sunset ask send was accepted (or simulated in holdout). */
+  sunsetAskSent: boolean
+  /** Last accepted Program send to this subject (any action). Gap origin. */
+  lastSentAt: Date | null
+  /**
+   * The decision whose sends have not all reached a terminal status. While
+   * set, ticks are silent (`in-flight`).
+   */
+  inFlight: {
+    decisionId: ObjectId
+    actionId: string
+    attempt: number
+    sendIds: ObjectId[]
+    at: Date
+  } | null
+  /** Idempotency for the attempt counter: the last decision that advanced it. */
+  lastCountedDecisionId: ObjectId | null
+  nextTickAt: Date
+  lease: { until: Date; worker: string } | null
+  enteredAt: Date
+  /** `occurredAt` of the event that entered the run. Exit events must be later. */
+  entryEventAt: Date
+  completedAt: Date | null
+  exitedAt: Date | null
+  exitReason: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export type ProgramBlockedBy =
+  | null
+  | 'satisfied'
+  | 'ineligible'
+  | `requires:${string}`
+  | 'exhausted'
+  | 'cooldown'
+  | 'hold'
+
+export interface ProgramDecisionCandidate {
+  actionId: string
+  actionVersion: number
+  priority: number
+  eligible: boolean
+  satisfied: boolean
+  blockedBy: ProgramBlockedBy
+  /** 1-based rank among unblocked candidates. Absent when blocked. */
+  rank?: number
+}
+
+/** `mailer_program_decisions`: one per tick, silent ticks included. INVARIANT 23. */
+export interface ProgramDecisionDoc {
+  _id?: ObjectId
+  runId: ObjectId
+  programSlug: string
+  programVersion: number
+  subjectId: string
+  arm: ProgramArm
+  at: Date
+  /** sha256 of the stable-JSON facts snapshot. */
+  factsHash: string
+  /** Inline when the stable JSON is under 4 KB. */
+  facts: Facts | null
+  candidates: ProgramDecisionCandidate[]
+  chosen: string | null
+  attempt: number | null
+  reason: ProgramDecisionReason
+  ranker: { name: 'priority'; version: 1 }
+  selectionProb: 1
+  explore: false
+  sendIds: ObjectId[]
+  /** Filled by the dispatch hook as the decision's sends resolve. */
+  outcome: {
+    status: 'sent' | 'deferred' | 'cancelled' | 'suppressed' | 'failed' | 'holdout'
+    at: Date
+    exitReason?: SendExitReason | null
+    notBefore?: Date | null
+  } | null
+  /** What triggered the tick. */
+  trigger: 'schedule' | 'entry' | 'facts_changed' | 'forced'
+}
+
+// ---------------------------------------------------------------------------
 // Collection factory
 // ---------------------------------------------------------------------------
 
@@ -705,6 +916,10 @@ export interface Collections {
   dmarcFailures: Collection<DmarcFailureDoc>
   dmarcSourceTags: Collection<DmarcSourceTagDoc>
   mailTesterScores: Collection<MailTesterScoreDoc>
+  programs: Collection<ProgramDoc>
+  programVersions: Collection<ProgramVersionDoc>
+  programRuns: Collection<ProgramRunDoc>
+  programDecisions: Collection<ProgramDecisionDoc>
 }
 
 export function getCollections(db: Db, prefix = 'mailer_'): Collections {
@@ -732,6 +947,10 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
     dmarcFailures: db.collection<DmarcFailureDoc>(`${prefix}dmarc_failures`),
     dmarcSourceTags: db.collection<DmarcSourceTagDoc>(`${prefix}dmarc_source_tags`),
     mailTesterScores: db.collection<MailTesterScoreDoc>(`${prefix}mail_tester_scores`),
+    programs: db.collection<ProgramDoc>(`${prefix}programs`),
+    programVersions: db.collection<ProgramVersionDoc>(`${prefix}program_versions`),
+    programRuns: db.collection<ProgramRunDoc>(`${prefix}program_runs`),
+    programDecisions: db.collection<ProgramDecisionDoc>(`${prefix}program_decisions`),
   }
 }
 
@@ -788,6 +1007,10 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { providerMessageId: 1 }, sparse: true },
       { key: { status: 1, queuedAt: 1 } },
       { key: { status: 1, updatedAt: 1 } },
+      // 0.21: contact-policy history lookup and deferred-send release.
+      { key: { emailAtSend: 1, kind: 1, sentAt: -1 } },
+      { key: { status: 1, notBefore: 1 }, partialFilterExpression: { status: 'deferred' } },
+      { key: { 'program.runId': 1 }, partialFilterExpression: { 'program.runId': { $exists: true } } },
     ]),
     c.suppressions.createIndexes([
       { key: { email: 1, scope: 1 }, unique: true, partialFilterExpression: { email: { $type: 'string' } } },
@@ -862,6 +1085,17 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { templateSlug: 1, fetchedAt: -1 } },
       // TTL — Mongo auto-deletes expired scores so we never serve stale data.
       { key: { expiresAt: 1 }, expireAfterSeconds: 0 },
+    ]),
+    c.programs.createIndexes([{ key: { slug: 1 }, unique: true }]),
+    c.programVersions.createIndexes([{ key: { programId: 1, version: 1 }, unique: true }]),
+    c.programRuns.createIndexes([
+      { key: { programSlug: 1, subjectId: 1 }, unique: true },
+      { key: { status: 1, nextTickAt: 1 } },
+      { key: { programSlug: 1, status: 1 } },
+    ]),
+    c.programDecisions.createIndexes([
+      { key: { runId: 1, at: -1 } },
+      { key: { programSlug: 1, at: -1 } },
     ]),
   ])
 

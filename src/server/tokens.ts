@@ -19,6 +19,22 @@ export interface UnsubscribeTokenPayload {
   expiresAt: Date
   /** The send the link was rendered into (24 hex chars). Optional. */
   sendId?: string
+  /**
+   * Template category (0.21), carried as `c`. When present, `scope` is still
+   * signed as `marketing` — a 0.20 verifier (rollback) ignores `c` and
+   * unsubscribes all marketing, which is the safe direction — and
+   * `tokenScope()` resolves the effective scope to `category:<c>`.
+   */
+  category?: string
+}
+
+/**
+ * The scope a verified token opts out of: `category:<c>` when the token
+ * carries a category, else its signed `scope`. Old tokens (no `c`) therefore
+ * keep meaning what they meant.
+ */
+export function tokenScope(payload: UnsubscribeTokenPayload): SuppressionScope {
+  return payload.category ? `category:${payload.category}` : payload.scope
 }
 
 const SEND_ID_RE = /^[a-f0-9]{24}$/i

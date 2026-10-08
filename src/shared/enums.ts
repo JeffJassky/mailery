@@ -22,6 +22,20 @@ export type SendStatus =
    * broadcast re-queues it.
    */
   | 'held'
+  /**
+   * Held back by the contact policy (0.21). Carries `notBefore` and
+   * `policyDeferral`; re-dispatched once `notBefore` passes, when suppression,
+   * the originating system's guard and the policy all run again. A deferral
+   * that would land past `contactPolicy.marketing.deferral.maxHours` becomes
+   * `cancelled` with `exitReason: 'policy_expired'` instead.
+   */
+  | 'deferred'
+  /**
+   * A Program send to a subject in the holdout arm (0.21): the decision was
+   * made and logged exactly as for treatment, the row exists so the control
+   * group has a denominator, and no provider was ever called.
+   */
+  | 'holdout'
 
 export type TemplateKind = 'transactional' | 'marketing'
 
@@ -40,7 +54,84 @@ export type TemplateKind = 'transactional' | 'marketing'
 export type TemplateBodyFormat = 'multipart' | 'text_only'
 export const TEMPLATE_BODY_FORMATS: readonly TemplateBodyFormat[] = ['multipart', 'text_only'] as const
 
-export type SuppressionScope = 'all' | 'marketing' | 'transactional'
+/**
+ * What a suppression row blocks. See `blockingScopes` in
+ * `server/runner/suppression.ts` for the rule:
+ *
+ *   transactional             ← all, transactional
+ *   marketing, no category    ← all, marketing
+ *   marketing, category C     ← all, marketing, category:C
+ *
+ * `category:<id>` (0.21) blocks only marketing mail whose template carries
+ * that category. INVARIANT 22.
+ */
+export type SuppressionScope = 'all' | 'marketing' | 'transactional' | CategoryScope
+
+/** A category-scoped suppression, e.g. `category:lifecycle.onboarding`. */
+export type CategoryScope = `category:${string}`
+
+/**
+ * Where a send came from. Drives contact-policy priority and selects the
+ * per-origin hooks (`RunnerContext.sendHooks`) dispatch calls.
+ *
+ * `transactional` is never an origin — it is a template kind. A transactional
+ * template sent from a flow has origin `flow` and bypasses the contact policy
+ * because of its kind, not its origin.
+ */
+export type SendOrigin = 'flow' | 'broadcast' | 'program' | 'oneoff'
+
+/**
+ * Why a send that never reached the provider stopped (0.21). Set together
+ * with `status: 'cancelled'`.
+ *
+ *   policy_expired          — contact policy would have deferred it past
+ *                             `deferral.maxHours`; sending that late is stale
+ *   satisfied_before_send   — Program re-verify: the action is already done
+ *   ineligible_before_send  — Program re-verify: the action no longer applies
+ *   run_inactive            — Program re-verify: the run exited/completed
+ */
+export type SendExitReason =
+  | 'policy_expired'
+  | 'satisfied_before_send'
+  | 'ineligible_before_send'
+  | 'run_inactive'
+
+export type ProgramRunStatus = 'active' | 'completed' | 'exited' | 'sunset'
+
+export type ProgramActionStatus = 'pending' | 'satisfied' | 'exhausted' | 'cooldown'
+
+export type ProgramArm = 'treatment' | 'holdout'
+
+/**
+ * Why a tick ended the way it did. One per decision row.
+ *
+ *   highest-rank        — chose the top candidate and enqueued a send
+ *   none-eligible       — no candidate; run stays active and re-checks later
+ *   completed           — every action satisfied or permanently skipped
+ *   exited              — an exit event fired since entry
+ *   in-flight           — the previous decision's send has not resolved yet
+ *   min-gap             — a candidate exists but the program gap has not elapsed
+ *   delivery-window     — gap elapsed, waiting for the delivery window slot
+ *   no-recipients       — recipients resolved to nobody deliverable
+ *   session-suppressed  — the subject is in the app right now
+ *   sunset              — sunset stage 2 reached, or the run is sunset
+ *   holdout             — chose a candidate; holdout arm, no provider call
+ *   policy-silence      — written onto the decision by the dispatch hook when
+ *                         the contact policy deferred or dropped its send
+ */
+export type ProgramDecisionReason =
+  | 'highest-rank'
+  | 'none-eligible'
+  | 'completed'
+  | 'exited'
+  | 'in-flight'
+  | 'min-gap'
+  | 'delivery-window'
+  | 'no-recipients'
+  | 'session-suppressed'
+  | 'sunset'
+  | 'holdout'
+  | 'policy-silence'
 
 export type SuppressionReason =
   | 'unsubscribed'

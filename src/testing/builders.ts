@@ -12,8 +12,8 @@
  * event it should catch would never fire.
  */
 
-import type { TemplateDoc, FlowDoc, FlowTrigger } from '../server/models/index.js'
-import type { FlowStep, DeliveryWindow } from '../shared/types.js'
+import type { TemplateDoc, FlowDoc, FlowTrigger, ProgramDoc } from '../server/models/index.js'
+import type { FlowStep, DeliveryWindow, ProgramAction, ProgramDefinition } from '../shared/types.js'
 import type { TemplateKind, FlowGoal } from '../shared/enums.js'
 import { compileTemplate, derivePlaintext } from '../server/templates/render.js'
 
@@ -45,6 +45,8 @@ export interface TemplateSpec {
   variablesSchema?: TemplateDoc['variablesSchema']
   tags?: string[]
   bodyFormat?: TemplateDoc['bodyFormat']
+  /** Marketing category (0.21). Omit for an uncategorised template, as before. */
+  category?: string | null
   trackOpens?: boolean
   trackClicks?: boolean
   published?: boolean
@@ -82,6 +84,7 @@ export async function buildTemplate(spec: TemplateSpec): Promise<TemplateDoc> {
     draft: null,
     tags: spec.tags ?? [],
     bodyFormat: spec.bodyFormat ?? 'multipart',
+    ...(spec.category !== undefined ? { category: spec.category } : {}),
     trackOpens: spec.trackOpens ?? false,
     trackClicks: spec.trackClicks ?? false,
     stats: {
@@ -177,3 +180,85 @@ export const step = {
     return { type: 'fire_event', eventName, properties }
   },
 } as const
+
+// ---------------------------------------------------------------------------
+// Programs (0.21)
+// ---------------------------------------------------------------------------
+
+/**
+ * An action with defaults: one attempt sending `<id>-1`, `onExhaust: 'skip'`,
+ * version 1, priority 0, satisfied by fact `<id>_done`.
+ *
+ *   buildAction({ id: 'connect-shopify', priority: 100, attempts: 3 })
+ *   // attempts → templates connect-shopify-1, -2, -3
+ */
+export type ActionSpec = Partial<Omit<ProgramAction, 'attempts'>> & {
+  id: string
+  /** A number expands to that many attempts with templates `<id>-1..n`. */
+  attempts?: number | ProgramAction['attempts']
+}
+
+export function buildAction(spec: ActionSpec): ProgramAction {
+  const { attempts: attemptsSpec, ...rest } = spec
+  const attempts: ProgramAction['attempts'] =
+    Array.isArray(attemptsSpec)
+      ? attemptsSpec
+      : Array.from({ length: attemptsSpec ?? 1 }, (_, i) => ({
+          deliveries: [{ channel: 'email' as const, templateSlug: `${spec.id}-${i + 1}` }],
+        }))
+  return {
+    version: 1,
+    title: spec.id,
+    priority: 0,
+    satisfied: { fact: `${spec.id.replace(/-/g, '_')}_done` },
+    onExhaust: 'skip',
+    ...rest,
+    attempts,
+  }
+}
+
+export type ProgramSpec = Partial<Omit<ProgramDefinition, 'actions' | 'policy'>> & {
+  slug: string
+  actions: Array<ActionSpec | ProgramAction>
+  policy?: Partial<ProgramDefinition['policy']>
+}
+
+/** A definition with defaults: category `lifecycle.onboarding`, owners, entry `Created`, 3-day gap. */
+export function buildProgram(spec: ProgramSpec): ProgramDefinition {
+  const { actions, policy, ...rest } = spec
+  return {
+    name: spec.slug,
+    category: 'lifecycle.onboarding',
+    subject: 'account',
+    recipients: 'owners',
+    entry: { eventName: 'Created' },
+    exit: {},
+    ...rest,
+    policy: { minGapDays: 3, ...(policy ?? {}) },
+    actions: actions.map((a) => ('satisfied' in a && Array.isArray(a.attempts) && a.version !== undefined
+      ? (a as ProgramAction)
+      : buildAction(a as ActionSpec))),
+  }
+}
+
+/** A published, enabled `mailer_programs` document — bypasses publish validation on purpose. */
+export function buildProgramDoc(
+  definition: ProgramDefinition,
+  opts: { enabled?: boolean; version?: number; createdAt?: Date } = {},
+): ProgramDoc {
+  const now = new Date()
+  const createdAt = opts.createdAt ?? new Date(now.getTime() - BACKDATE_MS)
+  return {
+    slug: definition.slug,
+    definition,
+    version: opts.version ?? 1,
+    enabled: opts.enabled ?? true,
+    draft: null,
+    lastEntryScanAt: null,
+    lastFactsScanAt: null,
+    publishedAt: createdAt,
+    publishedBy: 'test',
+    createdAt,
+    updatedAt: createdAt,
+  }
+}

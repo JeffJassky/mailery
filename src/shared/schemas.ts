@@ -49,7 +49,30 @@ export const upsertSubscriptionSchema = z.object({
 })
 export type UpsertSubscriptionInput = z.infer<typeof upsertSubscriptionSchema>
 
-export const unsubscribeScopeSchema = z.enum(['all', 'marketing', 'transactional'])
+/**
+ * A category id (0.21): lowercase dotted/kebab slug, ≤ 64 chars. Mirrors
+ * `CATEGORY_ID_RE` in server/config.ts (kept here so the client can share it).
+ */
+export const categoryIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(
+    /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*$/,
+    'must be a lowercase dotted slug, e.g. lifecycle.onboarding',
+  )
+
+/** `category:<id>` suppression scope (0.21). */
+export const categoryScopeSchema = z
+  .string()
+  .regex(/^category:/)
+  .refine((s) => categoryIdSchema.safeParse(s.slice('category:'.length)).success, 'invalid category id')
+  .transform((s) => s as `category:${string}`)
+
+export const unsubscribeScopeSchema = z.union([
+  z.enum(['all', 'marketing', 'transactional']),
+  categoryScopeSchema,
+])
 export const unsubscribeReasonSchema = z.enum([
   'user_request',
   'hard_bounce',
@@ -75,8 +98,11 @@ export type UnsubscribeInput = z.infer<typeof unsubscribeInputSchema>
  */
 export const resubscribeInputSchema = z.object({
   externalId: externalIdSchema,
-  /** `marketing` clears marketing + all-scope opt-outs; `all` clears every scope. */
-  scope: z.enum(['marketing', 'all']).default('marketing'),
+  /**
+   * `marketing` clears marketing + all-scope opt-outs; `all` clears every
+   * scope; `category:<id>` (0.21) clears that category's opt-out only.
+   */
+  scope: z.union([z.enum(['marketing', 'all']), categoryScopeSchema]).default('marketing'),
   source: z.string().min(1).max(256),
   consentTimestamp: z.date().optional(),
   consentIp: z.string().optional(),
@@ -321,3 +347,123 @@ export const predicateSchema: z.ZodType<unknown> = z.lazy(() =>
     z.object({ not: predicateSchema }),
   ]),
 )
+
+// ---------------------------------------------------------------------------
+// 0.21 — preferences
+// ---------------------------------------------------------------------------
+
+export const preferenceUpdateSchema = z.object({
+  marketing: z.boolean().optional(),
+  categories: z.record(categoryIdSchema, z.boolean()).optional(),
+})
+
+// ---------------------------------------------------------------------------
+// 0.21 — Programs (structure only; semantic checks in server/programs/validate.ts)
+// ---------------------------------------------------------------------------
+
+const factValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()])
+
+/**
+ * Predicates a Program may use. Narrower than `predicateSchema`: a program's
+ * subject is an account, so contact-scoped leaves (tags, fields, opens,
+ * subscription status, trigger properties) have nothing to read and are
+ * rejected here rather than evaluating to a silent `false` at tick time.
+ */
+export const programPredicateSchema: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z
+      .object({
+        fact: z.string().min(1).max(128),
+        equals: factValueSchema.optional(),
+        gte: z.union([z.number(), z.string()]).optional(),
+        lte: z.union([z.number(), z.string()]).optional(),
+        in: z.array(factValueSchema).max(100).optional(),
+        exists: z.boolean().optional(),
+      })
+      .strict(),
+    z.object({ hasFiredEvent: z.string().min(1), withinDays: z.number().int().positive().optional() }).strict(),
+    z.object({ notHasFiredEvent: z.string().min(1), withinDays: z.number().int().positive().optional() }).strict(),
+    z.object({ all: z.array(programPredicateSchema).min(1) }).strict(),
+    z.object({ any: z.array(programPredicateSchema).min(1) }).strict(),
+    z.object({ not: programPredicateSchema }).strict(),
+  ]),
+)
+
+const deliveryWindowSchema = z
+  .object({
+    weekdaysOnly: z.boolean().optional(),
+    timeOfDay: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:mm').optional(),
+    useContactTimezone: z.boolean().optional(),
+    timezone: z.string().optional(),
+  })
+  .strict()
+
+export const programAttemptSchema = z
+  .object({
+    deliveries: z
+      .array(z.object({ channel: z.literal('email'), templateSlug: slugSchema }).strict())
+      .length(1, 'exactly one delivery per attempt in 0.21'),
+    minGapDays: z.number().positive().max(365).optional(),
+  })
+  .strict()
+
+export const programActionSchema = z
+  .object({
+    id: slugSchema,
+    version: z.number().int().min(1),
+    title: z.string().min(1).max(200),
+    cta: z.object({ label: z.string().min(1).max(100), url: z.string().url() }).strict().optional(),
+    priority: z.number().finite(),
+    group: z.string().max(64).optional(),
+    tags: z.array(z.string().max(64)).max(20).optional(),
+    value: z.number().finite().optional(),
+    eligible: programPredicateSchema.optional(),
+    satisfied: programPredicateSchema,
+    requires: z.array(slugSchema).max(20).optional(),
+    attempts: z.array(programAttemptSchema).min(1, 'at least one attempt').max(10),
+    onExhaust: z.enum(['skip', 'hold']),
+    cooldownDays: z.number().positive().max(3650).optional(),
+  })
+  .strict()
+
+export const recipientRuleSchema = z.union([
+  z.enum(['owners', 'admins', 'all_members']),
+  z.object({ adapter: z.string().min(1).max(64) }).strict(),
+])
+
+export const programDefinitionSchema = z
+  .object({
+    slug: slugSchema,
+    name: z.string().min(1).max(200),
+    description: z.string().max(2000).optional(),
+    category: categoryIdSchema,
+    subject: z.literal('account'),
+    recipients: recipientRuleSchema,
+    entry: z.object({ eventName: z.string().min(1).max(128) }).strict(),
+    exit: z
+      .object({
+        eventNames: z.array(z.string().min(1).max(128)).max(20).optional(),
+        onComplete: z.object({ fireEvent: z.string().min(1).max(128) }).strict().optional(),
+      })
+      .strict(),
+    policy: z
+      .object({
+        minGapDays: z.number().positive().max(365),
+        delivery: deliveryWindowSchema.optional(),
+        suppressIfSessionWithinHours: z.number().positive().max(24 * 365).optional(),
+        sunset: z
+          .object({
+            slowAfter: z.number().int().min(1),
+            slowFactor: z.number().min(1).max(100),
+            askAfter: z.number().int().min(1),
+            askTemplateSlug: slugSchema,
+          })
+          .strict()
+          .refine((x) => x.askAfter > x.slowAfter, { message: 'sunset.askAfter must be greater than slowAfter' })
+          .optional(),
+      })
+      .strict(),
+    holdoutPct: z.number().min(0).max(100).optional(),
+    actions: z.array(programActionSchema).min(1).max(200),
+  })
+  .strict()

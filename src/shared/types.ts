@@ -120,6 +120,222 @@ export type Predicate =
   | { all: Predicate[] }
   | { any: Predicate[] }
   | { not: Predicate }
+  /**
+   * Program predicates only (0.21): tests one host fact from the tick's facts
+   * snapshot. Every operator present must hold (AND). With no operator the
+   * leaf is a truthiness test. Dates compare by instant; `gte`/`lte` accept a
+   * number, or an ISO string / Date for date facts. `exists: true` means
+   * neither `undefined` nor `null`. Rejected in flow steps at publish.
+   */
+  | FactPredicate
+
+export interface FactPredicate {
+  fact: string
+  equals?: string | number | boolean | null
+  gte?: number | string
+  lte?: number | string
+  in?: Array<string | number | boolean | null>
+  exists?: boolean
+}
+
+// Categories (0.21) -----------------------------------------------------------
+
+/**
+ * A named stream of marketing email a recipient can opt out of on its own.
+ * Declared in `MailerConfig.categories`; config is the source of truth.
+ *
+ * `id` is a dotted slug (`lifecycle.onboarding`). It appears in suppression
+ * scopes (`category:<id>`), unsubscribe tokens and the `List-ID` header, so it
+ * is permanent once mail carrying it has gone out.
+ *
+ * `defaultOptIn` is reserved: 0.21 supports opt-out categories only (every
+ * recipient starts subscribed). `false` is rejected at `Mailer.init`.
+ */
+export interface CategoryDef {
+  id: string
+  label: string
+  description?: string
+  defaultOptIn?: true
+}
+
+/** `mailer.getPreferences(email)`. Transactional mail is never listed. */
+export interface PreferenceState {
+  /** False when an `all` or `marketing` suppression is live for the address. */
+  marketing: boolean
+  /** One entry per declared category. False when marketing is false. */
+  categories: Record<string, boolean>
+}
+
+/** `mailer.setPreferences(email, prefs)` — the preference page's save. */
+export interface PreferenceUpdate {
+  /** false writes a `marketing` opt-out and ignores `categories`. */
+  marketing?: boolean
+  /** Per category: false writes `category:<id>`, true clears it. Unknown ids are rejected. */
+  categories?: Record<string, boolean>
+}
+
+// Contact policy (0.21) -------------------------------------------------------
+
+/**
+ * Cross-system send rules, applied at dispatch to every marketing send
+ * (flows, broadcasts, programs, one-offs). Transactional mail bypasses it.
+ * Unset → the stage is a no-op.
+ *
+ * Windows are rolling, measured from `sentAt` of earlier marketing sends to
+ * the same address (`emailAtSend`). Quiet hours are evaluated in the first
+ * of: contact.timezone → send.timezoneHint → `defaultTimezone` → UTC.
+ */
+export interface ContactPolicy {
+  marketing?: {
+    /** Minimum hours between two marketing sends to one recipient. */
+    minGapHours?: number
+    /** At most `count` marketing sends in any rolling `days`-day window. */
+    maxPerRollingDays?: { days: number; count: number }
+    /** Local wall-clock 'HH:mm'. `start > end` spans midnight. */
+    quietHours?: { start: string; end: string }
+    /** IANA zone used when neither the contact nor the send names one. */
+    defaultTimezone?: string
+    /**
+     * A send whose earliest allowed time is more than `maxHours` after it was
+     * queued is dropped (`exitReason: 'policy_expired'`) rather than sent
+     * stale. Default 72.
+     */
+    deferral?: { maxHours: number }
+  }
+  /**
+   * Highest priority first. When a lower-priority send meets a pending
+   * higher-priority send for the same recipient that is due now, the lower one
+   * defers by `minGapHours`. Origins not listed rank below every listed one.
+   * Default `['transactional', 'flow', 'oneoff', 'broadcast', 'program']`.
+   */
+  sourcePriority?: Array<'transactional' | 'flow' | 'broadcast' | 'program' | 'oneoff'>
+}
+
+// Programs (0.21) -------------------------------------------------------------
+
+/** One piece of host state about a subject. Never computed from `mailer_*`. INVARIANT 20. */
+export type FactValue = string | number | boolean | Date | null
+export type Facts = Record<string, FactValue | undefined>
+
+export interface FactDecl {
+  type: 'boolean' | 'number' | 'string' | 'date' | 'enum'
+  /** Required for `enum`. */
+  values?: string[]
+  description?: string
+}
+
+export type RecipientRule = 'owners' | 'admins' | 'all_members' | { adapter: string }
+
+/**
+ * Host adapter that answers "what is true about this subject right now" and
+ * "who should hear about it". Required when any Program is enabled.
+ *
+ * Reserved fact name: `last_session_at` (date) — read by
+ * `policy.suppressIfSessionWithinHours` and by the sunset engagement check.
+ * Optional fact `timezone` (string, IANA) — copied to `send.timezoneHint`.
+ */
+export interface FactsAdapter {
+  declare: Record<string, FactDecl>
+  resolve(subjectId: string): Promise<Facts>
+  /** Contacts to email for a subject. Must return contacts the ContactAdapter also knows. */
+  recipients(subjectId: string, rule: RecipientRule): Promise<Contact[]>
+}
+
+export interface ProgramAttempt {
+  /** Exactly one in 0.21. The array shape is reserved for multi-channel attempts. */
+  deliveries: Array<{ channel: 'email'; templateSlug: string }>
+  /** Overrides `policy.minGapDays` for the gap before this attempt. */
+  minGapDays?: number
+}
+
+export interface ProgramAction {
+  /** Stable, never reused. kebab-case. */
+  id: string
+  /** Bump when eligible/satisfied/copy semantics change. Logged on decisions and sends. */
+  version: number
+  /** Checklist label; `{{action.title}}` in templates. */
+  title: string
+  cta?: { label: string; url: string }
+  /** Higher wins. Ties break by position in `actions`. */
+  priority: number
+  /** Reserved ranker inputs, unused in 0.21. */
+  group?: string
+  tags?: string[]
+  value?: number
+  /** Relevant now? Default: always. */
+  eligible?: Predicate
+  /** Done? State, not event. */
+  satisfied: Predicate
+  /** Action ids that must be satisfied first. DAG, validated acyclic at publish. */
+  requires?: string[]
+  /** Ordered ladder: attempt 1 asks, 2 reminds, last is last call. ≥ 1. */
+  attempts: ProgramAttempt[]
+  /** `hold`: while exhausted (or cooling down), nothing lower-priority may send. */
+  onExhaust: 'skip' | 'hold'
+  /** After exhaustion, wait this long and then start a fresh ladder. */
+  cooldownDays?: number
+}
+
+export interface ProgramSunset {
+  /** unansweredAttempts at which the gap is multiplied by `slowFactor`. */
+  slowAfter: number
+  slowFactor: number
+  /** unansweredAttempts at which `askTemplateSlug` is sent once, then the run goes `sunset`. */
+  askAfter: number
+  askTemplateSlug: string
+}
+
+export interface ProgramPolicy {
+  /** Days between two Program sends to the same subject. */
+  minGapDays: number
+  delivery?: DeliveryWindow
+  /** `last_session_at` within this many hours → silent tick (`session-suppressed`). */
+  suppressIfSessionWithinHours?: number
+  sunset?: ProgramSunset
+}
+
+/**
+ * A next-best-action program. See plans/15-programs.md §5.
+ *
+ * Program predicates (`eligible`, `satisfied`) may use `fact`,
+ * `hasFiredEvent`, `notHasFiredEvent` (evaluated with `externalId =
+ * subjectId`), `all`, `any`, `not`. Contact-scoped leaves (tags, fields,
+ * opens) have no subject to read from and are rejected at publish.
+ */
+export interface ProgramDefinition {
+  slug: string
+  name: string
+  description?: string
+  /** A declared category. Every template the program sends must carry it. */
+  category: string
+  /** 0.21: always 'account'. */
+  subject: 'account'
+  recipients: RecipientRule
+  /** Event (fired with `externalId = subjectId`) that enters a subject. */
+  entry: { eventName: string }
+  exit: {
+    /** Any of these fired for the subject after entry → run exits. */
+    eventNames?: string[]
+    /** Fired once (externalId = subjectId) when the run completes. */
+    onComplete?: { fireEvent: string }
+  }
+  policy: ProgramPolicy
+  /** 0–100. Deterministic per (slug, subjectId); fixed for the run's life. */
+  holdoutPct?: number
+  actions: ProgramAction[]
+}
+
+/** One row of `getProgramState` — what the host's in-app checklist renders. */
+export interface ProgramChecklistItem {
+  actionId: string
+  title: string
+  cta: { label: string; url: string } | null
+  status: 'pending' | 'satisfied' | 'exhausted' | 'cooldown'
+  /** The action the next send would be about. At most one item. */
+  isNext: boolean
+  attempts: number
+  completedAt: Date | null
+}
 
 // Segments --------------------------------------------------------------------
 

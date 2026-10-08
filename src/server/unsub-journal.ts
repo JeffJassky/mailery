@@ -49,11 +49,13 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 import { unsubscribeInputSchema, type UnsubscribeInput } from '../shared/schemas.js'
+import type { SuppressionScope } from '../shared/enums.js'
 
 /** One line of the journal. */
 export interface PendingUnsubEntry {
   email: string
-  scope: 'all' | 'marketing' | 'transactional'
+  /** 0.21: may be `category:<id>` — a one-click on categorised mail journals its category. */
+  scope: SuppressionScope
   /** Epoch ms the unsubscribe was received. */
   at: number
   /**

@@ -7,6 +7,25 @@
 import type { Collections } from '../models/index.js'
 import type { SuppressionScope, TemplateKind } from '../../shared/enums.js'
 import { sha256Hex } from '../tokens.js'
+import { notImplemented } from '../not-implemented.js'
+
+/**
+ * The scopes that block a send (0.21 rule, INVARIANT 4 extended by 22):
+ *
+ *   transactional             → ['all', 'transactional']
+ *   marketing, no category    → ['all', 'marketing']
+ *   marketing, category C     → ['all', 'marketing', 'category:C']
+ *
+ * A category on a transactional template is ignored (publish rejects it, so
+ * it only reaches here from a hand-edited document).
+ *
+ * `isSuppressed` and `suppressedEmails` take the template's category as an
+ * optional last argument and use exactly this list — with no category they
+ * behave as in 0.20.
+ */
+export function blockingScopes(_kind: TemplateKind, _category?: string | null): SuppressionScope[] {
+  return notImplemented('blockingScopes', 'PR2')
+}
 
 export interface SuppressionResult {
   suppressed: boolean
@@ -23,6 +42,8 @@ export async function isSuppressed(
   collections: Collections,
   email: string,
   kind: TemplateKind,
+  /** Template category (0.21). PR 2 makes this select `blockingScopes(kind, category)`. */
+  _category?: string | null,
 ): Promise<SuppressionResult> {
   const normalized = email.toLowerCase()
   const allowed = SCOPES_BY_KIND[kind]
@@ -57,6 +78,8 @@ export async function suppressedEmails(
   collections: Collections,
   emails: string[],
   kind: TemplateKind,
+  /** Template category (0.21). See `isSuppressed`. */
+  _category?: string | null,
 ): Promise<Set<string>> {
   const normalized = [...new Set(emails.map((e) => e.toLowerCase()))]
   if (normalized.length === 0) return new Set()
