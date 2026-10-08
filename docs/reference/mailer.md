@@ -111,14 +111,14 @@ Creates / updates the `mailer_subscriptions` row for a contact. If `requireDoubl
 resubscribe(input: {
   externalId: string
   source: string
-  scope?: 'marketing' | 'all'   // default 'marketing'
+  scope?: 'marketing' | 'all' | `category:${string}`   // default 'marketing'
   consentTimestamp?: Date
   consentIp?: string
   consentUserAgent?: string
 }): Promise<{ removedSuppressions: number }>
 ```
 
-An explicit opt-in from a contact who unsubscribed before. Deletes the `reason: 'unsubscribed'` suppression rows for the contact's address (`marketing` clears the `marketing` and `all` scopes; `all` clears every scope), then calls `upsertSubscription`. Bounce, complaint, manual, list-cleaning and GDPR rows are left alone — a re-subscribed address that hard-bounced still gets nothing. Audit-logged as `contact.resubscribe` when it removed something.
+An explicit opt-in from a contact who unsubscribed before. Deletes the `reason: 'unsubscribed'` suppression rows for the contact's address (`marketing` clears the `marketing` and `all` scopes; `all` clears every scope; `category:<id>` clears that category only), then calls `upsertSubscription`. Bounce, complaint, manual, list-cleaning and GDPR rows are left alone — a re-subscribed address that hard-bounced still gets nothing. Audit-logged as `contact.resubscribe` when it removed something.
 
 Use this, not `upsertSubscription`, wherever a person clicks "subscribe" again: `upsertSubscription` flips the status but the suppression check runs at enqueue time regardless, so on its own it produces a contact that reads *subscribed* while every send comes back `suppressed`. It is a separate method on purpose — a backfill that re-upserts every account must not resurrect addresses that opted out.
 
@@ -126,14 +126,34 @@ Use this, not `upsertSubscription`, wherever a person clicks "subscribe" again: 
 
 ```ts
 unsubscribe(email: string, opts: {
-  scope: 'all' | 'marketing' | 'transactional'
+  scope: 'all' | 'marketing' | 'transactional' | `category:${string}`
   reason?: 'user_request' | 'hard_bounce' | 'complaint' | 'manual' | 'gdpr_forget' | 'list_cleaning'
   source?: string
   notes?: string
 }): Promise<void>
 ```
 
-Records an unsubscribe + adds a suppression row. Same path as the public `/m/unsub/:token` endpoint.
+Records an unsubscribe + adds a suppression row. Same path as the public `/m/unsub/:token` endpoint. A `category:<id>` scope writes the suppression row only and leaves the subscription status alone; it is accepted even for an id no longer declared, because an opt-out is never refused.
+
+### `getPreferences(email)`
+
+```ts
+getPreferences(email: string): Promise<{ marketing: boolean; categories: Record<string, boolean> }>
+```
+
+The address's current opt-in state across the categories declared in config (case-insensitive, hashed GDPR rows count). `marketing` is false when an `all` or `marketing` suppression is live, and then every category reads false. Transactional is never listed.
+
+### `setPreferences(email, update, opts?)`
+
+```ts
+setPreferences(
+  email: string,
+  update: { marketing?: boolean; categories?: Record<string, boolean> },
+  opts?: { source?: string },   // default 'api'
+): Promise<{ optedOut: string[]; optedIn: string[] }>
+```
+
+The preference page's save, for a host settings screen. `marketing: false` writes a `marketing` opt-out and ignores `categories`. `marketing: true` clears `marketing`/`all` opt-outs written by unsubscribes. Per category, `false` writes `category:<id>` and `true` deletes it. Only `reason: 'unsubscribed'` rows are ever deleted. Undeclared ids throw before any write. Audit-logged as `contact.preferences`.
 
 ## Suppression
 

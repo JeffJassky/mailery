@@ -43,6 +43,8 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
   const [fromName, setFromName] = React.useState<string>(tpl.draft?.fromName ?? tpl.fromName ?? '')
   const [fromEmail, setFromEmail] = React.useState<string>(tpl.draft?.fromEmail ?? tpl.fromEmail ?? '')
   const [replyTo, setReplyTo] = React.useState<string>(tpl.draft?.replyTo ?? tpl.replyTo ?? '')
+  const { data: categories } = useLive(() => api.categories())
+  const [category, setCategory] = React.useState<string>(tpl.category ?? '')
   // Wire format lives on the template, not the draft — it describes how the
   // body is transmitted, not what the body says.
   const [bodyFormat, setBodyFormat] = React.useState<string>(tpl.bodyFormat ?? 'multipart')
@@ -243,6 +245,9 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
       fromEmail: fromEmail || undefined,
       replyTo: replyTo || undefined,
       bodyFormat,
+      // Only sent when categories are declared, so a template categorised in
+      // code is never cleared by an editor that cannot show the list.
+      ...((categories ?? []).length > 0 && tplKind === 'marketing' ? { category: category || null } : {}),
     })
   }
 
@@ -405,6 +410,22 @@ function Body({ tpl, slug, refetch }: { tpl: any; slug: string; refetch: () => v
                   onChange={(e) => { setReplyTo(e.target.value); setDirty(true) }}
                 />
               </div>
+              {tplKind === 'marketing' && (categories ?? []).length > 0 && (
+                <div className="field">
+                  <label className="field-label">Category</label>
+                  <select
+                    className="select"
+                    value={category}
+                    onChange={(e) => { setCategory(e.target.value); setDirty(true) }}
+                  >
+                    <option value="">(none — all marketing)</option>
+                    {(categories ?? []).map((c) => <option key={c.id} value={c.id}>{c.label} · {c.id}</option>)}
+                  </select>
+                  <div className="text-xs subtle" style={{ marginTop: 4 }}>
+                    The unsubscribe link in this email opts the recipient out of this category only.
+                  </div>
+                </div>
+              )}
               <div className="field" style={{ marginBottom: 0 }}>
                 <label className="field-label">Body format</label>
                 <select

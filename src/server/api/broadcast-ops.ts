@@ -275,6 +275,7 @@ export async function countRecipients(
     },
     tpl.kind,
     mailer.getRunnerContext(),
+    tpl.category,
   )
   // Held sends are rows already (a paused broadcast's queued sends); resuming
   // re-queues them on top of `recipientCount` new ones.

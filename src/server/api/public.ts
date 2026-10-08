@@ -28,6 +28,7 @@ import { ObjectId } from 'mongodb'
 import {
   sha256Hex,
   verifyUnsubscribeToken,
+  tokenScope,
   verifyDoiToken,
   verifyTrackingToken,
   type TrackingScope,
@@ -35,6 +36,8 @@ import {
 } from '../tokens.js'
 import type { Mailer } from '../mailer.js'
 import type { SendDoc } from '../models/index.js'
+import type { CategoryDef, PreferenceState } from '../../shared/types.js'
+import type { SuppressionScope } from '../../shared/enums.js'
 import { resolveProvider } from '../provider-lookup.js'
 import { appendPendingUnsub } from '../unsub-journal.js'
 import { attributeUnsubscribeToSend } from '../runner/broadcast-control.js'
@@ -286,15 +289,24 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // -------------------------------------------------------------------------
   // GET + POST /unsub/:token
   // -------------------------------------------------------------------------
-  router.get('/unsub/:token', wrap(logger, (req: Request, res: Response) => {
+  const categories: CategoryDef[] = mailer.config.categories ?? []
+
+  router.get('/unsub/:token', wrap(logger, async (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
     if (!decoded) return sendUnsubError(res, 'Invalid or expired link.')
+
+    // 0.21: with categories declared the link opens the preference page.
+    if (categories.length > 0) {
+      const prefs = await mailer.getPreferences(decoded.email)
+      const action = req.originalUrl.split('?')[0]! + '/preferences'
+      return res.status(200).type('html').send(renderPreferencePage(decoded.email, categories, prefs, action))
+    }
 
     res.status(200).type('html').send(`<!doctype html>
 <html><head>
   <meta charset="utf-8" />
   <title>Unsubscribe</title>
-  <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:48px auto;padding:0 16px;color:#1c1917;line-height:1.5}h1{font-size:20px}button{padding:10px 18px;background:#dc2626;color:#fff;border:0;border-radius:6px;font-size:14px;cursor:pointer}</style>
+  <style>${UNSUB_PAGE_STYLE}</style>
 </head><body>
   <h1>Confirm unsubscribe</h1>
   <p>Click the button below to unsubscribe <strong>${escapeHtml(decoded.email)}</strong>${decoded.scope === 'all' ? ' from everything' : ' from marketing emails'}.</p>
@@ -303,6 +315,51 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   </form>
 </body></html>`)
   }))
+
+  /**
+   * Write opt-outs durably (INVARIANT 8): Mongo within the budget, else the
+   * journal. 'ok' = in Mongo, 'journaled' = on disk for the drain, 'failed' =
+   * neither (no journal configured, or the disk write failed).
+   */
+  const writeOptOutsDurably = async (
+    email: string,
+    scopes: SuppressionScope[],
+    write: Promise<unknown>,
+  ): Promise<{ result: 'ok' | 'journaled' | 'failed'; dbError: unknown }> => {
+    let dbError: unknown = null
+    try {
+      await withTimeout(write, mailer.config.unsubscribeWriteTimeoutMs)
+    } catch (err) {
+      dbError = err ?? new Error('unsubscribe write failed')
+      // The write may still land after the timeout; journal replay is
+      // idempotent, but an unobserved rejection would take the host down.
+      void write.catch(() => {})
+    }
+    if (!dbError) return { result: 'ok', dbError }
+    if (!pendingUnsubsPath) {
+      logger.error?.(
+        { err: dbError },
+        'mailery: unsubscribe write failed and no pendingUnsubsPath is configured — answering 503',
+      )
+      return { result: 'failed', dbError }
+    }
+    try {
+      for (const scope of scopes) {
+        appendPendingUnsub(pendingUnsubsPath, { email, scope, at: Date.now() })
+      }
+      logger.warn?.(
+        { err: dbError, path: pendingUnsubsPath },
+        'mailery: unsubscribe journaled to disk — will be replayed by the tick drain',
+      )
+    } catch (diskErr) {
+      logger.error?.(
+        { err: dbError, diskErr, path: pendingUnsubsPath },
+        'mailery: unsub disk fallback failed — answering 503',
+      )
+      return { result: 'failed', dbError }
+    }
+    return { result: 'journaled', dbError }
+  }
 
   /**
    * RFC 8058 one-click unsubscribe.
@@ -333,49 +390,15 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       return
     }
 
-    const write = mailer.unsubscribe(decoded.email, {
-      scope: decoded.scope,
-      reason: 'user_request',
-      source: 'one-click',
-    })
-
-    let dbError: unknown = null
-    try {
-      await withTimeout(write, mailer.config.unsubscribeWriteTimeoutMs)
-    } catch (err) {
-      dbError = err ?? new Error('unsubscribe write failed')
-      // The write may still land after the timeout. Nothing here depends on
-      // whether it does — the journal replay is idempotent — but an unobserved
-      // rejection would take the host process down.
-      void write.catch(() => {})
-    }
-
-    if (dbError) {
-      if (!pendingUnsubsPath) {
-        logger.error?.(
-          { err: dbError },
-          'mailery: unsubscribe write failed and no pendingUnsubsPath is configured — answering 503',
-        )
-        return sendUnsubUnavailable(res)
-      }
-      try {
-        appendPendingUnsub(pendingUnsubsPath, {
-          email: decoded.email,
-          scope: decoded.scope,
-          at: Date.now(),
-        })
-        logger.warn?.(
-          { err: dbError, path: pendingUnsubsPath },
-          'mailery: unsubscribe journaled to disk — will be replayed by the tick drain',
-        )
-      } catch (diskErr) {
-        logger.error?.(
-          { err: dbError, diskErr, path: pendingUnsubsPath },
-          'mailery: unsub disk fallback failed — answering 503',
-        )
-        return sendUnsubUnavailable(res)
-      }
-    }
+    // The token's effective scope: the category for categorised mail, else
+    // the signed scope (old tokens keep meaning what they meant).
+    const scope = tokenScope(decoded)
+    const { result, dbError } = await writeOptOutsDurably(
+      decoded.email,
+      [scope],
+      mailer.unsubscribe(decoded.email, { scope, reason: 'user_request', source: 'one-click' }),
+    )
+    if (result === 'failed') return sendUnsubUnavailable(res)
 
     res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
 
@@ -388,6 +411,65 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       })
     }
   }))
+
+  // -------------------------------------------------------------------------
+  // POST /unsub/:token/preferences — the preference page's form (0.21)
+  //
+  // Mounted only when categories are declared. Contract: see the header
+  // comment of test/categories/preferences.test.ts.
+  // -------------------------------------------------------------------------
+  if (categories.length > 0) {
+    router.post('/unsub/:token/preferences', wrap(logger, async (req: Request, res: Response) => {
+      const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
+      if (!decoded) return sendUnsubError(res, 'Invalid or expired link.')
+      const body = (req.body ?? {}) as Record<string, unknown>
+
+      if (body.action === 'unsubscribe-all') {
+        const { result, dbError } = await writeOptOutsDurably(
+          decoded.email,
+          ['marketing'],
+          mailer.unsubscribe(decoded.email, { scope: 'marketing', reason: 'user_request', source: 'preferences' }),
+        )
+        if (result === 'failed') return sendUnsubUnavailable(res)
+        res.status(200).type('html').send(preferencesDonePage('You are unsubscribed from all marketing email.'))
+        if (!dbError && decoded.sendId) {
+          void attributeUnsubscribeToSend(mailer.getRunnerContext(), decoded.sendId, decoded.email).catch((err) => {
+            logger.warn?.({ err, sendId: decoded.sendId }, 'mailery: unsubscribe attribution failed')
+          })
+        }
+        return
+      }
+
+      if (body.action !== 'save') return sendUnsubError(res, 'Unknown action.')
+
+      // Checked boxes arrive as repeated `category` fields; ids that are not
+      // declared are ignored, never written.
+      const raw = body.category
+      const posted = new Set((Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).map(String))
+      const declared = categories.map((c) => c.id)
+      const update = {
+        marketing: true,
+        categories: Object.fromEntries(declared.map((id) => [id, posted.has(id)])),
+      }
+      const optOuts = declared.filter((id) => !posted.has(id)).map((id) => `category:${id}` as SuppressionScope)
+
+      const { result } = await writeOptOutsDurably(
+        decoded.email,
+        optOuts,
+        mailer.setPreferences(decoded.email, update, { source: 'preferences' }),
+      )
+      // Opt-ins cannot be journaled, so anything but a Mongo write is a
+      // failure to the recipient — after the opt-outs were journaled.
+      if (result !== 'ok') {
+        return res
+          .status(503)
+          .set('Retry-After', '60')
+          .type('html')
+          .send(preferencesDonePage('We could not update your preferences right now. Please try again in a minute.'))
+      }
+      res.status(200).type('html').send(preferencesDonePage('Your preferences have been updated.'))
+    }))
+  }
 
   // -------------------------------------------------------------------------
   // GET /confirm-doi/:token
@@ -639,6 +721,49 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       },
     )
   })
+}
+
+const UNSUB_PAGE_STYLE =
+  "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:48px auto;padding:0 16px;color:#1c1917;line-height:1.5}h1{font-size:20px}button{padding:10px 18px;background:#dc2626;color:#fff;border:0;border-radius:6px;font-size:14px;cursor:pointer}"
+
+const PREFERENCE_PAGE_STYLE =
+  UNSUB_PAGE_STYLE +
+  'label{display:block;margin:12px 0}.desc{display:block;margin-left:24px;color:#57534e;font-size:13px}.actions{margin-top:20px}button.secondary{background:#1c1917}button.link{background:none;color:#dc2626;text-decoration:underline;padding:10px 0;margin-left:12px}'
+
+function preferencesDonePage(message: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Email preferences</title><style>${PREFERENCE_PAGE_STYLE}</style></head><body><p>${escapeHtml(message)}</p></body></html>`
+}
+
+/** The preference page: one checkbox per declared category, plus unsubscribe-from-all. */
+function renderPreferencePage(
+  email: string,
+  categories: CategoryDef[],
+  prefs: PreferenceState,
+  action: string,
+): string {
+  const boxes = categories
+    .map((c) => {
+      const checked = prefs.categories[c.id] ? ' checked' : ''
+      const desc = c.description ? `<span class="desc">${escapeHtml(c.description)}</span>` : ''
+      return `    <label><input type="checkbox" name="category" value="${escapeHtml(c.id)}"${checked}> ${escapeHtml(c.label)}${desc}</label>`
+    })
+    .join('\n')
+  return `<!doctype html>
+<html><head>
+  <meta charset="utf-8" />
+  <title>Email preferences</title>
+  <style>${PREFERENCE_PAGE_STYLE}</style>
+</head><body>
+  <h1>Email preferences</h1>
+  <p>Choose which emails <strong>${escapeHtml(email)}</strong> receives.</p>
+  <form method="POST" action="${escapeHtml(action)}">
+${boxes}
+    <div class="actions">
+      <button type="submit" name="action" value="save" class="secondary">Save preferences</button>
+      <button type="submit" name="action" value="unsubscribe-all" class="link">Unsubscribe from all marketing email</button>
+    </div>
+  </form>
+</body></html>`
 }
 
 function escapeHtml(s: string): string {

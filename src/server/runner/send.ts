@@ -55,7 +55,7 @@ export async function handleSend(
 
   // Render now (with fresh contact + vars). Tracking application happens in
   // dispatchSend once we have the persisted sendId.
-  const renderCtx = buildRenderContext(contact, run, step.vars ?? {}, ctx)
+  const renderCtx = buildRenderContext(contact, run, step.vars ?? {}, ctx, {}, undefined, template.category)
   let rendered
   try {
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
@@ -172,7 +172,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   }
 
   // 1. Suppression check (INVARIANT 3: always re-checked at send time).
-  const supp = await isSuppressed(ctx.collections, send.emailAtSend, send.kind)
+  const supp = await isSuppressed(ctx.collections, send.emailAtSend, send.kind, template.category)
   if (supp.suppressed) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
@@ -348,7 +348,7 @@ async function deliver(
       eventName: run?.triggerEvent?.name,
       eventProperties: run?.triggerEvent?.properties,
     })
-    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id))
+    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id), template.category)
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
   } catch (err: any) {
     await markFailed(send, `render error: ${String(err?.message ?? err)}`, ctx)
@@ -429,6 +429,7 @@ async function deliver(
       ? {
           'List-Unsubscribe': `<${renderCtx.unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          ...(template.category ? { 'List-ID': `<${template.category}.${senderDomain(rendered.fromEmail)}>` } : {}),
         }
       : {}
 
@@ -493,6 +494,10 @@ function pickProviderName(stepOverride: string | undefined, tpl: TemplateDoc, ct
   return ctx.config.defaultProvider
 }
 
+function senderDomain(fromEmail: string): string {
+  return fromEmail.slice(fromEmail.lastIndexOf('@') + 1).toLowerCase()
+}
+
 function buildRenderContext(
   contact: Contact,
   run: FlowRunDoc | null,
@@ -500,13 +505,14 @@ function buildRenderContext(
   ctx: RunnerContext,
   resolved: Record<string, unknown> = {},
   sendId?: string,
+  category?: string | null,
 ): RenderContext {
   const scope = 'marketing'
   const expiresAt = new Date(Date.now() + ctx.config.unsubscribeTokenLifetimeDays * 24 * 60 * 60 * 1000)
   // The send id lets the one-click unsubscribe be attributed to this send
   // (and so to its broadcast's unsubscribe count and stop rule).
   const token = signUnsubscribeToken(
-    { email: contact.email, scope, expiresAt, ...(sendId ? { sendId } : {}) },
+    { email: contact.email, scope, expiresAt, ...(sendId ? { sendId } : {}), ...(category ? { category } : {}) },
     ctx.config.unsubscribeSecret,
   )
   const unsubscribeUrl = `${ctx.config.publicUrl}/m/unsub/${token}`
@@ -550,6 +556,7 @@ function newSendDoc(input: NewSendInput): SendDoc {
     broadcastId: null,
     manualSendBy: null,
     kind: input.template.kind,
+    ...(input.template.category ? { category: input.template.category } : {}),
     provider: input.providerName,
     providerMessageId: null,
     fromName: input.renderedFrom?.name ?? input.template.fromName,

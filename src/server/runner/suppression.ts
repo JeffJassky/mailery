@@ -7,7 +7,6 @@
 import type { Collections } from '../models/index.js'
 import type { SuppressionScope, TemplateKind } from '../../shared/enums.js'
 import { sha256Hex } from '../tokens.js'
-import { notImplemented } from '../not-implemented.js'
 
 /**
  * The scopes that block a send (0.21 rule, INVARIANT 4 extended by 22):
@@ -23,8 +22,10 @@ import { notImplemented } from '../not-implemented.js'
  * optional last argument and use exactly this list — with no category they
  * behave as in 0.20.
  */
-export function blockingScopes(_kind: TemplateKind, _category?: string | null): SuppressionScope[] {
-  return notImplemented('blockingScopes', 'PR2')
+export function blockingScopes(kind: TemplateKind, category?: string | null): SuppressionScope[] {
+  if (kind === 'transactional') return ['all', 'transactional']
+  if (category) return ['all', 'marketing', `category:${category}`]
+  return ['all', 'marketing']
 }
 
 export interface SuppressionResult {
@@ -33,20 +34,15 @@ export interface SuppressionResult {
   reason?: string
 }
 
-const SCOPES_BY_KIND: Record<TemplateKind, SuppressionScope[]> = {
-  marketing: ['all', 'marketing'],
-  transactional: ['all', 'transactional'],
-}
-
 export async function isSuppressed(
   collections: Collections,
   email: string,
   kind: TemplateKind,
-  /** Template category (0.21). PR 2 makes this select `blockingScopes(kind, category)`. */
-  _category?: string | null,
+  /** Template category (0.21); selects `blockingScopes(kind, category)`. */
+  category?: string | null,
 ): Promise<SuppressionResult> {
   const normalized = email.toLowerCase()
-  const allowed = SCOPES_BY_KIND[kind]
+  const allowed = blockingScopes(kind, category)
 
   const byEmail = await collections.suppressions.findOne({
     email: normalized,
@@ -79,11 +75,11 @@ export async function suppressedEmails(
   emails: string[],
   kind: TemplateKind,
   /** Template category (0.21). See `isSuppressed`. */
-  _category?: string | null,
+  category?: string | null,
 ): Promise<Set<string>> {
   const normalized = [...new Set(emails.map((e) => e.toLowerCase()))]
   if (normalized.length === 0) return new Set()
-  const allowed = SCOPES_BY_KIND[kind]
+  const allowed = blockingScopes(kind, category)
   const live = { $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] }
   const byHash = new Map(normalized.map((e) => [sha256Hex(e), e]))
   const [plain, hashed] = await Promise.all([

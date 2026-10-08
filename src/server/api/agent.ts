@@ -48,6 +48,7 @@ import { consoleRouteLogger, type RouteLogger } from './wrap.js'
 import { derivePlaintext, renderTemplate, type RenderedTemplate } from '../templates/render.js'
 import { lintTemplate } from '../templates/linter.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { templateCategoryIssue } from '../templates/category.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
 import { signUnsubscribeToken } from '../tokens.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -133,6 +134,8 @@ const publishTemplateInputSchema = z.object({
   bodyFormat: z.enum(['multipart', 'text_only']).default('multipart'),
   trackOpens: z.boolean().default(true),
   trackClicks: z.boolean().default(true),
+  /** Marketing category (0.21). Absent or null = uncategorised. */
+  category: z.string().nullable().optional(),
   /** Recorded as the publisher; defaults to the token's actor. */
   publishedBy: z.string().min(1).max(200).optional(),
 })
@@ -239,6 +242,11 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
       docs: 'https://jeffjassky.github.io/mailery/reference/agent-api',
       endpoints: ENDPOINTS,
     })
+  })
+
+  // ----- Categories (read-only; the source of truth is MailerConfig) ---------
+  router.get('/categories', (_req, res) => {
+    res.json(mailer.config.categories ?? [])
   })
 
   // ----- Templates: verify / render / real sends -----------------------------
@@ -419,6 +427,11 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
           message: 'body.html is required — this route publishes compiled HTML; a draft goes through POST /api/templates/:slug/publish',
         })
       }
+      const categoryIssue = templateCategoryIssue(input.kind, input.category, mailer.config.categories)
+      if (categoryIssue) {
+        return res.status(400).json({ error: 'validation_failed', message: categoryIssue })
+      }
+      const category = input.category || null
       const senderCheck = validateSenderDomain(input.fromEmail, input.kind, mailer.config.senderDomains)
       if (!senderCheck.ok) {
         return res.status(400).json({ error: 'sender_domain_invalid', code: senderCheck.code, message: senderCheck.reason })
@@ -479,11 +492,14 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
         publishedAt: now,
         publishedBy,
         updatedAt: now,
+        ...(category ? { category } : {}),
       }
       const result = await c.templates.updateOne(
         { slug },
         {
           $set: set,
+          // A republish without a category clears a previous one.
+          ...(category ? {} : { $unset: { category: '' } }),
           $setOnInsert: {
             createdAt: now,
             stats: { sent: 0, delivered: 0, opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, lastSentAt: null },
@@ -510,6 +526,7 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
           fromEmail: input.fromEmail,
           trackOpens: input.trackOpens,
           trackClicks: input.trackClicks,
+          ...(category ? { category } : {}),
           publishedAt: now,
           publishedBy,
         },
@@ -1248,11 +1265,13 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
       c.flowRuns.find({ externalId: contact.externalId }).sort({ enteredAt: -1 }).limit(50).toArray(),
       c.suppressions.find({ email: contact.email }).toArray(),
     ])
+    const preferences = (mailer.config.categories ?? []).length > 0 ? await mailer.getPreferences(contact.email) : undefined
     return {
       contact,
       isTestContact: isTestContact ? isTestContact(contact.email) : null,
       subscription,
       suppressions,
+      ...(preferences ? { preferences } : {}),
       recentEvents,
       recentSends: recentSends.map(sendSummary),
       runs: runs.map(runSummary),
@@ -1702,11 +1721,12 @@ function wrap(fn: Handler) {
 const ENDPOINTS: Array<{ method: string; path: string; summary: string; testContactsOnly?: boolean }> = [
   { method: 'GET', path: '/', summary: 'This listing, the package version and the actor behind the token.' },
   { method: '*', path: '/api/*', summary: 'The full admin JSON API (flows, templates, contacts, sends, health, setup-status, …) with this token as the actor.' },
+  { method: 'GET', path: '/categories', summary: 'The categories declared in MailerConfig.categories (id, label, description, defaultOptIn).' },
   { method: 'POST', path: '/templates/:slug/verify', summary: 'Render the published template as a contact ({contactId} or {sampleContact}) and run named checks: placeholders, links, unsubscribe, sender address, plain text, subject, from domain, size, lint. {includeRendered: true} returns the HTML.' },
   { method: 'POST', path: '/templates/verify-all', summary: 'Verify every template (or {slugs}) for each of {contactIds}; a matrix of pass/fail.' },
   { method: 'POST', path: '/templates/:slug/render', summary: 'Render for a contact and return subject, preheader, HTML, plain text, resolved vars and the signed unsubscribe URL.' },
   { method: 'POST', path: '/templates/:slug/send', summary: 'A real send through the pipeline to a test contact ({contactId}); dispatched inline unless {dispatch: "queue"}. Returns the sendId.', testContactsOnly: true },
-  { method: 'PUT', path: '/templates/:slug', summary: 'Publish a compiled template document (html, plain text, kind, sender, subject, tracking flags) with the sender-domain and lint gates; upserts on slug, keeping createdAt and stats. The deploy-script path over HTTP.' },
+  { method: 'PUT', path: '/templates/:slug', summary: 'Publish a compiled template document (html, plain text, kind, optional category, sender, subject, tracking flags) with the sender-domain and lint gates; upserts on slug, keeping createdAt and stats. The deploy-script path over HTTP.' },
   { method: 'GET', path: '/sends/:id/wait?status=delivered&timeoutMs=30000', summary: 'Long-poll a send until it reaches sent | delivered | opened | clicked | terminal, with its webhook events.' },
   { method: 'POST', path: '/sends/:id/dispatch', summary: 'Dispatch a queued send now (test contacts only).', testContactsOnly: true },
   { method: 'POST', path: '/flows/:slug/simulate', summary: 'Dry-run the flow for {contactId} from {at} with {eventProperties}: the path taken, every gate verdict, projected send times, where it ends. Writes nothing.' },

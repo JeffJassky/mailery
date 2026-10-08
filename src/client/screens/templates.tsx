@@ -10,7 +10,11 @@ export function Templates({ setRoute }: any) {
   const [tab, setTab] = React.useState('all')
   const { data: templates, loading, error, refetch } = useLive(() => api.templates())
   const rows = templates ?? []
-  const filtered = rows.filter((t: any) => (tab === 'all' ? true : t.kind === tab))
+  const { data: categories } = useLive(() => api.categories())
+  const [categoryFilter, setCategoryFilter] = React.useState('')
+  const filtered = rows
+    .filter((t: any) => (tab === 'all' ? true : t.kind === tab))
+    .filter((t: any) => (categoryFilter ? t.category === categoryFilter : true))
 
   const [creating, setCreating] = React.useState(false)
   const [createForm, setCreateForm] = React.useState({ slug: '', name: '', kind: 'marketing' as 'marketing' | 'transactional', subject: '' })
@@ -89,6 +93,13 @@ export function Templates({ setRoute }: any) {
         <div className={'tab' + (tab === 'all' ? ' active' : '')} onClick={() => setTab('all')}>All<span className="tab-count">{rows.length}</span></div>
         <div className={'tab' + (tab === 'marketing' ? ' active' : '')} onClick={() => setTab('marketing')}>Marketing<span className="tab-count">{rows.filter((t: any) => t.kind === 'marketing').length}</span></div>
         <div className={'tab' + (tab === 'transactional' ? ' active' : '')} onClick={() => setTab('transactional')}>Transactional<span className="tab-count">{rows.filter((t: any) => t.kind === 'transactional').length}</span></div>
+        <span className="grow" />
+        {(categories ?? []).length > 0 && (
+          <select className="select" style={{ width: 'auto' }} value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} aria-label="Filter by category">
+            <option value="">All categories</option>
+            {(categories ?? []).map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+          </select>
+        )}
       </div>
 
       <div className="card card-pad-0">
@@ -98,6 +109,7 @@ export function Templates({ setRoute }: any) {
               <tr>
                 <th>Template</th>
                 <th>Kind</th>
+                <th>Category</th>
                 <th>Last sent</th>
                 <th className="num">Sent 7d</th>
                 <th className="num">Open rate</th>
@@ -107,7 +119,7 @@ export function Templates({ setRoute }: any) {
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <EmptyRow colSpan={7} label="No templates yet." />
+                <EmptyRow colSpan={8} label="No templates yet." />
               ) : (
                 filtered.map((t: any) => {
                   const sent = t.stats?.sent ?? 0
@@ -128,6 +140,7 @@ export function Templates({ setRoute }: any) {
                         </div>
                       </td>
                       <td><span className={'pill ' + (t.kind === 'transactional' ? 'blue' : 'neutral')}>{t.kind}</span></td>
+                      <td>{t.category ? <span className="tag mono">{t.category}</span> : <span className="subtle">—</span>}</td>
                       <td className="text-xs subtle">{t.stats?.lastSentAt ? new Date(t.stats.lastSentAt).toLocaleString() : '—'}</td>
                       <td className="num tabular">{sentLast7.toLocaleString()}</td>
                       <td className="num tabular">{openRate != null ? (openRate * 100).toFixed(1) + '%' : '—'}</td>

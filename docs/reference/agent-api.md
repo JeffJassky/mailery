@@ -121,6 +121,10 @@ body: { contactId: string; vars?: object; dedupeKey?: string; dispatch?: 'now' |
 
 This is how an automated check proves delivery end to end: send, then wait.
 
+### `GET /categories`
+
+The declared categories (`{ id, label, description?, defaultOptIn? }[]`); `[]` when none. The same list is at `GET /api/categories`.
+
 ### `PUT /templates/:slug`
 
 Publish a compiled template document directly — the deploy-script path over HTTP.
@@ -132,8 +136,10 @@ body: {
   subject: string; preheader?: string;
   body: { html: string; plainText?: string; mjml?: string; editorJson?: object | null };
   variablesSchema?: object; tags?: string[]; bodyFormat?: 'multipart' | 'text_only';
-  trackOpens?: boolean; trackClicks?: boolean; publishedBy?: string
+  trackOpens?: boolean; trackClicks?: boolean; publishedBy?: string;
+  category?: string | null   // a declared category id (marketing only); omitted or null clears it
 }
+→ 400 { error: 'validation_failed', message }   // undeclared category, or a category on a transactional template
 → 201 { slug, created: true, lint: { warnings, infos }, template }   // inserted
 → 200 { slug, created: false, … }                                     // updated in place
 ```
@@ -251,8 +257,10 @@ body: { name: string; externalId: string; properties?: object; dedupeKey?: strin
 ### `GET /contacts/:externalId` · `GET /contacts/by-email/:email`
 
 ```ts
-→ { contact, isTestContact: boolean | null, subscription, suppressions, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
+→ { contact, isTestContact: boolean | null, subscription, suppressions, preferences?: { marketing, categories }, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
 ```
+
+`preferences` is present only when `categories` are declared.
 
 ### `GET /contacts/:externalId/unsubscribe-url` — test contacts only
 
