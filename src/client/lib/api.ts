@@ -1,3 +1,6 @@
+import type { FactDecl } from '../../shared/types.js'
+import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../../shared/program-board.js'
+export type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource }
 /**
  * Typed fetch wrappers against /admin/mailer/api/*. Used by every screen that
  * needs live data. No mock fallback — screens render their own loading /
@@ -94,6 +97,22 @@ export const api = {
     json<{ ok: boolean; aborted: boolean; cancelledSends: number }>(
       `/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}/abort`,
       { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  // Program board (0.21.x) — plans/16-program-board.md
+  simulateProgram: (slug: string, input: ProgramSimulationInput) =>
+    json<ProgramSimulation<string>>(`/programs/${encodeURIComponent(slug)}/simulate`, { method: 'POST', body: JSON.stringify(input) }),
+  lintProgram: (slug: string, source?: ProgramSource) =>
+    json<{ source: ProgramSource; issues: ProgramLintIssue[] }>(
+      `/programs/${encodeURIComponent(slug)}/lint${source ? `?source=${source}` : ''}`,
+    ),
+  /** Render one program email: template + program vars (action, attempt, facts). */
+  previewProgramEmail: (
+    templateSlug: string,
+    program: { slug: string; source?: ProgramSource; actionId: string; attempt: number; facts?: Record<string, unknown>; subjectId?: string },
+  ) =>
+    json<{ subject: string; preheader?: string; html: string; plainText: string }>(
+      `/templates/${encodeURIComponent(templateSlug)}/preview`,
+      { method: 'POST', body: JSON.stringify({ useDraft: false, program }) },
     ),
   enterProgram: (slug: string, subjectId: string) =>
     json<{ ok: boolean; created: boolean }>(`/programs/${encodeURIComponent(slug)}/enter`, { method: 'POST', body: JSON.stringify({ subjectId }) }),
@@ -568,6 +587,20 @@ export interface ProgramDetail {
   publishedBy: string | null
   draft: { definition: any; notes: string; lastModifiedBy: string; lastModifiedAt: string } | null
   versions: Array<{ version: number; publishedAt: string; publishedBy: string }>
+  /** `factsAdapter.declare`, or null without a facts adapter (board). */
+  facts: Record<string, FactDecl> | null
+  /** Every existing template referenced by the published or draft definition (board). */
+  templates: ProgramTemplateInfo[]
+}
+
+export interface ProgramTemplateInfo {
+  slug: string
+  name: string
+  subject: string
+  kind: 'marketing' | 'transactional'
+  category: string | null
+  /** Has a published body (sendable). */
+  published: boolean
 }
 
 export interface ProgramArmFunnel { evaluated: number; chosen: number; sent: number; satisfied: number }

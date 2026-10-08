@@ -6,6 +6,8 @@
  * See plans/10-public-api.md for the surface.
  */
 
+import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../shared/program-board.js'
+import { simulateProgram } from './runner/programs/simulate.js'
 import type { Db, ClientSession, MongoClient, ObjectId } from 'mongodb'
 import { ObjectId as ObjectIdCtor } from 'mongodb'
 
@@ -842,6 +844,24 @@ export class Mailer {
       })
     }
     return res
+  }
+
+  /**
+   * Dry-run one tick and project the send sequence (board). Read-only: writes
+   * nothing, sends nothing. Throws `ProgramSimulationError`. plans/16-program-board.md §3.
+   */
+  async simulateProgram(slug: string, input: ProgramSimulationInput = {}): Promise<ProgramSimulation> {
+    return simulateProgram(this.runnerContext, slug, input)
+  }
+
+  /**
+   * Lint a program's draft or published definition (default: draft when one
+   * exists). Null when the program or that source does not exist. §4.
+   */
+  async lintProgram(slug: string, source?: ProgramSource): Promise<{ source: ProgramSource; issues: ProgramLintIssue[] } | null> {
+    void slug
+    void source
+    throw new Error('Mailer.lintProgram: not implemented (board WP-A)')
   }
 
   /** Checklist for the host's in-app UI. Null when the subject has no run. §5.11. */

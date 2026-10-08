@@ -334,3 +334,22 @@ export async function programRenderVars(send: SendDoc, ctx: RunnerContext): Prom
     facts,
   }
 }
+
+/**
+ * Pure core of `programRenderVars` (board WP-A moves the body here), also used
+ * by the template preview's `program` option. `actionId` may be
+ * `$sunset-ask`. Unknown action ids fall back to the id as title and
+ * `total = attempt`.
+ */
+export function buildProgramRenderVars(
+  def: ProgramDefinition | null,
+  info: { slug: string; actionId: string; attempt: number },
+  facts: Facts,
+  daysSinceFirst: number,
+): Record<string, unknown> {
+  void def
+  void info
+  void facts
+  void daysSinceFirst
+  throw new Error('buildProgramRenderVars: not implemented (board WP-A)')
+}

@@ -163,6 +163,23 @@ export { CATEGORY_ID_RE } from './config.js'
 export { validateProgramDefinition, referencedTemplateSlugs, SUNSET_ASK_ACTION_ID } from './programs/validate.js'
 export type { ProgramValidationIssue, ProgramValidationContext, ProgramValidationResult } from './programs/validate.js'
 export { FACTS_CHANGED_EVENT, holdoutArm } from './runner/programs/index.js'
+export { describePredicate, diffProgramDefinitions, SIMULATION_MAX_STEPS, SIMULATION_DEFAULT_HORIZON_DAYS, SIMULATION_MAX_HORIZON_DAYS } from '../shared/program-board.js'
+export type {
+  ProgramSource,
+  ProgramSimulationInput,
+  ProgramSimulation,
+  ProgramSimulationCandidate,
+  ProgramSimulationStep,
+  ProgramNextReason,
+  ProgramLintCode,
+  ProgramLintIssue,
+  ProgramDiff,
+  ProgramActionDiff,
+} from '../shared/program-board.js'
+export { ProgramSimulationError } from './runner/programs/simulate.js'
+export type { ProgramSimulationErrorCode } from './runner/programs/simulate.js'
+export { lintProgram } from './programs/lint.js'
+export type { ProgramLintContext } from './programs/lint.js'
 export type { ProgramTickResult } from './runner/programs/index.js'
 export { tokenScope } from './tokens.js'
 export { templateCategoryIssue } from './templates/category.js'
