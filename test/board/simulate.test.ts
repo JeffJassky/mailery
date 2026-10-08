@@ -206,6 +206,18 @@ describe('agrees with the real tick', () => {
     expect((await getRun(P, 'activation', subjectId))!.status).toBe('active')
   })
 
+  it('a finished run projects nothing, even when facts would make it eligible again', async () => {
+    startClock()
+    const { subjectId } = await subject(P, { shopify_connected: true, ga4_connected: true, agent_connected: true, playbooks_run: 2 })
+    await enter(P, 'activation', subjectId)
+    await tickProgram(P.H.ctx, 'activation', subjectId)
+    expect((await getRun(P, 'activation', subjectId))!.status).toBe('completed')
+    const s = await sim('activation', { subjectId, facts: { shopify_connected: false } })
+    expect(s.next.reason).toBe('completed')
+    expect(s.sequence).toEqual([])
+    expect(s.sequenceEnd).toBe('completed')
+  })
+
   it('a missing template: none-eligible with a detail, and the sequence stops there', async () => {
     startClock()
     const { subjectId } = await subject(P, { shopify_connected: true })

@@ -325,14 +325,17 @@ async function project(
   const book: Book = { ...o.book, actions: { ...o.book.actions } }
   let t = o.now
 
+  // A finished run never sends again, whatever the facts say now. Exit is checked before completion, as in the tick.
+  if (book.status === 'completed' || book.status === 'exited') return end(book.status)
+  if (o.exited) return end('exited')
+
   for (let pass = 0; pass < MAX_PROJECTION_PASSES; pass++) {
+    if (book.status === 'sunset') return end('sunset')
     const ev = await evaluate(t, book.actions)
     // The tick persists what evaluation changed (cooldowns, reopened ladders, completions).
     for (const w of ev.works) book.actions[w.action.id] = w.st
 
     if (ev.done) return end('completed')
-    if (book.status === 'sunset') return end('sunset')
-    if (o.exited) return end('exited')
 
     const choice = chooseNext(def, ev.ranked, book)
     if (!choice) {
