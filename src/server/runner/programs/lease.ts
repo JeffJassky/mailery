@@ -40,3 +40,23 @@ export async function acquireLease(
 export async function releaseLease(ctx: RunnerContext, runId: ObjectId, worker: string): Promise<void> {
   await ctx.collections.programRuns.updateOne({ _id: runId, 'lease.worker': worker }, { $set: { lease: null } })
 }
+
+/** Thrown when a tick finds its lease taken over: it must stop without writing. */
+export class LeaseLostError extends Error {
+  constructor() {
+    super('program run lease lost')
+  }
+}
+
+/**
+ * Push the lease expiry forward — only if this worker still owns it. Called
+ * around slow host calls (facts, recipients). Throws `LeaseLostError` when
+ * another worker took the run over, so the stale tick writes nothing.
+ */
+export async function renewLease(ctx: RunnerContext, runId: ObjectId, worker: string): Promise<void> {
+  const res = await ctx.collections.programRuns.updateOne(
+    { _id: runId, 'lease.worker': worker },
+    { $set: { 'lease.until': new Date(Date.now() + leaseMs(ctx)) } },
+  )
+  if (res.matchedCount === 0) throw new LeaseLostError()
+}

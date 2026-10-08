@@ -482,6 +482,25 @@ async function deliver(
       messageMeta: { sendId: String(send._id) },
     })
 
+    if (result.status === 'rejected') {
+      // A definitive refusal: not 'sent', and no retry could change the answer.
+      const reason = 'rejected by provider'
+      await ctx.collections.sends.updateOne(
+        { _id: send._id },
+        { $set: { status: 'failed', errorMessage: reason, updatedAt: new Date() } },
+      )
+      await recordHealthCounter(ctx, 'failedToSend', { fromEmail: send.fromEmail, kind: send.kind })
+      await emitOutcome(send, { status: 'failed', errorMessage: reason }, { status: 'failed', error: reason }, ctx)
+      if (ctx.config.onSendFailure) {
+        try {
+          await ctx.config.onSendFailure({ send, error: new Error(reason) })
+        } catch {
+          /* swallow */
+        }
+      }
+      return
+    }
+
     sentAt = new Date()
     await ctx.collections.sends.updateOne(
       { _id: send._id },
@@ -500,7 +519,7 @@ async function deliver(
   } catch (err: any) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
-      { $set: { status: 'failed', errorMessage: String(err?.message ?? err) } },
+      { $set: { status: 'failed', errorMessage: String(err?.message ?? err), updatedAt: new Date() } },
     )
     await recordHealthCounter(ctx, 'failedToSend', { fromEmail: send.fromEmail, kind: send.kind })
     await emitOutcome(send, { status: 'failed', errorMessage: String(err?.message ?? err) }, { status: 'failed', error: String(err?.message ?? err) }, ctx)
@@ -621,7 +640,7 @@ function newSendDoc(input: NewSendInput): SendDoc {
 async function markFailed(send: SendDoc, reason: string, ctx: RunnerContext): Promise<void> {
   await ctx.collections.sends.updateOne(
     { _id: send._id },
-    { $set: { status: 'failed', errorMessage: reason } },
+    { $set: { status: 'failed', errorMessage: reason, updatedAt: new Date() } },
   )
   await emitOutcome(send, { status: 'failed', errorMessage: reason }, { status: 'failed', error: reason }, ctx)
 }

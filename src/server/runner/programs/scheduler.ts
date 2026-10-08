@@ -5,10 +5,10 @@
  * of passes can run at once.
  */
 
-import type { ObjectId } from 'mongodb'
+import type { Filter, ObjectId } from 'mongodb'
 
 import { PROGRAMS_DEFAULTS } from '../../config.js'
-import type { ProgramDoc } from '../../models/index.js'
+import type { EventDoc, ProgramDoc } from '../../models/index.js'
 import type { RunnerContext } from '../index.js'
 import { DAY_MS, ERROR_BACKOFF_MS, FACTS_CHANGED_EVENT, SCAN_OVERLAP_MS } from './common.js'
 import { enterProgram } from './entry.js'
@@ -67,27 +67,56 @@ export async function runProgramSchedulerPass(ctx: RunnerContext, now: Date): Pr
   return result
 }
 
+/**
+ * Page through the events named `name` created since the watermark (less the
+ * overlap), in `(createdAt, _id)` order, by keyset — never by re-reading the
+ * same first page. `handle` runs once per event; the watermark is saved after
+ * each page, so a burst larger than a page (or a crash) still makes progress.
+ * Re-reading the overlap on the next pass is harmless: both handlers are
+ * idempotent.
+ */
+async function scanEvents(
+  ctx: RunnerContext,
+  program: ProgramDoc,
+  name: string,
+  watermark: 'lastEntryScanAt' | 'lastFactsScanAt',
+  handle: (ev: EventDoc) => Promise<void>,
+): Promise<void> {
+  const since = program[watermark] ?? program.createdAt
+  const start = new Date(since.getTime() - SCAN_OVERLAP_MS)
+  let saved = since.getTime()
+  let cursor: { at: Date; id: ObjectId | null } = { at: start, id: null }
+  for (;;) {
+    const after: Filter<EventDoc> =
+      cursor.id === null
+        ? { createdAt: { $gt: cursor.at } }
+        : { $or: [{ createdAt: { $gt: cursor.at } }, { createdAt: cursor.at, _id: { $gt: cursor.id } }] }
+    const events = await ctx.collections.events
+      .find({ name, ...after })
+      .sort({ createdAt: 1, _id: 1 })
+      .limit(SCAN_BATCH)
+      .toArray()
+    if (events.length === 0) return
+    for (const ev of events) await handle(ev)
+    const last = events[events.length - 1]!
+    cursor = { at: last.createdAt, id: last._id as ObjectId }
+    if (last.createdAt.getTime() > saved) {
+      saved = last.createdAt.getTime()
+      await ctx.collections.programs.updateOne({ _id: program._id }, { $set: { [watermark]: last.createdAt } })
+    }
+    if (events.length < SCAN_BATCH) return
+  }
+}
+
 /** Entry events since the watermark → runs. Returns the run ids created now. */
 async function scanEntry(ctx: RunnerContext, program: ProgramDoc, now: Date): Promise<Set<string>> {
   const entered = new Set<string>()
   const def = program.definition
   if (!def) return entered
-  const since = program.lastEntryScanAt ?? program.createdAt
-  const events = await ctx.collections.events
-    .find({ name: def.entry.eventName, createdAt: { $gt: new Date(since.getTime() - SCAN_OVERLAP_MS) } })
-    .sort({ createdAt: 1 })
-    .limit(SCAN_BATCH)
-    .toArray()
-  if (events.length === 0) return entered
-
-  for (const ev of events) {
+  await scanEvents(ctx, program, def.entry.eventName, 'lastEntryScanAt', async (ev) => {
     const res = await enterProgram(ctx, program.slug, ev.externalId, { now, entryEventAt: ev.occurredAt })
     if (res.created) entered.add(String(res.runId))
-  }
-  const newest = events[events.length - 1]!.createdAt
-  if (newest.getTime() > since.getTime()) {
-    await ctx.collections.programs.updateOne({ _id: program._id }, { $set: { lastEntryScanAt: newest } })
-  }
+  })
   return entered
 }
 
@@ -98,15 +127,7 @@ async function scanEntry(ctx: RunnerContext, program: ProgramDoc, now: Date): Pr
  */
 async function scanFactsChanged(ctx: RunnerContext, program: ProgramDoc, now: Date): Promise<Set<string>> {
   const woken = new Set<string>()
-  const since = program.lastFactsScanAt ?? program.createdAt
-  const events = await ctx.collections.events
-    .find({ name: FACTS_CHANGED_EVENT, createdAt: { $gt: new Date(since.getTime() - SCAN_OVERLAP_MS) } })
-    .sort({ createdAt: 1 })
-    .limit(SCAN_BATCH)
-    .toArray()
-  if (events.length === 0) return woken
-
-  for (const ev of events) {
+  await scanEvents(ctx, program, FACTS_CHANGED_EVENT, 'lastFactsScanAt', async (ev) => {
     const run = await ctx.collections.programRuns.findOneAndUpdate(
       {
         programSlug: program.slug,
@@ -120,11 +141,7 @@ async function scanFactsChanged(ctx: RunnerContext, program: ProgramDoc, now: Da
       { projection: { _id: 1 } },
     )
     if (run) woken.add(String(run._id))
-  }
-  const newest = events[events.length - 1]!.createdAt
-  if (newest.getTime() > since.getTime()) {
-    await ctx.collections.programs.updateOne({ _id: program._id }, { $set: { lastFactsScanAt: newest } })
-  }
+  })
   return woken
 }
 
