@@ -294,7 +294,7 @@ export async function evaluateBroadcastStopRules(
   if (evaluation.breaches.length === 0) return evaluation
 
   const now = new Date()
-  if (b.status === 'sent' && (await ctx.collections.sends.countDocuments({ broadcastId, status: 'queued' })) === 0) {
+  if (b.status === 'sent' && (await ctx.collections.sends.countDocuments({ broadcastId, status: { $in: ['queued', 'deferred'] } })) === 0) {
     // Everything already went out: nothing to hold. Record the first breach.
     await ctx.collections.broadcasts.updateOne(
       { _id: broadcastId, stopRuleBreach: { $in: [null] } },

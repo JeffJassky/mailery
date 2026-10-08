@@ -236,10 +236,13 @@ export function contactPolicyApplies(ctx: RunnerContext, send: Pick<SendDoc, 'ki
 // Per-recipient lock
 // ---------------------------------------------------------------------------
 
-/** A holder that crashes frees the address after this long (the TTL index only tidies up). */
-const LOCK_TTL_MS = 2 * 60_000
-/** A dispatch gives up waiting for a busy address after this long and requeues itself. */
-const LOCK_WAIT_MS = 45_000
+/**
+ * A holder that crashes frees the address after this long (the TTL index only
+ * tidies up). A live holder renews every `CONTACT_LOCK_TIMINGS.renewMs`, so a slow render or
+ * provider call never lets the lock lapse under it.
+ */
+/** Mutable only so tests can shrink the timings; do not change in production code. */
+export const CONTACT_LOCK_TIMINGS = { ttlMs: 60_000, renewMs: 15_000, waitMs: 45_000 }
 
 /**
  * Take the recipient's policy mutex. The decision (read history → write
@@ -256,16 +259,25 @@ export async function acquireRecipientLock(
 ): Promise<(() => Promise<void>) | null> {
   const _id = email.toLowerCase()
   const owner = new ObjectId().toHexString()
-  const waitUntil = Date.now() + LOCK_WAIT_MS
+  const waitUntil = Date.now() + CONTACT_LOCK_TIMINGS.waitMs
   for (;;) {
     const now = new Date()
     try {
       await ctx.collections.contactLocks.updateOne(
         { _id, expiresAt: { $lte: now } },
-        { $set: { owner, expiresAt: new Date(now.getTime() + LOCK_TTL_MS) } },
+        { $set: { owner, expiresAt: new Date(now.getTime() + CONTACT_LOCK_TIMINGS.ttlMs) } },
         { upsert: true },
       )
+      // Heartbeat: extend only while we still own the row (owner-scoped filter).
+      const timer = setInterval(() => {
+        const at = Date.now()
+        ctx.collections.contactLocks
+          .updateOne({ _id, owner }, { $set: { expiresAt: new Date(at + CONTACT_LOCK_TIMINGS.ttlMs) } })
+          .catch(() => {})
+      }, CONTACT_LOCK_TIMINGS.renewMs)
+      timer.unref?.()
       return async () => {
+        clearInterval(timer)
         await ctx.collections.contactLocks.deleteOne({ _id, owner }).catch(() => {})
       }
     } catch (err: any) {
