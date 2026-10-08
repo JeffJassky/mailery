@@ -138,10 +138,19 @@ Records an unsubscribe + adds a suppression row. Same path as the public `/m/uns
 ### `getPreferences(email)`
 
 ```ts
-getPreferences(email: string): Promise<{ marketing: boolean; categories: Record<string, boolean> }>
+getPreferences(email: string): Promise<{ marketing: boolean; categories: Record<string, boolean>; pausedUntil: Date | null }>
 ```
 
-The address's current opt-in state across the categories declared in config (case-insensitive, hashed GDPR rows count). `marketing` is false when an `all` or `marketing` suppression is live, and then every category reads false. Transactional is never listed.
+The address's current opt-in state across the categories declared in config (case-insensitive, hashed GDPR rows count). `marketing` is false when an `all` or `marketing` suppression is live, and then every category reads false. Transactional is never listed. `pausedUntil` is the expiry of a live `marketing_pause` row, else null; a pause never makes `marketing` false.
+
+### `pauseMarketing(email, opts)` · `resumeMarketing(email, opts?)`
+
+```ts
+pauseMarketing(email: string, opts: { days: number; source?: string }): Promise<{ pausedUntil: Date }>
+resumeMarketing(email: string, opts?: { source?: string }): Promise<{ resumed: boolean }>
+```
+
+Pause all marketing email to an address for `days` days (an integer 1–365, else it throws), or lift the pause early. A pause is one `marketing_pause` suppression row (reason `paused`, `expiresAt` set); pausing again replaces it, and an unsubscribe row is never touched. Transactional mail is not paused. Source defaults to `'api'`. Audit-logged as `contact.pause` and `contact.resume`. The preference page's lengths come from `MailerConfig.preferences.pauseDays` (default `[7, 14, 30]`; `[]` hides the control).
 
 ### `setPreferences(email, update, opts?)`
 

@@ -85,8 +85,11 @@ one stream and keep another.
   | Template | Blocked by scope |
   |---|---|
   | `transactional` | `all`, `transactional` |
-  | `marketing`, no category | `all`, `marketing` |
-  | `marketing`, category C | `all`, `marketing`, `category:C` |
+  | `marketing`, no category | `all`, `marketing`, `marketing_pause` |
+  | `marketing`, category C | `all`, `marketing`, `marketing_pause`, `category:C` |
+
+  (`marketing_pause` is the 0.21 pause scope, plans/17 F3: a time-boxed row that
+  blocks all marketing and expires on its own.)
 
   Every existing suppression row blocks exactly what it blocks today.
 - **Unsubscribe token** carries the template's category when present. Old tokens (no
@@ -350,8 +353,8 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
 
 `nextTickAt` by outcome: sent/holdout → lastSentAt + effective gap; min-gap /
 delivery-window → the instant the constraint lifts; session-suppressed →
-last_session_at + window; in-flight → now + 1h; none-eligible / no-recipients →
-now + minGapDays; sunset → now + minGapDays × slowFactor; contact-policy deferral (via
+last_session_at + window; in-flight → now + 1h; none-eligible → now + minGapDays; no-recipients → now + minGapDays, or the
+earliest pause end when sooner (plans/17 F3); sunset → now + minGapDays × slowFactor; contact-policy deferral (via
 hook) → the send's notBefore.
 
 Dispatch hooks (`sendHooks.program`): the guard re-verifies (§5.6). `onOutcome`:
@@ -656,6 +659,12 @@ from earlier sections, these win.
 - **Open items resolved**: `decisionRetentionDays` default null (keep); `Facts Changed`
   carries no payload (always resolve); preference page reuses the unsub page shell;
   admin name "Programs".
+
+- **Pause (plans/17 F3)**: a `marketing_pause` suppression row (reason `paused`,
+  `expiresAt`), never journaled and never an unsubscribe; a failed write is 503 +
+  `Retry-After: 60`. Step 13 wakes the run at the earliest pause end when that is
+  sooner than `minGapDays`; the reason stays `no-recipients`. The simulator's detail
+  reads `all recipients paused until YYYY-MM-DD`.
 
 ## 15. Open items (historical)
 - `decisionRetentionDays` default: none vs 180. Decide at build.

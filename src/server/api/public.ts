@@ -38,6 +38,7 @@ import type { Mailer } from '../mailer.js'
 import type { SendDoc } from '../models/index.js'
 import type { CategoryDef, PreferenceState } from '../../shared/types.js'
 import type { SuppressionScope } from '../../shared/enums.js'
+import { PREFERENCES_DEFAULTS } from '../config.js'
 import { resolveProvider } from '../provider-lookup.js'
 import { appendPendingUnsub } from '../unsub-journal.js'
 import { attributeUnsubscribeToSend } from '../runner/broadcast-control.js'
@@ -290,6 +291,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   // GET + POST /unsub/:token
   // -------------------------------------------------------------------------
   const categories: CategoryDef[] = mailer.config.categories ?? []
+  const pauseLengths = (): number[] => [...(mailer.config.preferences?.pauseDays ?? PREFERENCES_DEFAULTS.pauseDays)]
 
   router.get('/unsub/:token', wrap(logger, async (req: Request, res: Response) => {
     const decoded = verifyUnsubscribeToken((req.params as any).token, mailer.config.unsubscribeSecret)
@@ -299,7 +301,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     if (categories.length > 0) {
       const prefs = await mailer.getPreferences(decoded.email)
       const action = req.originalUrl.split('?')[0]! + '/preferences'
-      return res.status(200).type('html').send(renderPreferencePage(decoded.email, categories, prefs, action))
+      return res.status(200).type('html').send(renderPreferencePage(decoded.email, categories, prefs, action, pauseLengths()))
     }
 
     res.status(200).type('html').send(`<!doctype html>
@@ -443,6 +445,37 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           })
         }
         return
+      }
+
+      // A pause is a time-boxed suppression row, not an unsubscribe: never
+      // journaled, and a failed write is a 503, never a 200 (INVARIANT 8).
+      if (body.pause !== undefined) {
+        const days = Number(body.pause)
+        if (typeof body.pause !== 'string' || !pauseLengths().includes(days)) return sendUnsubError(res, 'Unknown pause length.')
+        try {
+          const { pausedUntil } = await mailer.pauseMarketing(decoded.email, { days, source: 'preferences' })
+          return res.status(200).type('html').send(preferencesDonePage(`Paused until ${formatPauseDate(pausedUntil)}. You'll get no marketing email until then.`))
+        } catch (err) {
+          logger.error?.({ err }, 'mailery: pause failed')
+          return res
+            .status(503)
+            .set('Retry-After', '60')
+            .type('html')
+            .send(preferencesDonePage('We could not pause your emails right now. Please try again in a minute.'))
+        }
+      }
+      if (body.action === 'resume') {
+        try {
+          await mailer.resumeMarketing(decoded.email, { source: 'preferences' })
+          return res.status(200).type('html').send(preferencesDonePage('Your emails will resume.'))
+        } catch (err) {
+          logger.error?.({ err }, 'mailery: resume failed')
+          return res
+            .status(503)
+            .set('Retry-After', '60')
+            .type('html')
+            .send(preferencesDonePage('We could not resume your emails right now. Please try again in a minute.'))
+        }
       }
 
       if (body.action !== 'save' && body.action !== 'resubscribe') return sendUnsubError(res, 'Unknown action.')
@@ -741,7 +774,12 @@ const PREFERENCE_PAGE_STYLE =
   'label{display:block;margin:12px 0}.desc{display:block;margin-left:24px;color:#57534e;font-size:13px}.actions{margin-top:20px}button.secondary{background:#1c1917}button.link{background:none;color:#dc2626;text-decoration:underline;padding:10px 0;margin-left:12px}'
 
 function preferencesDonePage(message: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8" /><title>Email preferences</title><style>${PREFERENCE_PAGE_STYLE}</style></head><body><p>${escapeHtml(message)}</p></body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8" /><title>Email preferences</title><style>${PREFERENCE_PAGE_STYLE}</style></head><body><p>${escapeText(message)}</p></body></html>`
+}
+
+/** Escape for element content, where an apostrophe is safe as written. */
+function escapeText(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 /** The preference page: one checkbox per declared category, plus unsubscribe-from-all. */
@@ -750,6 +788,7 @@ function renderPreferencePage(
   categories: CategoryDef[],
   prefs: PreferenceState,
   action: string,
+  pauseLengths: number[] = [],
 ): string {
   const boxes = categories
     .map((c) => {
@@ -762,6 +801,15 @@ function renderPreferencePage(
   const notice = optedOut
     ? `\n  <p class="notice"><strong>You're unsubscribed from all marketing email.</strong> Pick the topics you want and press Resubscribe to start receiving them again.</p>`
     : ''
+  let pauseSection = ''
+  if (prefs.pausedUntil && !optedOut) {
+    pauseSection = `\n    <p class="notice"><strong>Paused until ${formatPauseDate(prefs.pausedUntil)}.</strong> You'll get no marketing email until then.</p>\n    <button type="submit" name="action" value="resume" class="secondary">Resume now</button>`
+  } else if (!optedOut && pauseLengths.length > 0) {
+    const label = (d: number) => (d === 7 ? '1 week' : d === 14 ? '2 weeks' : d === 30 ? '1 month' : `${d} days`)
+    pauseSection =
+      `\n    <h2>Take a break</h2>\n    <p>Not now? Pause all marketing email and we'll start again on our own.</p>\n` +
+      pauseLengths.map((d) => `    <button type="submit" name="pause" value="${d}" class="secondary">Pause for ${label(d)}</button>`).join('\n')
+  }
   const buttons = optedOut
     ? `      <button type="submit" name="action" value="resubscribe" class="secondary">Resubscribe to the topics below</button>`
     : `      <button type="submit" name="action" value="save" class="secondary">Save preferences</button>
@@ -778,9 +826,13 @@ function renderPreferencePage(
 ${boxes}
     <div class="actions">
 ${buttons}
-    </div>
+    </div>${pauseSection}
   </form>
 </body></html>`
+}
+
+function formatPauseDate(d: Date): string {
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 }
 
 function escapeHtml(s: string): string {

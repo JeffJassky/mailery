@@ -12,8 +12,8 @@ import { sha256Hex } from '../tokens.js'
  * The scopes that block a send (0.21 rule, INVARIANT 4 extended by 22):
  *
  *   transactional             → ['all', 'transactional']
- *   marketing, no category    → ['all', 'marketing']
- *   marketing, category C     → ['all', 'marketing', 'category:C']
+ *   marketing, no category    → ['all', 'marketing', 'marketing_pause']
+ *   marketing, category C     → ['all', 'marketing', 'marketing_pause', 'category:C']
  *
  * A category on a transactional template is ignored (publish rejects it, so
  * it only reaches here from a hand-edited document).
@@ -24,8 +24,8 @@ import { sha256Hex } from '../tokens.js'
  */
 export function blockingScopes(kind: TemplateKind, category?: string | null): SuppressionScope[] {
   if (kind === 'transactional') return ['all', 'transactional']
-  if (category) return ['all', 'marketing', `category:${category}`]
-  return ['all', 'marketing']
+  if (category) return ['all', 'marketing', 'marketing_pause', `category:${category}`]
+  return ['all', 'marketing', 'marketing_pause']
 }
 
 export interface SuppressionResult {
@@ -51,7 +51,7 @@ export async function isSuppressed(
     scope: { $in: allowed },
     $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
   })
-  if (byEmail) return { suppressed: true, scope: byEmail.scope, reason: byEmail.reason }
+  if (byEmail) return { suppressed: true, scope: byEmail.scope, reason: byEmail.reason, expiresAt: byEmail.expiresAt ?? null }
 
   // Every row carries emailHash, so this lookup matches plaintext rows too —
   // it must honour expiresAt as well, or a temporary suppression never lifts.
@@ -60,7 +60,7 @@ export async function isSuppressed(
     scope: { $in: allowed },
     $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
   })
-  if (hashed) return { suppressed: true, scope: hashed.scope, reason: hashed.reason }
+  if (hashed) return { suppressed: true, scope: hashed.scope, reason: hashed.reason, expiresAt: hashed.expiresAt ?? null }
 
   return { suppressed: false }
 }

@@ -316,10 +316,10 @@ body: { name: string; externalId: string; properties?: object; dedupeKey?: strin
 ### `GET /contacts/:externalId` · `GET /contacts/by-email/:email`
 
 ```ts
-→ { contact, isTestContact: boolean | null, subscription, suppressions, preferences?: { marketing, categories }, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
+→ { contact, isTestContact: boolean | null, subscription, suppressions, preferences?: { marketing, categories, pausedUntil }, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
 ```
 
-`preferences` is present only when `categories` are declared.
+`preferences` is present only when `categories` are declared. `pausedUntil` is an ISO date while a marketing pause is live, else `null`.
 
 ### `GET /contacts/:externalId/unsubscribe-url` — test contacts only
 

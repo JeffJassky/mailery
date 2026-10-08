@@ -282,7 +282,12 @@ async function decideNext(ctx: RunnerContext, a: NextArgs): Promise<ProgramSimul
   const timing = sendTimeFor(def, a.facts, choice, book, now)
   if (timing.at.getTime() > now.getTime()) return chosen(timing.gate ?? 'delivery-window', timing.at)
 
-  if (a.subjectId && !(await hasRecipient(ctx, def, a.subjectId))) return chosen('no-recipients', null)
+  if (a.subjectId) {
+    const rcpt = await hasRecipient(ctx, def, a.subjectId)
+    if (!rcpt.any) {
+      return chosen('no-recipients', null, rcpt.until ? `all recipients paused until ${rcpt.until.toISOString().slice(0, 10)}` : undefined)
+    }
+  }
 
   const drift = await templateDrift(ctx, def, choice.templateSlug)
   if (drift) {
@@ -296,16 +301,27 @@ async function decideNext(ctx: RunnerContext, a: NextArgs): Promise<ProgramSimul
   return chosen(a.arm === 'holdout' ? 'holdout' : 'send', now)
 }
 
-/** Step 13: at least one distinct contact with an email who is not suppressed. */
-async function hasRecipient(ctx: RunnerContext, def: ProgramDefinition, subjectId: string): Promise<boolean> {
+/**
+ * Step 13: at least one distinct contact with an email who is not suppressed.
+ * `until` is the earliest expiry among the suppressions that removed
+ * recipients (a pause), set only when none remain.
+ */
+async function hasRecipient(
+  ctx: RunnerContext,
+  def: ProgramDefinition,
+  subjectId: string,
+): Promise<{ any: boolean; until: Date | null }> {
   const contacts = await ctx.config.factsAdapter!.recipients(subjectId, def.recipients)
   const seen = new Set<string>()
+  let until: Date | null = null
   for (const c of contacts ?? []) {
     if (!c || !c.email || !c.email.trim() || seen.has(c.externalId)) continue
     seen.add(c.externalId)
-    if (!(await isSuppressed(ctx.collections, c.email, 'marketing', def.category)).suppressed) return true
+    const supp = await isSuppressed(ctx.collections, c.email, 'marketing', def.category)
+    if (!supp.suppressed) return { any: true, until: null }
+    if (supp.expiresAt && (!until || supp.expiresAt < until)) until = supp.expiresAt
   }
-  return false
+  return { any: false, until }
 }
 
 /**
