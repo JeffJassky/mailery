@@ -200,7 +200,7 @@ export interface ChipField {
   label: string
 }
 
-export const EDITABLE_CHIPS: ReadonlySet<ChipKey> = new Set(['gap', 'window', 'quiet', 'sunset', 'holdout'])
+export const EDITABLE_CHIPS: ReadonlySet<ChipKey> = new Set(['gap', 'progress', 'window', 'quiet', 'sunset', 'holdout'])
 
 export function chipFields(key: ChipKey, def: ProgramDefinition): ChipField[] {
   const p = def.policy
@@ -208,10 +208,19 @@ export function chipFields(key: ChipKey, def: ProgramDefinition): ChipField[] {
   switch (key) {
     case 'gap':
       return [{ name: 'days', kind: 'number', value: s(p.minGapDays), label: 'Min gap between emails (days)' }]
+    case 'progress':
+      return [{ name: 'days', kind: 'number', value: s(p.progressGapDays), label: 'Gap after progress (days)' }]
     case 'window':
       return [
         { name: 'weekdays', kind: 'bool', value: p.delivery?.weekdaysOnly ? '1' : '', label: 'Weekdays only' },
         { name: 'time', kind: 'time', value: s(p.delivery?.timeOfDay), label: 'Time of day (HH:MM)' },
+        { name: 'useSessionHour', kind: 'bool', value: p.delivery?.useSessionHour ? '1' : '', label: "At the subject's usual hour" },
+        {
+          name: 'sessionHourOffsetMinutes',
+          kind: 'number',
+          value: s(p.delivery?.sessionHourOffsetMinutes),
+          label: 'Offset from usual hour (minutes)',
+        },
       ]
     case 'quiet':
       return [{ name: 'hours', kind: 'number', value: s(p.suppressIfSessionWithinHours), label: 'Quiet after a session (hours)' }]
@@ -246,6 +255,13 @@ export function applyChipEdit(def: ProgramDefinition, key: ChipKey, v: Record<st
       next.policy.minGapDays = n
       return next
     }
+    case 'progress': {
+      const n = num(v.days)
+      if (n === undefined || (n !== null && n < 0)) return def
+      if (n === null || n === 0) delete next.policy.progressGapDays
+      else next.policy.progressGapDays = n
+      return next
+    }
     case 'quiet': {
       const n = num(v.hours)
       if (n === undefined || (n !== null && n < 0)) return def
@@ -268,6 +284,16 @@ export function applyChipEdit(def: ProgramDefinition, key: ChipKey, v: Record<st
       else delete d.weekdaysOnly
       if (time) d.timeOfDay = time
       else delete d.timeOfDay
+      if (v.useSessionHour !== undefined) {
+        if (v.useSessionHour) d.useSessionHour = true
+        else delete d.useSessionHour
+      }
+      if (v.sessionHourOffsetMinutes !== undefined) {
+        const off = num(v.sessionHourOffsetMinutes)
+        if (off === undefined || (off !== null && (!Number.isInteger(off) || Math.abs(off) > 720))) return def
+        if (off === null || off === 0) delete d.sessionHourOffsetMinutes
+        else d.sessionHourOffsetMinutes = off
+      }
       if (Object.keys(d).length === 0) delete next.policy.delivery
       else next.policy.delivery = d
       return next

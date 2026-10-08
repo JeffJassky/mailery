@@ -112,7 +112,7 @@ Mailer.init({
 - `declare` is what publish checks `fact` predicates against, and what an editor can offer as typeahead.
 - `resolve` runs **once per tick** and once more per send at dispatch (the re-verify). Keep it cheap and read-only.
 - Facts are **host state only**. Never compute one from `mailer_*` collections: an action whose own email flips a fact it reads is a loop.
-- Two names are reserved: `last_session_at` (date) feeds `suppressIfSessionWithinHours` and the sunset engagement check; `timezone` (IANA string) feeds `delivery.useContactTimezone` and the [contact policy](./contact-policy) quiet hours.
+- Three names are reserved: `usual_session_hour_utc` (number, integer 0-23: the UTC hour of day in which the subject is most often active; feeds `delivery.useSessionHour`), `last_session_at` (date) feeds `suppressIfSessionWithinHours` and the sunset engagement check; `timezone` (IANA string) feeds `delivery.useContactTimezone` and the [contact policy](./contact-policy) quiet hours.
 - For connection actions, define `satisfied` as "first data landed", not "account id present", or sync lag makes the action satisfied while the user still sees an empty dashboard. Decide that in the adapter, not the engine.
 
 ## The tick
@@ -126,13 +126,13 @@ A run is ticked when its `nextTickAt` arrives (the mailer tick scans for due run
 5. **Evaluate actions** in priority order (ties: definition order). Each is satisfied, held, blocked by `requires`, ineligible, cooling down, exhausted, or a candidate.
 6. **Complete** the run when every action is satisfied (or exhausted with `onExhaust: 'skip'` and no cooldown); fire `onComplete` once.
 7. **Engagement**: a newly satisfied action, a newer `last_session_at`, or a non-bot click on one of the run's emails resets the sunset counters and wakes a `sunset` run. Opens never count.
-8. Choose the top candidate, then stay silent if: the run is `sunset`; a previous send is still in flight; the subject was in the app within `suppressIfSessionWithinHours`; `minGapDays` (or the attempt's own `minGapDays`, widened by `slowFactor` once sunset stage 1 is reached) has not elapsed; or the delivery window is closed.
+8. Choose the top candidate, then stay silent if: the run is `sunset`; a previous send is still in flight; the subject was in the app within `suppressIfSessionWithinHours`; `minGapDays` (or the attempt's own `minGapDays`, widened by `slowFactor` once sunset stage 1 is reached) has not elapsed; or the delivery window is closed or the time falls on a [blackout date](./contact-policy#blackout-dates). When the subject made progress since the last send (an action completed, or a human click on a program email), `progressGapDays` replaces the gap if it is shorter.
 9. Resolve recipients, drop blank addresses and addresses opted out of the program's category, and write one send row per recipient.
 10. Write the decision row and schedule the next tick.
 
 Every tick that gets past step 3 writes a decision row, including silent ones. The row lists every candidate with `blockedBy` (`satisfied`, `ineligible`, `requires:<id>`, `exhausted`, `cooldown`, `hold`) so "why didn't they get X" is always answerable.
 
-When the next tick happens: after a send, `lastSentAt` plus the gap for the next attempt; for `min-gap` and `delivery-window`, the instant the constraint lifts; for `session-suppressed`, the session time plus the window; while a send is in flight, an hour; with nothing to do, the earlier of `minGapDays` and the next moment a relative-time condition (`minAgeDays`, `maxAgeDays`, `sinceEntry`) changes value, so a run waiting for "day 3" wakes on day 3; with no recipients, `minGapDays`; when sunset, `minGapDays × slowFactor`; when the contact policy defers the send, its `notBefore`.
+When the next tick happens: after a send, `lastSentAt` plus the gap for the next attempt; for `min-gap`, `delivery-window` and `blackout`, the instant the constraint lifts; for `session-suppressed`, the session time plus the window; while a send is in flight, an hour; with nothing to do, the earlier of `minGapDays` and the next moment a relative-time condition (`minAgeDays`, `maxAgeDays`, `sinceEntry`) changes value, so a run waiting for "day 3" wakes on day 3; with no recipients, `minGapDays`; when sunset, `minGapDays × slowFactor`; when the contact policy defers the send, its `notBefore`.
 
 ## Attempts are consumed by accepted sends only
 
@@ -148,7 +148,7 @@ Immediately before the provider call, including after a contact-policy deferral,
 
 ## Sunset
 
-`unansweredAttempts` counts accepted sends since the last engagement (a session, a human click, or any action newly satisfied). At `slowAfter` the gap is multiplied by `slowFactor`. At `askAfter` one "still want these?" email (`askTemplateSlug`) is sent; once it is accepted the run goes `sunset` and stays silent until the subject engages. The ask is not an attempt of any action. A suppressed ask leaves the run active, and the next tick asks again.
+`unansweredAttempts` counts accepted sends since the last engagement (a session, a human click, or any action newly satisfied). At `slowAfter` the gap is multiplied by `slowFactor`. At `askAfter` one "still want these?" email (`askTemplateSlug`) is sent; once it is accepted the run goes `sunset` and stays silent until the subject engages. The ask is not an attempt of any action. A human click on a program email also wakes the run (`nextTickAt` is pulled forward to now), so the engagement reset and any `progressGapDays` shortening apply without waiting for the scheduled tick. Sessions alone are not progress: a login already triggers the session quiet period. A suppressed ask leaves the run active, and the next tick asks again.
 
 ## Templates
 
@@ -231,3 +231,20 @@ npx mailery backfill-categories --map welcome-1=lifecycle.onboarding,news-june=p
 ```
 
 `backfill-categories` sets `category` on marketing templates. It refuses transactional templates and malformed ids, will not replace a different existing category unless you pass `--overwrite`, writes an audit row per change (`template.backfill_category`), and is idempotent. It cannot see your declared categories either, so run `doctor --categories` afterwards.
+
+## Cadence controls
+
+Every knob that decides *when* a program email goes out, in one place.
+
+| Knob | Where | Effect |
+| --- | --- | --- |
+| `policy.minGapDays` | program | Minimum days between sends; an attempt's own `minGapDays` overrides it for that attempt. |
+| `policy.progressGapDays` | program | Gap used instead when it is shorter and the subject made progress since the last send (an action completed, or a human click on a program email). Applies to one send; the next one is back to the normal gap. Lint warns when it is not shorter than `minGapDays`. |
+| `policy.suppressIfSessionWithinHours` | program | Stay quiet for this long after a session (`last_session_at`). |
+| `policy.sunset` | program | Slow down, then ask, after unanswered emails. Engagement resets it. |
+| `policy.delivery` | program | `weekdaysOnly`, `timeOfDay`, `timezone` / `useContactTimezone`. |
+| `policy.delivery.useSessionHour` | program | Send at the subject's usual hour: `timeOfDay` is replaced by the `usual_session_hour_utc` fact, converted to the window's zone on the day of sending. `timeOfDay` is the fallback when the fact is missing or not an hour 0-23. Publish requires the fact declared as a number. |
+| `policy.delivery.sessionHourOffsetMinutes` | program | Minutes added to the usual hour (negative = earlier), -720 to 720. |
+| `contactPolicy.marketing.blackoutDates` | mailer-wide | Calendar ranges with no marketing sends; programs wait until the day after, flows and broadcasts defer. See [Contact policy](./contact-policy#blackout-dates). |
+| `contactPolicy.marketing.*` | mailer-wide | Cross-system gap, rolling cap, quiet hours. |
+

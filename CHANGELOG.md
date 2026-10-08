@@ -11,6 +11,9 @@ Additive. No forced data migration: every new field is optional, every new colle
 - **Programs.** Definitions with prioritised actions, attempt ladders, `requires`, cooldowns, sunset and holdout; `factsAdapter`; the tick, scheduler and decision log; `mailer.saveProgramDraft`, `publishProgram`, `setProgramEnabled`, `enterProgram`, `tickProgram`, `abortProgram`, `getProgramState`. Guide: `docs/guide/programs.md`.
 - **Programs surface.** Admin and agent routes (`/programs`: list, save draft, publish with 422 issues, enable, disable, detail, runs, run with decisions, state, stats by arm, force tick, abort, enter); admin screens (list, detail with JSON editor and funnel, run view with decision timeline).
 - **Relative-time conditions.** `minAgeDays` / `maxAgeDays` on date facts and a program-only `sinceEntry: { minDays?, maxDays? }` leaf ("signed up at least 3 days ago", "in the first 7 days of the program"); a run with nothing to send wakes when the condition flips instead of waiting out `minGapDays`; the board and simulator understand both.
+- **Send at the subject's usual hour.** `policy.delivery.useSessionHour` and `sessionHourOffsetMinutes` take the send time from the reserved `usual_session_hour_utc` fact, with `timeOfDay` as the fallback.
+- **Momentum.** `policy.progressGapDays` shortens the gap after progress (an action completed or a human click); a human click also wakes the run.
+- **Blackout dates.** `contactPolicy.marketing.blackoutDates`: calendar ranges with no marketing sends; sends defer (reason `blackout`), never drop; programs show the true next send.
 - **`mailery doctor`** (read-only upgrade check, non-zero on anything that would make a Program tick fail) and **`mailery backfill-categories --map slug=category[,...] [--dry-run]`**.
 
 ### Changed — new statuses

@@ -81,6 +81,16 @@ export function validateProgramDefinition(
     }
   }
 
+  if (def.policy.delivery?.useSessionHour === true && ctx.facts) {
+    const decl = facts.usual_session_hour_utc
+    if (!decl || decl.type !== 'number') {
+      issues.push({
+        path: 'policy.delivery.useSessionHour',
+        message: 'requires a declared number fact "usual_session_hour_utc"',
+      })
+    }
+  }
+
   // Entry / exit ---------------------------------------------------------
   if (def.exit.eventNames?.includes(def.entry.eventName)) {
     issues.push({ path: 'exit.eventNames', message: 'the entry event cannot also be an exit event' })

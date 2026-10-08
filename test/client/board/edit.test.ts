@@ -197,7 +197,7 @@ describe('policy chip edits', () => {
 
   it('exposes the current values as fields', () => {
     expect(chipFields('gap', d).map((f) => f.value)).toEqual(['3'])
-    expect(chipFields('window', d).map((f) => [f.name, f.value])).toEqual([['weekdays', '1'], ['time', '10:00']])
+    expect(chipFields('window', d).map((f) => [f.name, f.value])).toEqual([['weekdays', '1'], ['time', '10:00'], ['useSessionHour', ''], ['sessionHourOffsetMinutes', '']])
     expect(chipFields('sunset', d).map((f) => f.value)).toEqual(['3', '2', '6'])
     expect(chipFields('holdout', d)[0]!.value).toBe('10')
     expect(chipFields('entry', d)).toEqual([])

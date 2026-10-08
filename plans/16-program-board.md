@@ -119,6 +119,7 @@ send, the line says why in two to five words (reason table §2.5).
 | holdout | Holdout: logged, not sent |
 | min-gap | Waiting for the gap |
 | delivery-window | Waiting for the window |
+| blackout | Blackout dates |
 | session-suppressed | Recently active |
 | in-flight | Previous email in flight |
 | none-eligible | Nothing to send |
@@ -127,6 +128,8 @@ send, the line says why in two to five words (reason table §2.5).
 | exited | Exited |
 | sunset | Sunset |
 Append `detail` when present (e.g. a missing template).
+
+Policy chips (plans/17): `progress` (Rocket, `Nd`, tip `Gap after progress: N day(s)`, right after the gap chip, editable); the `window` chip reads `Usual hr` in place of the time when `useSessionHour` is set, and its popover gains the usual-hour toggle and offset fields. Lint adds `session-hour-fallback` and `progress-gap-not-shorter`.
 
 ### 2.6 Facts panel (beaker)
 A right drawer listing `facts` declarations (from `GET /programs/:slug`),

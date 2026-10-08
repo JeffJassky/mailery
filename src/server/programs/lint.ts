@@ -91,6 +91,25 @@ function warnings(def: ProgramDefinition, ctx: ProgramLintContext, invalidPaths:
     })
   })
 
+  const delivery = def.policy.delivery
+  if (delivery?.useSessionHour === true && !delivery.timeOfDay) {
+    out.push({
+      severity: 'warning',
+      code: 'session-hour-fallback',
+      path: 'policy.delivery.timeOfDay',
+      message: 'no timeOfDay fallback: subjects without a usual hour are sent as soon as the gap allows',
+    })
+  }
+  const fast = def.policy.progressGapDays
+  if (fast !== undefined && fast >= def.policy.minGapDays) {
+    out.push({
+      severity: 'warning',
+      code: 'progress-gap-not-shorter',
+      path: 'policy.progressGapDays',
+      message: `progressGapDays (${fast}) is not shorter than minGapDays (${def.policy.minGapDays}), so it never applies`,
+    })
+  }
+
   const sunset = def.policy.sunset
   if (sunset) {
     checkTemplate(sunset.askTemplateSlug, ASK_PATH, 'the sunset ask', SUNSET_ASK_ACTION_ID)
