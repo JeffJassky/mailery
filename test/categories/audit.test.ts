@@ -106,11 +106,13 @@ describe('a save never deletes rows the recipient did not write', () => {
     expect((await H.mailer.getPreferences(e)).marketing).toBe(false)
   })
 
-  it('an all-scope unsubscribe row IS cleared by save', async () => {
+  it('an all-scope unsubscribe row is kept by save and cleared by resubscribe', async () => {
     const e = 'allunsub@example.com'
     await row(e, 'all', 'unsubscribed')
     const base = await mount()
     await post(base, `/m/unsub/${token(e, C)}/preferences`, [['action', 'save'], ['category', C], ['category', P]])
+    expect(await scopes(e)).toEqual(['all/unsubscribed'])
+    await post(base, `/m/unsub/${token(e, C)}/preferences`, [['action', 'resubscribe'], ['category', C], ['category', P]])
     expect(await scopes(e)).toEqual([])
   })
 })

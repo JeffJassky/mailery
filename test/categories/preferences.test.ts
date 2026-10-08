@@ -4,8 +4,10 @@
  * Form contract for `POST /unsub/:token/preferences` (urlencoded):
  *   action=save            + `category=<id>` once per CHECKED category.
  *                          Unchecked declared categories are opted out,
- *                          checked ones opted back in, and marketing as a whole
- *                          is opted back in (the page was an explicit choice).
+ *                          checked ones opted back in. Never clears a
+ *                          marketing-wide (`marketing`/`all`) opt-out.
+ *   action=resubscribe     as save, and also clears the marketing/all opt-out
+ *                          (the only action that does).
  *   action=unsubscribe-all  marketing opt-out; categories ignored.
  *
  * Durability mirrors one-click (INVARIANT 8): opt-outs that cannot reach
@@ -318,11 +320,11 @@ describe('POST /unsub/:token/preferences', () => {
     expect(await rows('form@example.com')).toEqual([{ scope: `category:${P}`, reason: 'unsubscribed', source: 'preferences' }])
   })
 
-  it('save clears a previous marketing-wide unsubscribe', async () => {
+  it('resubscribe clears a previous marketing-wide unsubscribe', async () => {
     await optOut('back@example.com', 'marketing')
     const base = await mount()
     await http(base, 'POST', `/m/unsub/${token('back@example.com')}/preferences`, [
-      ['action', 'save'],
+      ['action', 'resubscribe'],
       ['category', C],
       ['category', P],
       ['category', W],

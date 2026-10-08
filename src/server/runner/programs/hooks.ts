@@ -45,6 +45,14 @@ export const programSendHooks: SendOriginHooks = {
       return { verdict: 'cancel', exitReason: 'run_inactive', message: 'program is disabled or unpublished' }
     }
 
+    // The template may have drifted since the tick chose it (INVARIANT 3/4/8):
+    // a program sends marketing mail in its own category, nothing else.
+    const tpl = await C.templates.findOne({ _id: send.templateId }, { projection: { kind: 1, category: 1 } })
+    if (!tpl || tpl.kind !== 'marketing' || (tpl.category ?? null) !== def.category) {
+      const why = !tpl ? 'is missing' : tpl.kind !== 'marketing' ? `is now ${tpl.kind}, not marketing` : `is now in category ${tpl.category ?? '(none)'}, not ${def.category}`
+      return { verdict: 'cancel', exitReason: 'ineligible_before_send', message: `template ${send.templateSlug} ${why}` }
+    }
+
     // The sunset ask is not an action: nothing to re-verify beyond the run itself.
     if (info.actionId === SUNSET_ASK_ACTION_ID) return { verdict: 'send' }
 
