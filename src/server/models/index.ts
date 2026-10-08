@@ -836,6 +836,8 @@ export interface ProgramRunDoc {
   /** Idempotency for the attempt counter: the last decision that advanced it. */
   lastCountedDecisionId: ObjectId | null
   nextTickAt: Date
+  /** Latest Facts Changed event that woke this run (0.21 PR4); a tick that sees it move re-ticks soon. */
+  wakeRequestedAt?: Date | null
   lease: { until: Date; worker: string } | null
   enteredAt: Date
   /** `occurredAt` of the event that entered the run. Exit events must be later. */

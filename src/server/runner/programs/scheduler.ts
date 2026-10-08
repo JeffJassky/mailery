@@ -112,10 +112,11 @@ async function scanFactsChanged(ctx: RunnerContext, program: ProgramDoc, now: Da
         programSlug: program.slug,
         subjectId: ev.externalId,
         status: { $in: ['active', 'sunset'] },
-        nextTickAt: { $gt: now },
         updatedAt: { $lt: ev.createdAt },
       },
-      { $set: { nextTickAt: now, updatedAt: now } },
+      // $min: a due or leased run keeps its (earlier) time; a sleeping one wakes now.
+      // wakeRequestedAt lets a tick already in progress notice the wake.
+      { $min: { nextTickAt: now }, $set: { updatedAt: now, wakeRequestedAt: ev.createdAt } },
       { projection: { _id: 1 } },
     )
     if (run) woken.add(String(run._id))

@@ -793,6 +793,11 @@ export class Mailer {
       )
     } else {
       await this.collections.programs.updateOne({ slug }, { $set: { enabled: false, updatedAt: now } })
+      // Kill switch: nothing already queued for this program may go out.
+      await this.collections.sends.updateMany(
+        { 'program.slug': slug, status: { $in: ['queued', 'deferred', 'held'] } },
+        { $set: { status: 'cancelled', exitReason: 'run_inactive', errorMessage: 'cancelled: program disabled', updatedAt: now } },
+      )
     }
     await this.audit({
       actor: opts.actor,
