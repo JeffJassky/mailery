@@ -122,6 +122,12 @@ async function tickLeased(
     sendIds?: ObjectId[]
     outcome?: ProgramDecisionDoc['outcome']
     nextTickAt?: Date
+    /**
+     * Runs after the decision and run state are persisted (the lease is still
+     * held). Send rows are created here, so a dispatch hook that fires at once
+     * writes on top of finished state and nothing this tick wrote can clobber it.
+     */
+    after?: () => Promise<void>
   }): Promise<ProgramTickResult> => {
     const sendIds = r.sendIds ?? []
     const inline = Buffer.byteLength(stableJson(facts)) < INLINE_FACTS_MAX_BYTES
@@ -147,11 +153,20 @@ async function tickLeased(
       trigger,
     })
 
-    const set: Record<string, unknown> = { ...runSet, ...actionDiffs(works), programVersion: program.version, lease: null, updatedAt: now }
+    const set: Record<string, unknown> = { ...runSet, ...actionDiffs(works), programVersion: program.version, updatedAt: now }
+    if (!r.after) set.lease = null
     if (r.nextTickAt) {
       set.nextTickAt = r.nextTickAt.getTime() > nowMs ? r.nextTickAt : new Date(nowMs + MIN_ADVANCE_MS)
     }
-    await C.programRuns.updateOne({ _id: runId }, { $set: set })
+    // A Facts Changed wake that landed while this tick ran (wakeRequestedAt moved
+    // since we took the lease) must not be lost: tick again soon.
+    const wakeAtStart = run.wakeRequestedAt ?? null
+    const res = await C.programRuns.updateOne({ _id: runId, wakeRequestedAt: wakeAtStart } as any, { $set: set })
+    if (res.matchedCount === 0) {
+      if (r.nextTickAt) set.nextTickAt = new Date(nowMs + MIN_ADVANCE_MS)
+      await C.programRuns.updateOne({ _id: runId }, { $set: set })
+    }
+    if (r.after) await r.after()
     return { status: 'ticked', decisionId, reason: r.reason, chosen: r.chosen, attempt: r.attempt, sendIds }
   }
 
@@ -258,7 +273,7 @@ async function tickLeased(
 
   // 5. completion.
   const done = works.every(
-    (w) => w.satisfied || (w.st.status === 'exhausted' && w.action.onExhaust === 'skip' && !w.action.cooldownDays),
+    (w) => w.satisfied || (w.blockedBy === 'exhausted' && w.action.onExhaust === 'skip' && !w.action.cooldownDays),
   )
   if (done) {
     const fire = def.exit.onComplete?.fireEvent
@@ -448,7 +463,6 @@ async function tickLeased(
   }))
 
   if (holdout) {
-    await C.sends.insertMany(docs)
     // Simulated acceptance: the same ladder effects a real accepted send has (§5.5).
     if (!asking) {
       const w = works.find((x) => x.action.id === first.action.id)!
@@ -474,22 +488,19 @@ async function tickLeased(
       sendIds,
       outcome: { status: 'holdout', at: now },
       nextTickAt: new Date(nowMs + gapMs(def, chosenAction, nextAttempt, stage)),
+      // Counting state is persisted first, so a crash can lose a holdout row
+      // but never replays the attempt (and never duplicates a row).
+      after: async () => {
+        await C.sends.insertMany(docs)
+      },
     })
   }
 
-  // In-flight marker first: a crash between here and the decision write cannot
-  // produce a second send on the next tick.
-  const inFlight = { decisionId, actionId, attempt: attemptNo!, sendIds, at: now }
-  runSet.inFlight = inFlight
-  await C.programRuns.updateOne({ _id: runId }, { $set: { inFlight } })
-  await C.sends.insertMany(docs)
-  for (const id of sendIds) {
-    await ctx.queues.send.add(
-      'send',
-      { sendId: String(id) },
-      { attempts: ctx.config.sendRetryAttempts, backoff: { type: 'exponential', delay: 60_000 } },
-    )
-  }
+  // In-flight marker, run state and the decision row go first; the send rows
+  // and queue jobs follow (still under the lease). A dispatch hook then
+  // writes on top of finished state. A crash before the rows exist leaves an
+  // inFlight whose sends are missing, which the next tick treats as terminal.
+  runSet.inFlight = { decisionId, actionId, attempt: attemptNo!, sendIds, at: now }
   return finish({
     reason: asking ? 'sunset' : 'highest-rank',
     chosen: chosenId,
@@ -497,6 +508,16 @@ async function tickLeased(
     candidates: candidatesRows,
     sendIds,
     nextTickAt: new Date(nowMs + IN_FLIGHT_RECHECK_MS),
+    after: async () => {
+      await C.sends.insertMany(docs)
+      for (const id of sendIds) {
+        await ctx.queues.send.add(
+          'send',
+          { sendId: String(id) },
+          { attempts: ctx.config.sendRetryAttempts, backoff: { type: 'exponential', delay: 60_000 } },
+        )
+      }
+    },
   })
 }
 

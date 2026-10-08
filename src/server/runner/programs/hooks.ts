@@ -63,10 +63,31 @@ export const programSendHooks: SendOriginHooks = {
     const done = run.actions?.[action.id]?.completedAt != null || (await evaluateProgramPredicate(action.satisfied, predCtx))
     if (done) {
       // Monotonic (INVARIANT 21): set once, never cleared.
-      await C.programRuns.updateOne(
-        { _id: run._id, $or: [{ [`actions.${action.id}.completedAt`]: null }, { [`actions.${action.id}`]: { $exists: false } }] },
-        { $set: { [`actions.${action.id}.completedAt`]: now, [`actions.${action.id}.status`]: 'satisfied' } },
+      const key = `actions.${action.id}`
+      // A complete state if the run never saw this action; otherwise just the two fields.
+      const created = await C.programRuns.updateOne(
+        { _id: run._id, [key]: { $exists: false } },
+        {
+          $set: {
+            [key]: {
+              status: 'satisfied',
+              attempts: 0,
+              ladder: 1,
+              lastSentAt: null,
+              completedAt: now,
+              exhaustedAt: null,
+              cooldownUntil: null,
+              version: action.version,
+            },
+          },
+        },
       )
+      if (created.modifiedCount === 0) {
+        await C.programRuns.updateOne(
+          { _id: run._id, [`${key}.completedAt`]: null },
+          { $set: { [`${key}.completedAt`]: now, [`${key}.status`]: 'satisfied' } },
+        )
+      }
       return { verdict: 'cancel', exitReason: 'satisfied_before_send', message: `action ${action.id} is already satisfied` }
     }
     if (action.eligible && !(await evaluateProgramPredicate(action.eligible, predCtx))) {
