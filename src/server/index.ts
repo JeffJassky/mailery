@@ -101,6 +101,15 @@ export type {
   OutboxDoc,
   FlowVersionDoc,
   TemplateVersionDoc,
+  ProgramDoc,
+  ProgramVersionDoc,
+  ProgramRunDoc,
+  ProgramRunActionState,
+  ProgramDecisionDoc,
+  ProgramDecisionCandidate,
+  ProgramBlockedBy,
+  SendProgramInfo,
+  ContactPolicyReason,
 } from './models/index.js'
 
 // Token helpers (rarely needed by hosts, useful for tests)
@@ -131,7 +140,31 @@ export type {
   Predicate,
   SegmentDefinition,
   SegmentFilter,
+  // 0.21
+  FactPredicate,
+  CategoryDef,
+  PreferenceState,
+  PreferenceUpdate,
+  ContactPolicy,
+  FactValue,
+  Facts,
+  FactDecl,
+  FactsAdapter,
+  RecipientRule,
+  ProgramAttempt,
+  ProgramAction,
+  ProgramSunset,
+  ProgramPolicy,
+  ProgramDefinition,
+  ProgramChecklistItem,
 } from '../shared/types.js'
+export type { ProgramsConfig } from './config.js'
+export { CATEGORY_ID_RE } from './config.js'
+export { validateProgramDefinition, referencedTemplateSlugs, SUNSET_ASK_ACTION_ID } from './programs/validate.js'
+export type { ProgramValidationIssue, ProgramValidationContext, ProgramValidationResult } from './programs/validate.js'
+export { FACTS_CHANGED_EVENT, holdoutArm } from './runner/programs/index.js'
+export type { ProgramTickResult } from './runner/programs/index.js'
+export { tokenScope } from './tokens.js'
 
 export type {
   SubscriptionStatus,
@@ -143,6 +176,13 @@ export type {
   BroadcastStatus,
   HealthStatus,
   FlowGoal,
+  CategoryScope,
+  SendOrigin,
+  SendExitReason,
+  ProgramRunStatus,
+  ProgramActionStatus,
+  ProgramArm,
+  ProgramDecisionReason,
 } from '../shared/enums.js'
 
 // Option lists for tooling / admin UIs — flow step kinds, predicate kinds,
