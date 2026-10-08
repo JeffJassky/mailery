@@ -1,17 +1,20 @@
-/* Program detail (0.21): actions, JSON draft editor, funnel by arm, runs */
+/* Program detail (0.21): board, runs, stats, JSON draft editor */
 import React from 'react'
 import { PageHead } from '../components/shell'
 import { api, type ProgramArmFunnel } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
+import { Icons } from '../components/icons'
+import { IconButton, Tip } from '../components/tip'
+import { Board } from './program-board/board'
 
 const CodeEditor = React.lazy(() => import('../components/code-editor'))
 
-const compact = (v: unknown): string => (v === undefined ? '—' : JSON.stringify(v))
-
 export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: any) => void }) {
   const { data: prog, loading, error, refetch } = useLive(() => api.program(slug), [slug])
-  const [tab, setTab] = React.useState<'actions' | 'editor' | 'funnel' | 'runs'>('actions')
+  const [tab, setTab] = React.useState<'board' | 'runs' | 'stats' | 'json'>('board')
+  const [editing, setEditing] = React.useState(false)
+  const [boardDirty, setBoardDirty] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [issues, setIssues] = React.useState<Array<{ path: string; message: string }>>([])
@@ -61,34 +64,66 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
       loadedFor.current = ''
     })
 
+  function goTab(t: typeof tab) {
+    if (t === tab) return
+    if (tab === 'board' && editing) {
+      if (boardDirty && !window.confirm('Discard unsaved changes?')) return
+      setEditing(false)
+    }
+    setTab(t)
+  }
+
   if (loading && !prog) return <LoadState loading error={null} empty={false}><></></LoadState>
   if (error || !prog) return <LoadState loading={false} error={error} empty={false} retry={refetch}><></></LoadState>
 
-  const def = prog.published
+  const name = prog.draft?.definition?.name ?? prog.published?.name ?? slug
+  const toggleLabel = prog.version < 1 ? 'Publish first' : prog.enabled ? 'Enabled (click to disable)' : 'Disabled (click to enable)'
   return (
     <>
       <PageHead
-        title={def?.name ?? prog.draft?.definition?.name ?? slug}
-        desc={
-          <>
-            <span className="mono">{slug}</span> · {prog.version > 0 ? `v${prog.version}` : 'never published'} ·{' '}
-            <span className={'pill ' + (prog.enabled ? 'green' : 'neutral')}>{prog.enabled ? 'enabled' : 'disabled'}</span>
-            {prog.draft && <span className="pill amber" style={{ marginLeft: 6 }}>unpublished draft</span>}
-          </>
+        title={
+          <span className="hstack" style={{ gap: 10 }}>
+            <span>{name}</span>
+            {prog.version > 0 && <span className="pill neutral">v{prog.version}</span>}
+            <Tip label={toggleLabel}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={prog.enabled}
+                aria-label={toggleLabel}
+                className={'switch' + (prog.enabled ? ' on' : '')}
+                disabled={busy || prog.version < 1}
+                onClick={() => (prog.enabled ? act('Disabled.', () => api.disableProgram(slug)) : act('Enabled.', () => api.enableProgram(slug)))}
+              >
+                <span />
+              </button>
+            </Tip>
+            {prog.draft && (
+              <Tip label="Unpublished changes" focusable>
+                <span className="pb-dot" />
+              </Tip>
+            )}
+          </span>
         }
+        desc={<span className="mono">{slug}</span>}
         actions={
           <>
-            {prog.enabled ? (
-              <button className="btn" disabled={busy} onClick={() => act('Disabled.', () => api.disableProgram(slug))}>Disable</button>
-            ) : (
-              <button
-                className="btn btn-primary"
-                disabled={busy || prog.version < 1}
-                title={prog.version < 1 ? 'Publish first' : 'Enabling does not replay earlier entry events; use Enter on the runs tab to backfill.'}
-                onClick={() => act('Enabled.', () => api.enableProgram(slug))}
-              >
-                Enable
-              </button>
+            {prog.draft && (
+              <Tip label={boardDirty ? 'Save the draft first' : ''}>
+                <button className="btn btn-primary" disabled={busy || boardDirty} onClick={publish}>Publish</button>
+              </Tip>
+            )}
+            {tab === 'board' && (
+              <IconButton
+                icon={<Icons.Pencil />}
+                label={editing ? 'Stop editing' : 'Edit'}
+                active={editing}
+                disabled={!prog.draft && !prog.published}
+                onClick={() => {
+                  if (editing && boardDirty && !window.confirm('Discard unsaved changes?')) return
+                  setEditing(!editing)
+                }}
+              />
             )}
           </>
         }
@@ -98,17 +133,25 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
         <div className="text-xs" style={{ marginBottom: 12, color: msg.kind === 'err' ? 'var(--red-fg)' : 'var(--green-fg)' }}>{msg.text}</div>
       )}
 
-      <div className="tabs">
-        {(['actions', 'editor', 'funnel', 'runs'] as const).map((t) => (
-          <div key={t} className={'tab' + (tab === t ? ' active' : '')} onClick={() => setTab(t)}>
-            {t === 'editor' ? 'Definition' : t[0]!.toUpperCase() + t.slice(1)}
+      <div className="tabs" role="tablist">
+        {([['board', 'Board'], ['runs', 'Runs'], ['stats', 'Stats'], ['json', 'JSON']] as const).map(([t, label]) => (
+          <div
+            key={t}
+            role="tab"
+            tabIndex={0}
+            aria-selected={tab === t}
+            className={'tab' + (tab === t ? ' active' : '')}
+            onClick={() => goTab(t)}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), goTab(t))}
+          >
+            {label}
           </div>
         ))}
       </div>
 
-      {tab === 'actions' && <ActionsTable def={def} />}
+      {tab === 'board' && <Board slug={slug} prog={prog} setRoute={setRoute} extraIssues={issues} editing={editing} onDirty={setBoardDirty} onSaved={refetch} />}
 
-      {tab === 'editor' && (
+      {tab === 'json' && (
         <div className="card" style={{ padding: 16 }}>
           <div className="hstack" style={{ gap: 8, marginBottom: 12 }}>
             <button className="btn" disabled={busy || !dirty} onClick={saveDraft}>Save draft</button>
@@ -140,43 +183,9 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
         </div>
       )}
 
-      {tab === 'funnel' && <Funnel slug={slug} />}
+      {tab === 'stats' && <Funnel slug={slug} />}
       {tab === 'runs' && <Runs slug={slug} setRoute={setRoute} />}
     </>
-  )
-}
-
-function ActionsTable({ def }: { def: any }) {
-  if (!def) return <div className="card text-xs subtle" style={{ padding: 16 }}>Not published yet. Use the Definition tab to edit the draft and publish it.</div>
-  return (
-    <div className="card card-pad-0">
-      <table className="table">
-        <thead>
-          <tr>
-            <th className="num">Priority</th>
-            <th>Action</th>
-            <th className="num">Attempts</th>
-            <th>Requires</th>
-            <th>Eligible</th>
-            <th>Satisfied</th>
-            <th>On exhaust</th>
-          </tr>
-        </thead>
-        <tbody>
-          {def.actions.length === 0 ? <EmptyRow colSpan={7} /> : def.actions.map((a: any) => (
-            <tr key={a.id}>
-              <td className="num tabular">{a.priority}</td>
-              <td><div className="f500">{a.title}</div><div className="text-xs subtle mono">{a.id} v{a.version}</div></td>
-              <td className="num tabular">{a.attempts.length}</td>
-              <td className="mono text-xs">{(a.requires ?? []).join(', ') || '—'}</td>
-              <td className="mono text-xs" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{compact(a.eligible)}</td>
-              <td className="mono text-xs" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{compact(a.satisfied)}</td>
-              <td className="text-xs">{a.onExhaust}{a.cooldownDays ? ` · ${a.cooldownDays}d cooldown` : ''}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
   )
 }
 
