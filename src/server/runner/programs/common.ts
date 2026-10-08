@@ -72,13 +72,18 @@ export const MIN_ADVANCE_MS = 60 * 1000
 /**
  * Has this send of a Program decision still got a chance to reach a provider?
  * queued/sending/deferred/held are in flight. A `failed` send is too while the
- * queue's retries are pending, which we bound by `queuedAt` (after
- * IN_FLIGHT_RECHECK_MS it is treated as dead). A missing row is terminal.
+ * queue's retries are pending, which we bound by the time of the last failure
+ * (`updatedAt`, set by every failure write; `queuedAt` for legacy rows): after
+ * IN_FLIGHT_RECHECK_MS without a new failure it is treated as dead. A missing
+ * row is terminal.
  */
-export function sendIsInFlight(send: { status: string; queuedAt: Date } | null | undefined, now: Date): boolean {
+export function sendIsInFlight(
+  send: { status: string; queuedAt: Date; updatedAt?: Date | null } | null | undefined,
+  now: Date,
+): boolean {
   if (!send) return false
   if (send.status === 'queued' || send.status === 'sending' || send.status === 'deferred' || send.status === 'held') return true
-  if (send.status === 'failed') return now.getTime() - send.queuedAt.getTime() < IN_FLIGHT_RECHECK_MS
+  if (send.status === 'failed') return now.getTime() - (send.updatedAt ?? send.queuedAt).getTime() < IN_FLIGHT_RECHECK_MS
   return false
 }
 

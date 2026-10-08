@@ -32,12 +32,15 @@ import {
   stableJson,
   timezoneFact,
 } from './common.js'
-import { acquireLease, PROCESS_WORKER, releaseLease } from './lease.js'
+import { countAcceptedSend } from './hooks.js'
+import { acquireLease, LeaseLostError, PROCESS_WORKER, releaseLease, renewLease } from './lease.js'
 import { evaluateProgramPredicate, toEpochMs } from './predicate.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
 import type { ProgramTickOptions, ProgramTickResult } from './index.js'
 
 const ACTIVE_STATUSES = ['active', 'sunset'] as const
+/** Send statuses that mean the provider accepted the mail. */
+const COUNTABLE = ['sent', 'delivered', 'bounced', 'complained']
 
 /** Run one tick for one run. The full algorithm is §5.4 of the spec. */
 export async function tickProgramRun(
@@ -67,7 +70,12 @@ export async function tickProgramRun(
   }
 
   try {
-    return await tickLeased(ctx, run, program as ProgramDoc & { definition: ProgramDefinition }, now, trigger)
+    return await tickLeased(ctx, run, program as ProgramDoc & { definition: ProgramDefinition }, now, trigger, worker)
+  } catch (err) {
+    // Another worker took the run over while this tick was in a slow host call.
+    // Nothing was written on its behalf (writes are fenced on the lease).
+    if (err instanceof LeaseLostError) return { status: 'skipped', skipped: 'leased' }
+    throw err
   } finally {
     await releaseLease(ctx, runId, worker).catch(() => {})
   }
@@ -91,6 +99,7 @@ async function tickLeased(
   program: ProgramDoc & { definition: ProgramDefinition },
   now: Date,
   trigger: ProgramDecisionDoc['trigger'],
+  worker: string,
 ): Promise<ProgramTickResult> {
   const C = ctx.collections
   const def = program.definition
@@ -102,6 +111,7 @@ async function tickLeased(
 
   // 2. facts: exactly one resolve per tick. A throw propagates; the lease is released by the caller.
   const facts: Facts = await adapter.resolve(run.subjectId)
+  await renewLease(ctx, runId, worker) // the host call may have been slow
   const predCtx = { facts, subjectId: run.subjectId, collections: C, now }
 
   /** Run-document changes accumulated by this tick, applied once in `finish`. */
@@ -113,23 +123,17 @@ async function tickLeased(
   let stage: 0 | 1 | 2 = run.sunsetStage
   let runStatus = run.status
   let askSent = run.sunsetAskSent
+  /** The counting marker this tick's send decision is based on; the final write is conditional on it. */
+  let countedAtStart = run.lastCountedDecisionId ?? null
 
-  const finish = async (r: {
+  const insertDecision = async (r: {
     reason: ProgramDecisionDoc['reason']
     chosen: string | null
     attempt: number | null
     candidates: ProgramDecisionCandidate[]
     sendIds?: ObjectId[]
     outcome?: ProgramDecisionDoc['outcome']
-    nextTickAt?: Date
-    /**
-     * Runs after the decision and run state are persisted (the lease is still
-     * held). Send rows are created here, so a dispatch hook that fires at once
-     * writes on top of finished state and nothing this tick wrote can clobber it.
-     */
-    after?: () => Promise<void>
-  }): Promise<ProgramTickResult> => {
-    const sendIds = r.sendIds ?? []
+  }): Promise<void> => {
     const inline = Buffer.byteLength(stableJson(facts)) < INLINE_FACTS_MAX_BYTES
     await C.programDecisions.insertOne({
       _id: decisionId,
@@ -148,25 +152,74 @@ async function tickLeased(
       ranker: { name: 'priority', version: 1 },
       selectionProb: 1,
       explore: false,
-      sendIds,
+      sendIds: r.sendIds ?? [],
       outcome: r.outcome ?? null,
       trigger,
     })
+  }
 
+  const finish = async (r: {
+    reason: ProgramDecisionDoc['reason']
+    chosen: string | null
+    attempt: number | null
+    candidates: ProgramDecisionCandidate[]
+    sendIds?: ObjectId[]
+    outcome?: ProgramDecisionDoc['outcome']
+    nextTickAt?: Date
+    /**
+     * Runs after the decision and run state are persisted (the lease is still
+     * held). Send rows are created here, so a dispatch hook that fires at once
+     * writes on top of finished state and nothing this tick wrote can clobber it.
+     */
+    after?: () => Promise<void>
+  }): Promise<ProgramTickResult> => {
+    const sendIds = r.sendIds ?? []
     const set: Record<string, unknown> = { ...runSet, ...actionDiffs(works), programVersion: program.version, updatedAt: now }
     if (!r.after) set.lease = null
     if (r.nextTickAt) {
       set.nextTickAt = r.nextTickAt.getTime() > nowMs ? r.nextTickAt : new Date(nowMs + MIN_ADVANCE_MS)
     }
+
+    // The run write is fenced on the lease (a stale tick writes nothing) and,
+    // when it creates sends, on the counting marker (a send accepted since the
+    // fresh read is not on the tick's books, so the send decision is abandoned).
     // A Facts Changed wake that landed while this tick ran (wakeRequestedAt moved
     // since we took the lease) must not be lost: tick again soon.
-    const wakeAtStart = run.wakeRequestedAt ?? null
-    const res = await C.programRuns.updateOne({ _id: runId, wakeRequestedAt: wakeAtStart } as any, { $set: set })
-    if (res.matchedCount === 0) {
+    const guarded = sendIds.length > 0
+    let wakeAt = run.wakeRequestedAt ?? null
+    let abandoned = false
+    for (let i = 0; ; i++) {
+      const filter: Record<string, unknown> = { _id: runId, 'lease.worker': worker }
+      if (i < 5) filter.wakeRequestedAt = wakeAt
+      if (guarded) filter.lastCountedDecisionId = countedAtStart
+      const res = await C.programRuns.updateOne(filter as any, { $set: set })
+      if (res.matchedCount > 0) break
+      const cur = await C.programRuns.findOne(
+        { _id: runId },
+        { projection: { lease: 1, lastCountedDecisionId: 1, wakeRequestedAt: 1 } },
+      )
+      if (!cur || cur.lease?.worker !== worker) throw new LeaseLostError()
+      if (guarded && String(cur.lastCountedDecisionId ?? '') !== String(countedAtStart ?? '')) {
+        abandoned = true
+        break
+      }
+      wakeAt = cur.wakeRequestedAt ?? null
       if (r.nextTickAt) set.nextTickAt = new Date(nowMs + MIN_ADVANCE_MS)
-      await C.programRuns.updateOne({ _id: runId }, { $set: set })
     }
-    if (r.after) await r.after()
+    if (abandoned) {
+      await C.programRuns.updateOne(
+        { _id: runId, 'lease.worker': worker },
+        { $set: { nextTickAt: new Date(nowMs + MIN_ADVANCE_MS), updatedAt: now } },
+      )
+      await insertDecision({ ...r, reason: 'in-flight', sendIds: [], outcome: undefined })
+      return { status: 'ticked', decisionId, reason: 'in-flight', chosen: r.chosen, attempt: r.attempt, sendIds: [] }
+    }
+    await settleActionDates(C, runId, works)
+    await insertDecision(r)
+    if (r.after) {
+      await renewLease(ctx, runId, worker) // no send rows unless we still own the run
+      await r.after()
+    }
     return { status: 'ticked', decisionId, reason: r.reason, chosen: r.chosen, attempt: r.attempt, sendIds }
   }
 
@@ -341,13 +394,26 @@ async function tickLeased(
 
   // 9. in flight.
   if (run.inFlight) {
-    const rows = await C.sends
-      .find({ _id: { $in: run.inFlight.sendIds } }, { projection: { status: 1, queuedAt: 1 } })
-      .toArray()
+    const rows = await C.sends.find({ _id: { $in: run.inFlight.sendIds } }).toArray()
+    // A send that reached the provider but whose outcome hook never counted it
+    // (a crash between the 'sent' write and the hook) is counted here, so the
+    // attempt is neither lost nor replayed. Idempotent: the count is guarded.
+    let reconciled = false
+    for (const s of rows) {
+      if (!s.program || s.program.counted || !COUNTABLE.includes(s.status)) continue
+      try {
+        await countAcceptedSend(s, s.sentAt ?? now, ctx)
+        reconciled = true
+      } catch (err) {
+        console.error(`mailery: program count reconciliation failed for send ${String(s._id)}`, err)
+        return silent('in-flight', new Date(nowMs + MIN_ADVANCE_MS))
+      }
+    }
     if (rows.some((s) => sendIsInFlight(s, now))) {
       // A queued row whose job was lost (crash between insert and enqueue) would block forever.
+      // `updatedAt`, not `queuedAt`: a released deferred send is old but freshly re-queued.
       for (const s of rows) {
-        if (s.status === 'queued' && nowMs - s.queuedAt.getTime() >= IN_FLIGHT_RECHECK_MS) {
+        if (s.status === 'queued' && nowMs - (s.updatedAt ?? s.queuedAt).getTime() >= IN_FLIGHT_RECHECK_MS) {
           await ctx.queues.send
             .add('send', { sendId: String(s._id) }, { attempts: ctx.config.sendRetryAttempts, backoff: { type: 'exponential', delay: 60_000 } })
             .catch(() => {})
@@ -356,6 +422,18 @@ async function tickLeased(
       return silent('in-flight', new Date(nowMs + IN_FLIGHT_RECHECK_MS))
     }
     runSet.inFlight = null
+    if (reconciled) return silent('in-flight', new Date(nowMs + MIN_ADVANCE_MS)) // decide again on fresh books
+  }
+
+  // A send accepted while this tick was resolving facts has moved the run's
+  // counters (attempts, lastSentAt, unanswered) past our snapshot: re-read
+  // before choosing an attempt or gap, and again at the write (see `finish`).
+  {
+    const fresh = await C.programRuns.findOne({ _id: runId }, { projection: { lastCountedDecisionId: 1, lease: 1 } })
+    if (!fresh || fresh.lease?.worker !== worker) throw new LeaseLostError()
+    if (String(fresh.lastCountedDecisionId ?? '') !== String(countedAtStart ?? '')) {
+      return silent('in-flight', new Date(nowMs + MIN_ADVANCE_MS))
+    }
   }
 
   // 10. session rule.
@@ -386,6 +464,7 @@ async function tickLeased(
 
   // 13. recipients.
   const contacts = await adapter.recipients(run.subjectId, def.recipients)
+  await renewLease(ctx, runId, worker) // the host call may have been slow
   const seen = new Set<string>()
   const recipients = []
   for (const c of contacts ?? []) {
@@ -536,22 +615,21 @@ function freshActionState(action: ProgramAction): ProgramRunActionState {
   }
 }
 
-const DATE_FIELDS = ['lastSentAt', 'completedAt', 'exhaustedAt', 'cooldownUntil'] as const
+const DATE_FIELDS = ['lastSentAt', 'exhaustedAt', 'cooldownUntil'] as const
 const PLAIN_FIELDS = ['status', 'attempts', 'ladder', 'version'] as const
 
 /**
  * Dotted `$set` paths for the action-state fields this tick changed. Writing
  * only the diff (never the whole map) keeps a concurrent dispatch hook's
- * `attempts` increment from being overwritten by a stale copy.
+ * `attempts` increment from being overwritten by a stale copy. `completedAt`
+ * and states the run has never seen go through `settleActionDates` instead, so
+ * a `completedAt` the dispatch guard set meanwhile is never overwritten.
  */
 function actionDiffs(works: ActionWork[]): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const w of works) {
+    if (!w.initial) continue
     const key = `actions.${w.action.id}`
-    if (!w.initial) {
-      out[key] = w.st
-      continue
-    }
     for (const f of PLAIN_FIELDS) if (w.st[f] !== w.initial[f]) out[`${key}.${f}`] = w.st[f]
     for (const f of DATE_FIELDS) {
       const a = w.st[f]?.getTime() ?? null
@@ -560,6 +638,27 @@ function actionDiffs(works: ActionWork[]): Record<string, unknown> {
     }
   }
   return out
+}
+
+/**
+ * First-writer-wins for the parts of action state a concurrent dispatch guard
+ * can also write: a brand-new action state is created only if the run still
+ * has none, and `completedAt` is set only while it is still null.
+ */
+async function settleActionDates(C: RunnerContext['collections'], runId: ObjectId, works: ActionWork[]): Promise<void> {
+  for (const w of works) {
+    const key = `actions.${w.action.id}`
+    if (!w.initial) {
+      const created = await C.programRuns.updateOne({ _id: runId, [key]: { $exists: false } }, { $set: { [key]: w.st } })
+      if (created.modifiedCount > 0) continue
+    }
+    if (w.st.completedAt && !w.initial?.completedAt) {
+      await C.programRuns.updateOne(
+        { _id: runId, [`${key}.completedAt`]: null },
+        { $set: { [`${key}.completedAt`]: w.st.completedAt, [`${key}.status`]: 'satisfied' } },
+      )
+    }
+  }
 }
 
 /** A non-bot click on any of the run's sends after `since`. Opens never count. */

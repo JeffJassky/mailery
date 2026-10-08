@@ -45,8 +45,8 @@ export const programSendHooks: SendOriginHooks = {
       return { verdict: 'cancel', exitReason: 'run_inactive', message: 'program is disabled or unpublished' }
     }
 
-    // The sunset ask is not an action: nothing to re-verify beyond the run itself.
-    if (info.actionId === SUNSET_ASK_ACTION_ID) return { verdict: 'send' }
+    // The sunset ask is not an action: it is only valid while the run is still waiting to ask.
+    if (info.actionId === SUNSET_ASK_ACTION_ID) return sunsetAskVerdict(run, info.decisionId, ctx)
 
     const action = def.actions.find((a) => a.id === info.actionId)
     if (!action) {
@@ -150,7 +150,7 @@ async function clearInFlightIfSettled(ctx: RunnerContext, runId: ObjectId, decis
   const run = await ctx.collections.programRuns.findOne({ _id: runId }, { projection: { inFlight: 1 } })
   if (!run?.inFlight || String(run.inFlight.decisionId) !== String(decisionId)) return
   const rows = await ctx.collections.sends
-    .find({ _id: { $in: run.inFlight.sendIds } }, { projection: { status: 1, queuedAt: 1 } })
+    .find({ _id: { $in: run.inFlight.sendIds } }, { projection: { status: 1, queuedAt: 1, updatedAt: 1 } })
     .toArray()
   const now = new Date()
   if (rows.some((s) => sendIsInFlight(s, now))) return
@@ -158,45 +158,121 @@ async function clearInFlightIfSettled(ctx: RunnerContext, runId: ObjectId, decis
 }
 
 /**
- * An accepted send consumes the attempt — once per decision (INVARIANT 18),
- * however many recipients it fanned out to and however often dispatch re-runs.
+ * The sunset ask only makes sense while the run is still at stage 2 with the
+ * ask unsent and no engagement since the decision that chose it. A tick that
+ * re-engaged the run resets all of that.
  */
-async function countAcceptedSend(send: SendDoc, at: Date, ctx: RunnerContext): Promise<void> {
+async function sunsetAskVerdict(
+  run: { status: string; sunsetStage: number; sunsetAskSent: boolean; lastEngagementAt: Date | null },
+  decisionId: ObjectId,
+  ctx: RunnerContext,
+): Promise<{ verdict: 'send' } | { verdict: 'cancel'; exitReason: 'ineligible_before_send'; message: string }> {
+  const decision = await ctx.collections.programDecisions.findOne({ _id: decisionId }, { projection: { at: 1 } })
+  const engagedSince = !!run.lastEngagementAt && !!decision && run.lastEngagementAt.getTime() > decision.at.getTime()
+  if (run.sunsetStage !== 2 || run.sunsetAskSent || engagedSince) {
+    return { verdict: 'cancel', exitReason: 'ineligible_before_send', message: 'the subject re-engaged; the sunset ask is no longer due' }
+  }
+  return { verdict: 'send' }
+}
+
+/**
+ * An accepted send consumes the attempt — once per decision (INVARIANT 18),
+ * however many recipients it fanned out to and however often dispatch re-runs
+ * (and however often the tick's reconciliation calls it for a send whose hook
+ * never ran).
+ *
+ * One atomic pipeline update guarded on `lastCountedDecisionId`: either the
+ * whole count applies or none of it does, so a crash can never leave the
+ * decision marked counted with the attempt missing. Only the next-tick time is
+ * a second write (it depends on the counted result, and a missed one is
+ * harmless: the in-flight recheck and the min-gap rule cover it).
+ */
+export async function countAcceptedSend(send: SendDoc, at: Date, ctx: RunnerContext): Promise<void> {
   const info = send.program!
   const C = ctx.collections
   if (info.counted) return
-
-  const before = await C.programRuns.findOneAndUpdate(
-    { _id: info.runId, lastCountedDecisionId: { $ne: info.decisionId } },
-    { $set: { lastCountedDecisionId: info.decisionId } },
-    { returnDocument: 'before' },
-  )
-  await C.sends.updateOne({ _id: send._id }, { $set: { 'program.counted': true } })
-  if (!before) return // another recipient's send already counted this decision
 
   const program = await C.programs.findOne({ slug: info.slug })
   const def = program?.definition ?? null
   const isAsk = info.actionId === SUNSET_ASK_ACTION_ID
   const action = def?.actions.find((a) => a.id === info.actionId)
-  const unanswered = before.unansweredAttempts + 1
-  const stage = isAsk ? 2 : def ? sunsetStageFor(def, unanswered) : before.sunsetStage
-  const attemptsAfter = (before.actions?.[info.actionId]?.attempts ?? 0) + 1
+  const lit = (v: unknown) => ({ $literal: v })
 
-  const set: Record<string, unknown> = { sunsetStage: stage }
-  if (!before.lastSentAt || before.lastSentAt.getTime() < at.getTime()) set.lastSentAt = at
-  const inc: Record<string, number> = { unansweredAttempts: 1 }
-  if (!isAsk) {
-    inc[`actions.${info.actionId}.attempts`] = 1
-    set[`actions.${info.actionId}.lastSentAt`] = at
-  }
-  const live = (ACTIVE as string[]).includes(before.status)
+  const unansweredNew = { $add: ['$unansweredAttempts', 1] }
+  const sunset = def?.policy.sunset
+  const stageExpr: unknown = sunset
+    ? {
+        $switch: {
+          branches: [
+            { case: { $gte: [unansweredNew, sunset.askAfter] }, then: 2 },
+            { case: { $gte: [unansweredNew, sunset.slowAfter] }, then: 1 },
+          ],
+          default: 0,
+        },
+      }
+    : def
+      ? 0
+      : '$sunsetStage'
+
+  // The ask moves the run to sunset only while it is still due (same rule as the guard).
+  let askDue: unknown = false
   if (isAsk) {
-    set.sunsetAskSent = true
-    if (live) set.status = 'sunset'
+    const decision = await C.programDecisions.findOne({ _id: info.decisionId }, { projection: { at: 1 } })
+    askDue = {
+      $and: [
+        { $in: ['$status', ACTIVE] },
+        { $eq: ['$sunsetStage', 2] },
+        { $ne: ['$sunsetAskSent', true] },
+        ...(decision
+          ? [{ $or: [{ $eq: [{ $ifNull: ['$lastEngagementAt', null] }, null] }, { $lte: ['$lastEngagementAt', lit(decision.at)] }] }]
+          : []),
+      ],
+    }
   }
-  if (live && def) set.nextTickAt = nextTickAfterSend(def, at, action, isAsk ? 0 : attemptsAfter, stage)
 
-  await C.programRuns.updateOne({ _id: info.runId }, { $set: set, $inc: inc })
+  const set: Record<string, unknown> = {
+    lastCountedDecisionId: lit(info.decisionId),
+    unansweredAttempts: unansweredNew,
+    sunsetStage: isAsk ? { $cond: [askDue, 2, stageExpr] } : stageExpr,
+    lastSentAt: {
+      $cond: [{ $or: [{ $eq: [{ $ifNull: ['$lastSentAt', null] }, null] }, { $lt: ['$lastSentAt', lit(at)] }] }, lit(at), '$lastSentAt'],
+    },
+  }
+  if (isAsk) {
+    set.sunsetAskSent = { $cond: [askDue, true, '$sunsetAskSent'] }
+    set.status = { $cond: [askDue, 'sunset', '$status'] }
+  } else {
+    const key = info.actionId
+    set.actions = {
+      $mergeObjects: [
+        { $ifNull: ['$actions', {}] },
+        {
+          [key]: {
+            $mergeObjects: [
+              { $ifNull: [`$actions.${key}`, {}] },
+              { attempts: { $add: [{ $ifNull: [`$actions.${key}.attempts`, 0] }, 1] }, lastSentAt: lit(at) },
+            ],
+          },
+        },
+      ],
+    }
+  }
+
+  const after = await C.programRuns.findOneAndUpdate(
+    { _id: info.runId, lastCountedDecisionId: { $ne: info.decisionId } },
+    [{ $set: set }],
+    { returnDocument: 'after' },
+  )
+  await C.sends.updateOne({ _id: send._id }, { $set: { 'program.counted': true } })
+  if (!after) return // already counted (another recipient, a replay, or the reconciliation)
+
+  if ((ACTIVE as string[]).includes(after.status) && def) {
+    const attemptsAfter = after.actions?.[info.actionId]?.attempts ?? 0
+    await C.programRuns.updateOne(
+      { _id: info.runId, status: { $in: ACTIVE } },
+      { $set: { nextTickAt: nextTickAfterSend(def, at, action, isAsk ? 0 : attemptsAfter, after.sunsetStage) } },
+    )
+  }
 }
 
 function nextTickAfterSend(
