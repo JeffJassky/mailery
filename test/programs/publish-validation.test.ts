@@ -144,7 +144,7 @@ describe('semantics', () => {
     const d = def()
     d.actions[0]!.requires = ['c']
     d.actions[2]!.requires = ['b']
-    expect(issues(d).join()).toMatch(/requires cycle: (a → b → c → a|b → c → a → b|c → a → b → c)/)
+    expect(issues(d).join()).toMatch(/requires cycle: (a → c → b → a|c → b → a → c|b → a → c → b)/)
   })
 
   it('rejects a missing template', () => {
