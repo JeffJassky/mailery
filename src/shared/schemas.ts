@@ -16,6 +16,22 @@ import { z } from 'zod'
 
 export const externalIdSchema = z.string().min(1).max(256)
 export const emailSchema = z.string().email().toLowerCase().trim()
+/**
+ * Lenient address for OPT-OUT writes only (INVARIANT 8). `emailSchema` is a
+ * strict validator and rejects real, deliverable addresses such as
+ * `a&b@example.com`; an unsubscribe for an address the pipeline can send to
+ * must never be refused for its shape. Trimmed, lower-cased, exactly one
+ * '@' with something on both sides, no whitespace, at most 320 chars.
+ */
+export const optOutEmailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(320)
+  .refine((v) => {
+    const at = v.indexOf('@')
+    return at > 0 && at === v.lastIndexOf('@') && at < v.length - 1 && !/\s/.test(v)
+  }, 'must be an email address')
 export const slugSchema = z
   .string()
   .min(1)
@@ -83,7 +99,7 @@ export const unsubscribeReasonSchema = z.enum([
 ])
 
 export const unsubscribeInputSchema = z.object({
-  email: emailSchema,
+  email: optOutEmailSchema,
   scope: unsubscribeScopeSchema,
   reason: unsubscribeReasonSchema.default('user_request'),
   source: z.string().max(256).default('manual'),
@@ -111,7 +127,7 @@ export const resubscribeInputSchema = z.object({
 export type ResubscribeInput = z.input<typeof resubscribeInputSchema>
 
 export const suppressInputSchema = z.object({
-  email: emailSchema,
+  email: optOutEmailSchema,
   scope: unsubscribeScopeSchema,
   reason: z.enum(['unsubscribed', 'hard_bounce', 'complaint', 'manual', 'list_cleaning', 'gdpr_forget']),
   source: z.string().max(256).default('manual'),

@@ -150,7 +150,7 @@ Immediately before the provider call, including after a contact-policy deferral,
 
 ## Templates
 
-Every template a program sends must be `marketing` with the program's `category`, so the unsubscribe link stops the program. Program sends add these variables:
+Every template a program sends must be `marketing` with the program's `category`, so the unsubscribe link stops the program. Editing a template that a published program sends so it is no longer marketing, or moves it out of that category, is rejected with 409 naming the program. If it drifts anyway (a direct database edit), the tick records the candidate as `ineligible` and sends nothing, and dispatch cancels the send. Program sends add these variables:
 
 | Variable | Value |
 | --- | --- |
@@ -199,11 +199,15 @@ const items = await mailer.getProgramState('activation', accountId)
 
 Actions come in priority order. `status` is `pending`, `satisfied`, `exhausted` or `cooldown`, read from the run (`completedAt` means satisfied), never recomputed from facts, so your in-app checklist and the emails agree. `isNext` is true for at most one action: the latest decision's `chosen` when it is not yet satisfied.
 
+## Erasing an account
+
+Runs and decisions are keyed by your `subjectId`, and decisions keep the facts snapshot. When your host erases an account, call `mailer.forgetSubject(subjectId)` to delete that subject's runs and decisions across every program (audited as `gdpr.forget_subject`), and `mailer.forget(externalId)` for each of its contacts.
+
 ## Operations
 
 - `programs.batchSize` (default 200) bounds how many runs one mailer tick processes.
 - `programs.decisionRetentionDays` (default keep forever) deletes older decision rows, at most hourly.
-- A tick that throws (your `resolve`, a deleted template) is logged, its lease released, and the run retried after 15 minutes.
+- A tick that throws (your `resolve`) is logged, its lease released, and the run retried after 15 minutes.
 - Test with `mailery/testing`: `MemoryFactsAdapter`, `buildProgram`, `H.seedProgram`, `tickProgram`, and `H.drain()`, which runs the scheduler.
 
 ## Admin UI and API

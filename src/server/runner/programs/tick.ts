@@ -402,7 +402,25 @@ async function tickLeased(
   // 14. send rows.
   const templateSlug = asking ? sunset!.askTemplateSlug : first.action.attempts[first.st.attempts]!.deliveries[0]!.templateSlug
   const template = await C.templates.findOne({ slug: templateSlug })
-  if (!template) throw new Error(`program "${run.programSlug}": template "${templateSlug}" not found`)
+  // A template that drifted (deleted, no longer marketing, moved to another
+  // category) is treated like an ineligible candidate: nothing is sent, the
+  // decision is still written, and the operator sees it in the log.
+  const drift = !template
+    ? 'is missing'
+    : template.kind !== 'marketing'
+      ? `is ${template.kind}, not marketing`
+      : (template.category ?? null) !== def.category
+        ? `has category ${template.category ?? '(none)'}, not ${def.category}`
+        : null
+  if (drift) {
+    console.error(`mailery: program "${run.programSlug}": template "${templateSlug}" ${drift}; not sending`)
+    if (!asking) {
+      const row = candidatesRows.find((r) => r.actionId === first.action.id)
+      if (row) row.blockedBy = 'ineligible'
+    }
+    return silent('none-eligible', new Date(nowMs + def.policy.minGapDays * DAY_MS))
+  }
+  if (!template) throw new Error('unreachable')
   const holdout = run.arm === 'holdout'
   const actionId = asking ? SUNSET_ASK_ACTION_ID : first.action.id
   const actionVersion = asking ? 1 : first.action.version

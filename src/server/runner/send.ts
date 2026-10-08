@@ -280,6 +280,26 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     }
   }
   try {
+    // The lock wait can be long (CONTACT_LOCK_TIMINGS), and an unsubscribe
+    // may have landed in it: re-check suppression now that we hold the lock
+    // (INVARIANT 3), before the policy or the provider.
+    if (release) {
+      let again
+      try {
+        again = await isSuppressed(ctx.collections, send.emailAtSend, send.kind, template.category)
+      } catch (err: any) {
+        await releaseClaimAfterError(send, `suppression recheck error: ${String(err?.message ?? err)}`, ctx)
+        throw err
+      }
+      if (again.suppressed) {
+        await ctx.collections.sends.updateOne(
+          { _id: send._id },
+          { $set: { status: 'suppressed', errorMessage: `suppressed: ${again.reason}`, updatedAt: new Date() } },
+        )
+        await emitOutcome(send, { status: 'suppressed', errorMessage: `suppressed: ${again.reason}` }, { status: 'suppressed', scope: again.scope ?? null }, ctx)
+        return
+      }
+    }
     if (contactPolicyApplies(ctx, send)) {
       const now = new Date()
       let decision

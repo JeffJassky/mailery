@@ -953,6 +953,25 @@ export class Mailer {
     })
   }
 
+  /**
+   * GDPR erasure for a Program subject (an account). Deletes the subject's
+   * runs and decision rows across every program. Facts are stored inline on
+   * decisions, so this is what erases them. Call it alongside `forget` for
+   * each of the account's contacts when the host erases an account. Audited as
+   * `gdpr.forget_subject`.
+   */
+  async forgetSubject(subjectId: string): Promise<{ runs: number; decisions: number }> {
+    const decisions = await this.collections.programDecisions.deleteMany({ subjectId })
+    const runs = await this.collections.programRuns.deleteMany({ subjectId })
+    await this.audit({
+      actor: 'system:gdpr',
+      action: 'gdpr.forget_subject',
+      resource: { collection: 'mailer_program_runs' },
+      diffSummary: `forget subjectId=${subjectId} runs=${runs.deletedCount ?? 0} decisions=${decisions.deletedCount ?? 0}`,
+    })
+    return { runs: runs.deletedCount ?? 0, decisions: decisions.deletedCount ?? 0 }
+  }
+
   /** GDPR data export. JSON-serializable. */
   async exportContactData(externalId: string): Promise<Record<string, unknown>> {
     const subscription = await this.collections.subscriptions.findOne({ externalId })

@@ -50,6 +50,7 @@ import { derivePlaintext, renderTemplate, type RenderedTemplate } from '../templ
 import { lintTemplate } from '../templates/linter.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { templateCategoryIssue } from '../templates/category.js'
+import { programTemplateConflict } from '../programs/template-guard.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
 import { signUnsubscribeToken } from '../tokens.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -436,6 +437,8 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
         return res.status(400).json({ error: 'validation_failed', message: categoryIssue })
       }
       const category = input.category || null
+      const programConflict = await programTemplateConflict(c, slug, { kind: input.kind, category })
+      if (programConflict) return res.status(409).json({ error: 'program_template_conflict', message: programConflict })
       const senderCheck = validateSenderDomain(input.fromEmail, input.kind, mailer.config.senderDomains)
       if (!senderCheck.ok) {
         return res.status(400).json({ error: 'sender_domain_invalid', code: senderCheck.code, message: senderCheck.reason })
@@ -1498,7 +1501,7 @@ export async function renderForContact(
   } catch (err: any) {
     throw new Error(`varsAdapter.resolve threw: ${String(err?.message ?? err)}`)
   }
-  const unsubscribeUrl = unsubscribeUrlFor(mailer, contact.email)
+  const unsubscribeUrl = unsubscribeUrlFor(mailer, contact.email, tpl.category ?? null)
   const context = {
     ...resolved,
     contact,
@@ -1511,9 +1514,12 @@ export async function renderForContact(
   return { rendered, resolved, unsubscribeUrl, context }
 }
 
-export function unsubscribeUrlFor(mailer: Mailer, email: string): string {
+export function unsubscribeUrlFor(mailer: Mailer, email: string, category?: string | null): string {
   const expiresAt = new Date(Date.now() + mailer.config.unsubscribeTokenLifetimeDays * 24 * 60 * 60 * 1000)
-  const token = signUnsubscribeToken({ email, scope: 'marketing', expiresAt }, mailer.config.unsubscribeSecret)
+  const token = signUnsubscribeToken(
+    { email, scope: 'marketing', expiresAt, ...(category ? { category } : {}) },
+    mailer.config.unsubscribeSecret,
+  )
   return `${mailer.config.publicUrl}/m/unsub/${token}`
 }
 

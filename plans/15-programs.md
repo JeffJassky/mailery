@@ -614,8 +614,11 @@ from earlier sections, these win.
   `resubscribe({ externalId, scope })` and `unsubscribe(email, { scope })` accept
   `category:<id>`. A category opt-out never changes `mailer_subscriptions.status`.
 - **Preference page form**: `POST /unsub/:token/preferences`, `action=save` with
-  `category=<id>` per checked box, or `action=unsubscribe-all`. With Mongo down: opt-outs
-  journaled; `unsubscribe-all` answers 200, `save` answers 503. Without categories
+  `category=<id>` per checked box, `action=resubscribe` (same, plus clears a marketing-wide
+  opt-out), or `action=unsubscribe-all`. `save` never clears a `marketing`/`all` opt-out;
+  when one is live the page shows a notice and offers `resubscribe` instead of Save. With
+  Mongo down: opt-outs journaled; `unsubscribe-all` answers 200, `save` and `resubscribe`
+  (which contain opt-ins) answer 503. Without categories
   configured, `GET /unsub/:token` is byte-identical to 0.20.
 - **List-ID** is `<category>.<sender domain>` on categorised mail only.
 - **Contact policy** adds `defaultTimezone`; the tz chain is contact → `send.timezoneHint`

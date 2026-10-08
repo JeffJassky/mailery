@@ -297,6 +297,14 @@ forget(externalId: string): Promise<void>
 
 Hard-deletes all PII for the contact across mailer collections, then inserts a `mailer_suppressions` row with `email: null` + `emailHash` retained. Future sends to the same email are blocked at the hash level — INVARIANT 9.
 
+### `forgetSubject(subjectId)`
+
+```ts
+forgetSubject(subjectId: string): Promise<{ runs: number; decisions: number }>
+```
+
+Deletes a Program subject's runs and decision rows across all programs (decisions hold the facts snapshot). Audited as `gdpr.forget_subject`. Call it when you erase an account, together with `forget(externalId)` for each of the account's contacts.
+
 ### `exportContactData(externalId)`
 
 ```ts

@@ -309,7 +309,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
   <style>${UNSUB_PAGE_STYLE}</style>
 </head><body>
   <h1>Confirm unsubscribe</h1>
-  <p>Click the button below to unsubscribe <strong>${escapeHtml(decoded.email)}</strong>${decoded.scope === 'all' ? ' from everything' : ' from marketing emails'}.</p>
+  <p>Click the button below to unsubscribe <strong>${escapeHtml(decoded.email)}</strong>${decoded.category ? ' from these emails' : decoded.scope === 'all' ? ' from everything' : ' from marketing emails'}.</p>
   <form method="POST" action="${escapeHtml(req.originalUrl)}">
     <button type="submit">Unsubscribe</button>
   </form>
@@ -325,11 +325,14 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
     email: string,
     scopes: SuppressionScope[],
     write: Promise<unknown>,
-  ): Promise<{ result: 'ok' | 'journaled' | 'failed'; dbError: unknown }> => {
+  ): Promise<{ result: 'ok' | 'journaled' | 'failed' | 'invalid'; dbError: unknown }> => {
     let dbError: unknown = null
     try {
       await withTimeout(write, mailer.config.unsubscribeWriteTimeoutMs)
     } catch (err) {
+      // A validation error is not a database failure: journaling it would
+      // answer 200 and the drain would drop the entry as malformed.
+      if ((err as { name?: string } | null)?.name === 'ZodError') return { result: 'invalid', dbError: err }
       dbError = err ?? new Error('unsubscribe write failed')
       // The write may still land after the timeout; journal replay is
       // idempotent, but an unobserved rejection would take the host down.
@@ -399,6 +402,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       mailer.unsubscribe(decoded.email, { scope, reason: 'user_request', source: 'one-click' }),
     )
     if (result === 'failed') return sendUnsubUnavailable(res)
+    if (result === 'invalid') return sendUnsubError(res, 'We could not process this address.')
 
     res.status(200).type('html').send('<!doctype html><html><body><p>You are unsubscribed.</p></body></html>')
 
@@ -431,6 +435,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           mailer.unsubscribe(decoded.email, { scope: 'marketing', reason: 'user_request', source: 'preferences' }),
         )
         if (result === 'failed') return sendUnsubUnavailable(res)
+        if (result === 'invalid') return sendUnsubError(res, 'We could not process this address.')
         res.status(200).type('html').send(preferencesDonePage('You are unsubscribed from all marketing email.'))
         if (!dbError && decoded.sendId) {
           void attributeUnsubscribeToSend(mailer.getRunnerContext(), decoded.sendId, decoded.email).catch((err) => {
@@ -440,7 +445,11 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
         return
       }
 
-      if (body.action !== 'save') return sendUnsubError(res, 'Unknown action.')
+      if (body.action !== 'save' && body.action !== 'resubscribe') return sendUnsubError(res, 'Unknown action.')
+      // `save` never touches a marketing-wide opt-out (a recipient who is
+      // unsubscribed from everything must not lose that by pressing Save);
+      // only the explicit `resubscribe` action clears it.
+      const resubscribe = body.action === 'resubscribe'
 
       // Checked boxes arrive as repeated `category` fields; ids that are not
       // declared are ignored, never written.
@@ -448,7 +457,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       const posted = new Set((Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).map(String))
       const declared = categories.map((c) => c.id)
       const update = {
-        marketing: true,
+        ...(resubscribe ? { marketing: true } : {}),
         categories: Object.fromEntries(declared.map((id) => [id, posted.has(id)])),
       }
       const optOuts = declared.filter((id) => !posted.has(id)).map((id) => `category:${id}` as SuppressionScope)
@@ -460,6 +469,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       )
       // Opt-ins cannot be journaled, so anything but a Mongo write is a
       // failure to the recipient — after the opt-outs were journaled.
+      if (result === 'invalid') return sendUnsubError(res, 'We could not process this address.')
       if (result !== 'ok') {
         return res
           .status(503)
@@ -467,7 +477,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
           .type('html')
           .send(preferencesDonePage('We could not update your preferences right now. Please try again in a minute.'))
       }
-      res.status(200).type('html').send(preferencesDonePage('Your preferences have been updated.'))
+      res.status(200).type('html').send(preferencesDonePage(resubscribe ? 'You are subscribed again to the topics you selected.' : 'Your preferences have been updated.'))
     }))
   }
 
@@ -748,19 +758,26 @@ function renderPreferencePage(
       return `    <label><input type="checkbox" name="category" value="${escapeHtml(c.id)}"${checked}> ${escapeHtml(c.label)}${desc}</label>`
     })
     .join('\n')
+  const optedOut = !prefs.marketing
+  const notice = optedOut
+    ? `\n  <p class="notice"><strong>You're unsubscribed from all marketing email.</strong> Pick the topics you want and press Resubscribe to start receiving them again.</p>`
+    : ''
+  const buttons = optedOut
+    ? `      <button type="submit" name="action" value="resubscribe" class="secondary">Resubscribe to the topics below</button>`
+    : `      <button type="submit" name="action" value="save" class="secondary">Save preferences</button>
+      <button type="submit" name="action" value="unsubscribe-all" class="link">Unsubscribe from all marketing email</button>`
   return `<!doctype html>
 <html><head>
   <meta charset="utf-8" />
   <title>Email preferences</title>
   <style>${PREFERENCE_PAGE_STYLE}</style>
 </head><body>
-  <h1>Email preferences</h1>
+  <h1>Email preferences</h1>${notice}
   <p>Choose which emails <strong>${escapeHtml(email)}</strong> receives.</p>
   <form method="POST" action="${escapeHtml(action)}">
 ${boxes}
     <div class="actions">
-      <button type="submit" name="action" value="save" class="secondary">Save preferences</button>
-      <button type="submit" name="action" value="unsubscribe-all" class="link">Unsubscribe from all marketing email</button>
+${buttons}
     </div>
   </form>
 </body></html>`

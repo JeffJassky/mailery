@@ -23,6 +23,7 @@ import {
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { templateCategoryIssue } from '../templates/category.js'
+import { programTemplateConflict } from '../programs/template-guard.js'
 import { parseCategoryInput } from '../templates/category-input.js'
 import { lintTemplate, type LintResult } from '../templates/linter.js'
 import { validateHtmlSource, type HtmlSourceIssue } from '../templates/html-source.js'
@@ -1164,6 +1165,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         const issue = templateCategoryIssue(kind, categoryInput.value, mailer.config.categories)
         if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
       }
+      {
+        const conflict = await programTemplateConflict(c, String(slug), { kind, category: categoryInput.provided ? categoryInput.value : null })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
+      }
       const resolvedFromEmail =
         fromEmail ??
         (kind === 'transactional' ? mailer.config.transactionalFromDefaults?.email : undefined) ??
@@ -1243,6 +1248,8 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const resultingKind = kind === 'marketing' || kind === 'transactional' ? kind : tpl.kind
       const resultingCategory = categoryInput.provided ? categoryInput.value : (tpl.category ?? null)
       if (categoryInput.provided || resultingKind !== tpl.kind) {
+        const conflict = await programTemplateConflict(c, tpl.slug, { kind: resultingKind, category: resultingCategory })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
         const issue = templateCategoryIssue(resultingKind, resultingCategory, mailer.config.categories)
         if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
       }
@@ -1578,6 +1585,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const effectiveCategory = publishCategory.provided ? publishCategory.value : (tpl.category ?? null)
       const categoryIssue = templateCategoryIssue(tpl.kind, effectiveCategory, mailer.config.categories)
       if (categoryIssue) return res.status(400).json({ error: 'validation_failed', message: categoryIssue })
+      {
+        const conflict = await programTemplateConflict(c, tpl.slug, { kind: tpl.kind, category: effectiveCategory })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
+      }
 
       // Short-circuit sender-domain check — preserves the pre-linter 400
       // sender_domain_invalid contract so external callers (and the SPA's
