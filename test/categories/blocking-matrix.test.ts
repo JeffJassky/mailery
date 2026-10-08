@@ -3,8 +3,8 @@
  *
  *   template                  blocked by
  *   transactional             all, transactional
- *   marketing, no category    all, marketing
- *   marketing, category C     all, marketing, category:C
+ *   marketing, no category    all, marketing, marketing_pause
+ *   marketing, category C     all, marketing, marketing_pause, category:C
  *
  * Three layers, because the rule has three call sites that must agree: the
  * pure `blockingScopes`, the per-send `isSuppressed` (plaintext and hashed
@@ -25,7 +25,7 @@ import type { SuppressionScope, TemplateKind } from '../../src/shared/enums.js'
 const C = 'lifecycle.onboarding'
 const OTHER = 'product.updates'
 
-const SCOPES: SuppressionScope[] = ['all', 'marketing', 'transactional', `category:${C}`, `category:${OTHER}`]
+const SCOPES: SuppressionScope[] = ['all', 'marketing', 'marketing_pause', 'transactional', `category:${C}`, `category:${OTHER}`]
 
 type Cell = { kind: TemplateKind; category: string | null }
 const TEMPLATES: Cell[] = [
@@ -38,7 +38,7 @@ const TEMPLATES: Cell[] = [
 function expectedBlocked(t: Cell, scope: SuppressionScope): boolean {
   if (scope === 'all') return true
   if (t.kind === 'transactional') return scope === 'transactional'
-  if (scope === 'marketing') return true
+  if (scope === 'marketing' || scope === 'marketing_pause') return true
   return t.category !== null && scope === `category:${t.category}`
 }
 
@@ -46,12 +46,12 @@ describe('blockingScopes — pure rule', () => {
   it('transactional → all, transactional', () => {
     expect(new Set(blockingScopes('transactional'))).toEqual(new Set(['all', 'transactional']))
   })
-  it('marketing without category → all, marketing (0.20 behaviour)', () => {
-    expect(new Set(blockingScopes('marketing'))).toEqual(new Set(['all', 'marketing']))
-    expect(new Set(blockingScopes('marketing', null))).toEqual(new Set(['all', 'marketing']))
+  it('marketing without category → all, marketing, marketing_pause', () => {
+    expect(new Set(blockingScopes('marketing'))).toEqual(new Set(['all', 'marketing', 'marketing_pause']))
+    expect(new Set(blockingScopes('marketing', null))).toEqual(new Set(['all', 'marketing', 'marketing_pause']))
   })
-  it('marketing with category C → all, marketing, category:C', () => {
-    expect(new Set(blockingScopes('marketing', C))).toEqual(new Set(['all', 'marketing', `category:${C}`]))
+  it('marketing with category C → all, marketing, marketing_pause, category:C', () => {
+    expect(new Set(blockingScopes('marketing', C))).toEqual(new Set(['all', 'marketing', 'marketing_pause', `category:${C}`]))
   })
   it('a category on a transactional template is ignored', () => {
     expect(new Set(blockingScopes('transactional', C))).toEqual(new Set(['all', 'transactional']))

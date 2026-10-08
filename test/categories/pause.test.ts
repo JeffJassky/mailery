@@ -206,6 +206,7 @@ describe('mailer.pauseMarketing / resumeMarketing', () => {
   })
 
   it('is audited', async () => {
+    await H.mailer.collections.auditLog.deleteMany({ action: { $in: ['contact.pause', 'contact.resume'] } })
     await H.mailer.pauseMarketing('alice@example.com', { days: 7, source: 'preferences' })
     await H.mailer.resumeMarketing('alice@example.com', { source: 'preferences' })
     const log = await H.mailer.collections.auditLog.find({ action: { $in: ['contact.pause', 'contact.resume'] } }).sort({ _id: 1 }).toArray()

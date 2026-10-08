@@ -31,13 +31,14 @@ export async function getPreferences(
       $or: [{ email: normalized }, { emailHash: sha256Hex(normalized) }],
       $and: [{ $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] }],
     })
-    .project<{ scope: string }>({ scope: 1 })
+    .project<{ scope: string; expiresAt?: Date | null }>({ scope: 1, expiresAt: 1 })
     .toArray()
   const scopes = new Set(rows.map((r) => r.scope))
+  const pauseRow = rows.find((r) => r.scope === 'marketing_pause')
   const marketing = !scopes.has('all') && !scopes.has('marketing')
   const out: Record<string, boolean> = {}
   for (const c of categories) out[c.id] = marketing && !scopes.has(`category:${c.id}`)
-  return { marketing, categories: out, pausedUntil: null } // pausedUntil: PR C (plans/17 F3)
+  return { marketing, categories: out, pausedUntil: pauseRow?.expiresAt ?? null }
 }
 
 /**
@@ -46,16 +47,32 @@ export async function getPreferences(
  * replaces it. Never touches unsubscribe rows.
  */
 export async function pauseMarketing(
-  _collections: Collections,
-  _email: string,
-  _opts: { days: number; source: string; now?: Date },
+  collections: Collections,
+  email: string,
+  opts: { days: number; source: string; now?: Date },
 ): Promise<{ pausedUntil: Date }> {
-  throw new Error('pauseMarketing: not implemented (plans/17 PR C)')
+  const normalized = email.toLowerCase()
+  const now = opts.now ?? new Date()
+  const pausedUntil = new Date(now.getTime() + opts.days * 86_400_000)
+  await collections.suppressions.updateOne(
+    { email: normalized, scope: 'marketing_pause' },
+    {
+      $set: { reason: 'paused', source: opts.source, addedAt: now, expiresAt: pausedUntil, notes: null },
+      $setOnInsert: { emailHash: sha256Hex(normalized) },
+    },
+    { upsert: true },
+  )
+  return { pausedUntil }
 }
 
 /** Delete the address's `marketing_pause` rows (by email or emailHash). */
-export async function resumeMarketing(_collections: Collections, _email: string): Promise<{ resumed: boolean }> {
-  throw new Error('resumeMarketing: not implemented (plans/17 PR C)')
+export async function resumeMarketing(collections: Collections, email: string): Promise<{ resumed: boolean }> {
+  const normalized = email.toLowerCase()
+  const res = await collections.suppressions.deleteMany({
+    scope: 'marketing_pause',
+    $or: [{ email: normalized }, { emailHash: sha256Hex(normalized) }],
+  })
+  return { resumed: res.deletedCount > 0 }
 }
 
 export interface PreferenceWriteResult {

@@ -137,6 +137,9 @@ function ContactBody({ data }: { data: any }) {
                   <span className="text-sm subtle">All marketing</span>
                   <span className="grow" />
                   <span className={'pill ' + (data.preferences.marketing ? 'green' : 'red')}>{data.preferences.marketing ? 'opted in' : 'opted out'}</span>
+                  {data.preferences.pausedUntil && (
+                    <span className="pill amber" style={{ marginLeft: 6 }}>Paused until {new Date(data.preferences.pausedUntil).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</span>
+                  )}
                 </div>
                 {Object.entries(data.preferences.categories as Record<string, boolean>).map(([id, on]) => (
                   <div className="hstack" key={id}>

@@ -602,8 +602,24 @@ export const PREFERENCES_DEFAULTS = {
  * Init-time check for `MailerConfig.preferences` (plans/17 F3): every
  * `pauseDays` entry an integer 1–365, no duplicates. Throws listing every problem.
  */
-export function assertValidPreferences(_prefs: PreferencesConfig | undefined): void {
-  // Implemented in PR C (plans/17-cadence-controls.md).
+export function assertValidPreferences(prefs: PreferencesConfig | undefined): void {
+  if (!prefs || prefs.pauseDays === undefined) return
+  const problems: string[] = []
+  if (!Array.isArray(prefs.pauseDays)) {
+    problems.push('pauseDays must be an array')
+  } else {
+    const seen = new Set<number>()
+    prefs.pauseDays.forEach((d, i) => {
+      if (!Number.isInteger(d) || d < 1 || d > 365) {
+        problems.push(`pauseDays[${i}] must be an integer from 1 to 365 (got ${JSON.stringify(d)})`)
+      } else if (seen.has(d)) {
+        problems.push(`pauseDays[${i}] (${d}) is listed twice`)
+      } else {
+        seen.add(d)
+      }
+    })
+  }
+  if (problems.length) throw new Error(`MailerConfig.preferences is invalid:\n  - ${problems.join('\n  - ')}`)
 }
 
 export const CONTACT_POLICY_DEFAULTS = {

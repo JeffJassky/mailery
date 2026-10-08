@@ -81,7 +81,7 @@ HTML page for browser visits.
 
 ### The preference page
 
-One checkbox per declared category (`value="<id>"`, label and description from config, checked when the recipient is opted in), a **Save preferences** button and a separate **Unsubscribe from all marketing email** button. When the address has a live `marketing` or `all` opt-out the page shows "You're unsubscribed from all marketing email", leaves the boxes unticked, and replaces both buttons with **Resubscribe to the topics below**. Everything is HTML-escaped and transactional mail is never mentioned. The form posts to `POST /unsub/:token/preferences`.
+One checkbox per declared category (`value="<id>"`, label and description from config, checked when the recipient is opted in), a **Save preferences** button and a separate **Unsubscribe from all marketing email** button. When the address has a live `marketing` or `all` opt-out the page shows "You're unsubscribed from all marketing email", leaves the boxes unticked, and replaces both buttons with **Resubscribe to the topics below**. Everything is HTML-escaped and transactional mail is never mentioned. When `preferences.pauseDays` is non-empty and the address is not paused, a "Take a break" section adds one `name="pause"` button per length ("Pause for 1 week", "2 weeks", "1 month", else "N days"). While paused the page shows "Paused until <Month D, YYYY>" and a **Resume now** button instead; when the address is unsubscribed from all marketing neither control is shown. The form posts to `POST /unsub/:token/preferences`.
 
 ## `POST /unsub/:token/preferences`
 
@@ -93,10 +93,12 @@ The preference page's form. **Mounted only when `categories` is non-empty**; oth
 | `action=save` | Plus `category=<id>` once per checked box. Unchecked declared categories are opted out, checked ones opted back in. **Never clears a marketing-wide (`marketing`/`all`) opt-out.** Ids that are not declared are ignored |
 | `action=resubscribe` | As `save`, and also clears the recipient's `marketing`/`all` unsubscribe rows. The only action that does |
 | `action=unsubscribe-all` | Writes a `marketing` opt-out; categories are ignored |
+| `pause=<days>` | Pauses all marketing email for that many days (a `marketing_pause` row). The value must be one of the configured `pauseDays`, else 400 `Unknown pause length.` |
+| `action=resume` | Deletes the pause row |
 | Source | `source: 'preferences'` on rows it writes |
-| Status codes | 200 (recorded), 400 (invalid/expired token, unknown action), 503 (see below) |
+| Status codes | 200 (recorded), 400 (invalid/expired token, unknown action, unknown pause length), 503 (see below) |
 
-Durability follows [INVARIANT 8](https://github.com/JeffJassky/mailery/blob/main/plans/INVARIANTS.md) as far as it can. With Mongo unreachable, `unsubscribe-all` is a pure opt-out, so it is journaled and answers 200 like the one-click POST. `save` and `resubscribe` may contain opt-ins, which cannot be journaled: their opt-outs are journaled and they answer **503** rather than claim the page was saved. With no `pendingUnsubsPath` configured both answer 503. An invalid token writes nothing.
+Durability follows [INVARIANT 8](https://github.com/JeffJassky/mailery/blob/main/plans/INVARIANTS.md) as far as it can. With Mongo unreachable, `unsubscribe-all` is a pure opt-out, so it is journaled and answers 200 like the one-click POST. `save` and `resubscribe` may contain opt-ins, which cannot be journaled: their opt-outs are journaled and they answer **503** rather than claim the page was saved. With no `pendingUnsubsPath` configured both answer 503. A pause is not an unsubscribe and is never journaled: when its write fails, `pause` and `action=resume` answer **503** with `Retry-After: 60`. An invalid token writes nothing.
 
 ## `POST /unsub/:token`
 

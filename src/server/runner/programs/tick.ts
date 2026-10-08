@@ -379,15 +379,22 @@ async function tickLeased(
   await renewLease(ctx, runId, worker) // the host call may have been slow
   const seen = new Set<string>()
   const recipients = []
+  let pauseEnds: number | null = null // earliest expiry among suppressions that removed a recipient
   for (const c of contacts ?? []) {
     if (!c || !c.email || !c.email.trim() || seen.has(c.externalId)) continue
     seen.add(c.externalId)
     const supp = await isSuppressed(C, c.email, 'marketing', def.category)
-    if (supp.suppressed) continue
+    if (supp.suppressed) {
+      const exp = supp.expiresAt?.getTime()
+      if (exp !== undefined && exp > nowMs && (pauseEnds === null || exp < pauseEnds)) pauseEnds = exp
+      continue
+    }
     recipients.push(c)
   }
   if (recipients.length === 0) {
-    return silent('no-recipients', new Date(nowMs + def.policy.minGapDays * DAY_MS))
+    // A pause that ends before the gap wakes the run when it ends.
+    const gapEnd = nowMs + def.policy.minGapDays * DAY_MS
+    return silent('no-recipients', new Date(pauseEnds !== null ? Math.min(gapEnd, pauseEnds) : gapEnd))
   }
 
   // 14. send rows.
