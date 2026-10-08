@@ -165,6 +165,7 @@ export type { ProgramValidationIssue, ProgramValidationContext, ProgramValidatio
 export { FACTS_CHANGED_EVENT, holdoutArm } from './runner/programs/index.js'
 export type { ProgramTickResult } from './runner/programs/index.js'
 export { tokenScope } from './tokens.js'
+export { templateCategoryIssue } from './templates/category.js'
 
 export type {
   SubscriptionStatus,
