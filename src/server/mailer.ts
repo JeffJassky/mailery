@@ -31,6 +31,7 @@ import {
 } from './runner/programs/index.js'
 import { flowSendHooks } from './runner/flow-hooks.js'
 import { emitOutcome } from './runner/send.js'
+import { lintProgram } from './programs/lint.js'
 import { referencedTemplateSlugs, validateProgramDefinition, type ProgramValidationIssue } from './programs/validate.js'
 import {
   abortAllFlowsInputSchema,
@@ -859,9 +860,23 @@ export class Mailer {
    * exists). Null when the program or that source does not exist. §4.
    */
   async lintProgram(slug: string, source?: ProgramSource): Promise<{ source: ProgramSource; issues: ProgramLintIssue[] } | null> {
-    void slug
-    void source
-    throw new Error('Mailer.lintProgram: not implemented (board WP-A)')
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) return null
+    const chosen: ProgramSource = source ?? (doc.draft ? 'draft' : 'published')
+    const definition = chosen === 'draft' ? doc.draft?.definition : doc.definition
+    if (!definition) return null
+
+    const rows = await this.collections.templates
+      .find({ slug: { $in: referencedTemplateSlugs(definition) } }, { projection: { slug: 1, kind: 1, category: 1, 'body.html': 1 } })
+      .toArray()
+    const issues = lintProgram(definition, {
+      categories: this.config.categories ?? [],
+      facts: this.config.factsAdapter?.declare ?? null,
+      templates: new Map(
+        rows.map((t) => [t.slug, { kind: t.kind, category: t.category ?? null, published: !!t.body?.html }]),
+      ),
+    })
+    return { source: chosen, issues }
   }
 
   /** Checklist for the host's in-app UI. Null when the subject has no run. §5.11. */
