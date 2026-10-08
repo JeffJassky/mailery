@@ -5,7 +5,8 @@
  *
  * Audit (INVARIANT 10): the facade audits save-draft, publish, enable,
  * disable and abort; this router audits the two it does not — `enter` and
- * forced `tick`. Abort is audited by the facade, with actor `host`.
+ * forced `tick`. Abort is audited by the facade, with the request's actor
+ * (`mailer.abortProgram(..., { actor })`; `host` when called from host code).
  */
 
 import { Router, type NextFunction, type Request, type Response } from 'express'
@@ -26,9 +27,13 @@ function h(fn: Handler) {
 const ARMS = ['treatment', 'holdout'] as const
 const RUN_STATUSES = ['active', 'completed', 'exited', 'sunset'] as const
 
+/** Deep `skip` scans the index linearly; cap it. Narrow with `status` / `arm` to go further. */
+const MAX_SKIP = 10_000
+const MAX_SUBJECT_LEN = 256
+
 const pageSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  skip: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  skip: z.coerce.number().int().min(0).max(MAX_SKIP).default(0),
 })
 
 const draftBodySchema = z.object({
@@ -59,6 +64,10 @@ export function createProgramsRouter(mailer: Mailer): Router {
     const doc = await c.programs.findOne({ slug: String(req.params.slug) })
     if (!doc) res.status(404).json({ error: 'not_found', message: `unknown program "${String(req.params.slug)}"` })
     return doc
+  }
+
+  function subjectTooLong(res: Response) {
+    return res.status(400).json({ error: 'validation_failed', message: `subjectId must be at most ${MAX_SUBJECT_LEN} characters` })
   }
 
   function parsePage(req: Request, res: Response): { limit: number; skip: number } | null {
@@ -236,6 +245,7 @@ export function createProgramsRouter(mailer: Mailer): Router {
     h(async (req, res) => {
       const doc = await loadProgram(req, res)
       if (!doc) return
+      if (String(req.params.subjectId).length > MAX_SUBJECT_LEN) return subjectTooLong(res)
       const page = parsePage(req, res)
       if (!page) return
       const run = await c.programRuns.findOne({ programSlug: doc.slug, subjectId: String(req.params.subjectId) })
@@ -255,7 +265,9 @@ export function createProgramsRouter(mailer: Mailer): Router {
       const doc = await loadProgram(req, res)
       if (!doc) return
       const subject = typeof req.query.subject === 'string' ? req.query.subject : ''
-      if (!subject) return res.status(400).json({ error: 'validation_failed', message: 'subject (query) is required' })
+      if (!subject || subject.length > MAX_SUBJECT_LEN) {
+        return res.status(400).json({ error: 'validation_failed', message: `subject (query, 1-${MAX_SUBJECT_LEN} chars) is required` })
+      }
       const state = await mailer.getProgramState(doc.slug, subject)
       if (!state) return res.status(404).json({ error: 'run_not_found', message: `no run for subject "${subject}"` })
       res.json(state)
@@ -279,6 +291,7 @@ export function createProgramsRouter(mailer: Mailer): Router {
       const doc = await loadProgram(req, res)
       if (!doc) return
       const subjectId = String(req.params.subjectId)
+      if (subjectId.length > MAX_SUBJECT_LEN) return subjectTooLong(res)
       const run = await c.programRuns.findOne({ programSlug: doc.slug, subjectId }, { projection: { _id: 1 } })
       if (!run) return res.status(404).json({ error: 'run_not_found', message: `no run for subject "${subjectId}"` })
       const result = await mailer.tickProgram(doc.slug, subjectId)
@@ -298,10 +311,11 @@ export function createProgramsRouter(mailer: Mailer): Router {
       const doc = await loadProgram(req, res)
       if (!doc) return
       const subjectId = String(req.params.subjectId)
+      if (subjectId.length > MAX_SUBJECT_LEN) return subjectTooLong(res)
       const run = await c.programRuns.findOne({ programSlug: doc.slug, subjectId }, { projection: { _id: 1 } })
       if (!run) return res.status(404).json({ error: 'run_not_found', message: `no run for subject "${subjectId}"` })
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : `aborted by ${actorOf(req)}`
-      const out = await mailer.abortProgram(doc.slug, subjectId, { reason })
+      const out = await mailer.abortProgram(doc.slug, subjectId, { reason, actor: actorOf(req) })
       res.json({ ok: true, ...out })
     }),
   )
@@ -415,19 +429,20 @@ export async function computeProgramStats(mailer: Mailer, doc: ProgramDoc): Prom
   for (const e of chosen) row(e._id.id)[e._id.arm as 'treatment' | 'holdout'].chosen += e.n
   for (const s of sends) if (s._id.id) row(s._id.id)[s._id.holdout ? 'holdout' : 'treatment'].sent += s.n
 
-  const actionIds = [...rows.keys()].filter((id) => !id.startsWith('$'))
-  await Promise.all(
-    actionIds.flatMap((id) =>
-      ARMS.map(async (arm) => {
-        const n = await c.programRuns.countDocuments({
-          programSlug: slug,
-          arm,
-          [`actions.${id}.completedAt`]: { $ne: null },
-        } as any)
-        row(id)[arm].satisfied = n
-      }),
-    ),
+  // One bounded pass over this program's runs (served by { programSlug, ... }) instead of
+  // a countDocuments per action x arm. Only the completedAt flag of each action is read.
+  const known = new Set(rows.keys())
+  const cursor = c.programRuns.find(
+    { programSlug: slug },
+    { projection: { arm: 1, actions: 1 } },
   )
+  for await (const run of cursor) {
+    const arm = run.arm as 'treatment' | 'holdout'
+    if (arm !== 'treatment' && arm !== 'holdout') continue
+    for (const [id, st] of Object.entries(run.actions ?? {})) {
+      if (known.has(id) && (st as any)?.completedAt) row(id)[arm].satisfied += 1
+    }
+  }
 
   const runs = {} as ProgramStats['runs']
   for (const arm of ARMS) {

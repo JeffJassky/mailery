@@ -273,9 +273,11 @@ Ticks the subject's run now with `trigger: 'forced'`. Every rule a scheduled tic
 abortProgram(
   slug: string,
   subjectId: string,
-  opts?: { reason?: string },
+  opts?: { reason?: string; actor?: string },
 ): Promise<{ aborted: boolean; cancelledSends: number }>
 ```
+
+`actor` is recorded on the audit row (default `host`; the admin and agent routes pass the request's actor).
 
 Like `abortFlow`: ends an active run immediately (`exitReason: 'aborted_by_host: <reason>'`) and cancels its queued, deferred and held sends. No-op when there is no active run. Audit action `program.abort` when it aborted something.
 

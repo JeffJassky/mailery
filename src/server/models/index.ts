@@ -1026,6 +1026,11 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { emailAtSend: 1, kind: 1, sentAt: -1 } },
       { key: { status: 1, notBefore: 1 }, partialFilterExpression: { status: 'deferred' } },
       { key: { 'program.runId': 1 }, partialFilterExpression: { 'program.runId': { $exists: true } } },
+      // 0.21: per-program stats (sends by action, holdout vs real).
+      {
+        key: { 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 },
+        partialFilterExpression: { 'program.slug': { $exists: true } },
+      },
     ]),
     c.suppressions.createIndexes([
       { key: { email: 1, scope: 1 }, unique: true, partialFilterExpression: { email: { $type: 'string' } } },
@@ -1107,6 +1112,8 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { programSlug: 1, subjectId: 1 }, unique: true },
       { key: { status: 1, nextTickAt: 1 } },
       { key: { programSlug: 1, status: 1 } },
+      // Runs list (newest first); status / arm filters are served by the index above plus a bounded scan.
+      { key: { programSlug: 1, enteredAt: -1 } },
     ]),
     c.programDecisions.createIndexes([
       { key: { runId: 1, at: -1 } },

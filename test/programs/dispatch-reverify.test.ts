@@ -288,6 +288,17 @@ describe('abortProgram', () => {
     expect(await P.H.mailer.abortProgram(slug, subjectId)).toEqual({ aborted: false, cancelledSends: 0 })
     const audit = await P.H.mailer.collections.auditLog.findOne({ action: 'program.abort' })
     expect(audit).not.toBeNull()
+    expect(audit!.actor).toBe('host')
+  })
+
+  it('records the given actor on the program.abort audit row', async () => {
+    startClock()
+    const { subjectId } = await subject(P)
+    await enter(P, slug, subjectId)
+    await P.H.mailer.abortProgram(slug, subjectId, { reason: 'ops', actor: 'human:ops@example.com' })
+    const rows = await P.H.mailer.collections.auditLog.find({ action: 'program.abort', diffSummary: { $regex: `^subject ${subjectId}:` } }).toArray()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.actor).toBe('human:ops@example.com')
   })
 
   it('no run at all → no-op', async () => {

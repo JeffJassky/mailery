@@ -119,6 +119,16 @@ describe('draft, publish, enable (agent router)', () => {
     expect((await call('PATCH', '/programs/drafty', { ...d, slug: 'other' })).status).toBe(400)
   })
 
+  it('PATCH accepts the { definition, notes } wrapper', async () => {
+    const d = def()
+    d.name = 'Drafty wrapped'
+    const res = await call('PATCH', '/programs/drafty', { definition: d, notes: 'via wrapper' })
+    expect(res.status).toBe(200)
+    const draft = (await call('GET', '/programs/drafty')).body.draft
+    expect(draft.definition.name).toBe('Drafty wrapped')
+    expect(JSON.stringify(draft)).toContain('via wrapper')
+  })
+
   it('publish answers 422 with issues when validation fails, and 404 for an unknown program', async () => {
     const d = def()
     d.category = 'undeclared.category'
@@ -131,6 +141,28 @@ describe('draft, publish, enable (agent router)', () => {
     expect(paths).toContain('category')
     expect(res.body.issues.some((i: any) => /missing-template/.test(i.message))).toBe(true)
     expect((await call('POST', '/programs/nope/publish')).status).toBe(404)
+  })
+
+  it('enter on a never-published program is 409', async () => {
+    const d = def()
+    d.slug = 'unpublished'
+    expect((await call('POST', '/programs', d)).status).toBe(201)
+    const res = await call('POST', '/programs/unpublished/enter', { subjectId: 'someone' })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('not_published')
+  })
+
+  it('enable without a factsAdapter is 409', async () => {
+    const cfg = P.H.mailer.config as any
+    const saved = cfg.factsAdapter
+    cfg.factsAdapter = undefined
+    try {
+      const res = await call('POST', '/programs/activation/enable')
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe('facts_adapter_required')
+    } finally {
+      cfg.factsAdapter = saved
+    }
   })
 
   it('enable before publish is 409; publish then enable/disable work and are audited', async () => {
@@ -286,7 +318,19 @@ describe('runs, decisions, state, stats, operator actions', () => {
     expect(res.body).toMatchObject({ ok: true, aborted: true })
     const run = await call('GET', `/programs/${slug}/runs/${id}`)
     expect(run.body.run.status).not.toBe('active')
-    expect((await audits('program.abort')).length).toBeGreaterThanOrEqual(1)
+    expect((await audits('program.abort')).some((r) => r.actor === 'agent:test')).toBe(true)
+  })
+
+  it('caps subject length (256) on state and runs/:subjectId routes, and runs skip at 10000', async () => {
+    const long = 'x'.repeat(257)
+    expect((await call('GET', `/programs/${slug}/state?subject=${long}`)).status).toBe(400)
+    expect((await call('GET', `/programs/${slug}/runs/${long}`)).status).toBe(400)
+    expect((await call('POST', `/programs/${slug}/runs/${long}/tick`)).status).toBe(400)
+    expect((await call('POST', `/programs/${slug}/runs/${long}/abort`)).status).toBe(400)
+    expect((await call('GET', `/programs/${slug}/runs/${'y'.repeat(256)}`)).status).toBe(404)
+    expect((await call('GET', `/programs/${slug}/runs?skip=10001`)).status).toBe(400)
+    expect((await call('GET', `/programs/${slug}/runs?limit=201`)).status).toBe(400)
+    expect((await call('GET', `/programs/${slug}/runs?skip=10000&limit=200`)).status).toBe(200)
   })
 })
 

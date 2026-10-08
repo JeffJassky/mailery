@@ -826,16 +826,16 @@ export class Mailer {
     return tickProgramRun(this.runnerContext, run._id!, { trigger: 'forced' })
   }
 
-  /** Same semantics as `abortFlow`, for one subject's Program run. Audited when it aborts something. */
+  /** Same semantics as `abortFlow`, for one subject's Program run. Audited when it aborts something, with `opts.actor` (default `host`). */
   async abortProgram(
     slug: string,
     subjectId: string,
-    opts: { reason?: string } = {},
+    opts: { reason?: string; actor?: string } = {},
   ): Promise<{ aborted: boolean; cancelledSends: number }> {
     const res = await abortProgramRun(this.runnerContext, slug, subjectId, opts.reason ?? '')
     if (res.aborted) {
       await this.audit({
-        actor: 'host',
+        actor: opts.actor ?? 'host',
         action: 'program.abort',
         resource: { collection: 'mailer_program_runs', slug },
         diffSummary: `subject ${subjectId}: ${opts.reason ?? 'no reason given'}; cancelled ${res.cancelledSends} send(s)`,
