@@ -5,7 +5,7 @@ import { api, type ProgramArmFunnel } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
 import { Icons } from '../components/icons'
-import { Tip } from '../components/tip'
+import { IconButton, Tip } from '../components/tip'
 import { Board } from './program-board/board'
 
 const CodeEditor = React.lazy(() => import('../components/code-editor'))
@@ -13,6 +13,8 @@ const CodeEditor = React.lazy(() => import('../components/code-editor'))
 export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: any) => void }) {
   const { data: prog, loading, error, refetch } = useLive(() => api.program(slug), [slug])
   const [tab, setTab] = React.useState<'board' | 'runs' | 'stats' | 'json'>('board')
+  const [editing, setEditing] = React.useState(false)
+  const [boardDirty, setBoardDirty] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [issues, setIssues] = React.useState<Array<{ path: string; message: string }>>([])
@@ -62,6 +64,15 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
       loadedFor.current = ''
     })
 
+  function goTab(t: typeof tab) {
+    if (t === tab) return
+    if (tab === 'board' && editing) {
+      if (boardDirty && !window.confirm('Discard unsaved changes?')) return
+      setEditing(false)
+    }
+    setTab(t)
+  }
+
   if (loading && !prog) return <LoadState loading error={null} empty={false}><></></LoadState>
   if (error || !prog) return <LoadState loading={false} error={error} empty={false} retry={refetch}><></></LoadState>
 
@@ -96,9 +107,25 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
         }
         desc={<span className="mono">{slug}</span>}
         actions={
-          prog.draft ? (
-            <button className="btn btn-primary" disabled={busy} onClick={publish}>Publish</button>
-          ) : undefined
+          <>
+            {prog.draft && (
+              <Tip label={boardDirty ? 'Save the draft first' : ''}>
+                <button className="btn btn-primary" disabled={busy || boardDirty} onClick={publish}>Publish</button>
+              </Tip>
+            )}
+            {tab === 'board' && (
+              <IconButton
+                icon={<Icons.Pencil />}
+                label={editing ? 'Stop editing' : 'Edit'}
+                active={editing}
+                disabled={!prog.draft && !prog.published}
+                onClick={() => {
+                  if (editing && boardDirty && !window.confirm('Discard unsaved changes?')) return
+                  setEditing(!editing)
+                }}
+              />
+            )}
+          </>
         }
       />
 
@@ -114,15 +141,15 @@ export function ProgramDetail({ slug, setRoute }: { slug: string; setRoute: (r: 
             tabIndex={0}
             aria-selected={tab === t}
             className={'tab' + (tab === t ? ' active' : '')}
-            onClick={() => setTab(t)}
-            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setTab(t))}
+            onClick={() => goTab(t)}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), goTab(t))}
           >
             {label}
           </div>
         ))}
       </div>
 
-      {tab === 'board' && <Board slug={slug} prog={prog} setRoute={setRoute} extraIssues={issues} />}
+      {tab === 'board' && <Board slug={slug} prog={prog} setRoute={setRoute} extraIssues={issues} editing={editing} onDirty={setBoardDirty} onSaved={refetch} />}
 
       {tab === 'json' && (
         <div className="card" style={{ padding: 16 }}>

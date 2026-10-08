@@ -90,19 +90,7 @@ export function Tip({
   )
 }
 
-/** Icon-only button. `label` is both the tooltip and the accessible name. */
-export function IconButton({
-  icon,
-  label,
-  onClick,
-  disabled,
-  active,
-  tone,
-  small,
-  className,
-  type = 'button',
-  ...rest
-}: {
+type IconButtonProps = {
   icon: React.ReactNode
   label: string
   onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void
@@ -112,10 +100,17 @@ export function IconButton({
   small?: boolean
   className?: string
   type?: 'button' | 'submit'
-} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'onClick' | 'type' | 'children'>) {
+} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'onClick' | 'type' | 'children'>
+
+/** Icon-only button. `label` is both the tooltip and the accessible name. */
+export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { icon, label, onClick, disabled, active, tone, small, className, type = 'button', ...rest },
+  ref,
+) {
   return (
     <Tip label={label}>
       <button
+        ref={ref}
         type={type}
         className={
           'icon-btn2' + (active ? ' active' : '') + (tone === 'danger' ? ' danger' : '') + (small ? ' sm' : '') + (className ? ' ' + className : '')
@@ -130,4 +125,4 @@ export function IconButton({
       </button>
     </Tip>
   )
-}
+})

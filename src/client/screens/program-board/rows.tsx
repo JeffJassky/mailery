@@ -15,10 +15,9 @@ export interface RowsEdit {
   /** Grip + overflow menu + add-attempt cells are shown. */
   on: boolean
   renderMenu: (row: BoardRow) => React.ReactNode
-  gripProps: (row: BoardRow) => React.HTMLAttributes<HTMLElement> & { onKeyDown: React.KeyboardEventHandler }
-  rowProps: (row: BoardRow) => React.HTMLAttributes<HTMLElement> & { className?: string }
-  onAddAttempt: (row: BoardRow) => void
-  addAttemptOpenFor: string | null
+  gripProps: (row: BoardRow) => Record<string, any>
+  rowProps: (row: BoardRow) => Record<string, any>
+  onAddAttempt: (row: BoardRow, el: HTMLElement) => void
 }
 
 const STATUS_ICON: Record<RowState, keyof typeof Icons> = {
@@ -65,8 +64,8 @@ export function BoardRows({
     <div className="pb-scroll">
       <div className="pb-grid" style={{ minWidth }}>
         {rows.map((row) => {
-          const extra = edit?.on && !row.ghost ? edit.rowProps(row) : {}
-          const { className: extraClass, ...extraRest } = extra as { className?: string }
+          const extra: Record<string, any> = edit?.on && !row.ghost && row.kind === 'action' ? edit.rowProps(row) : {}
+          const { className: extraClass, ...extraRest } = extra
           return (
             <div
               key={row.id + (row.ghost ? ':ghost' : '')}
@@ -104,7 +103,7 @@ export function BoardRows({
                 {edit?.on && row.kind === 'action' && !row.ghost && (
                   <div className="pb-cell-wrap">
                     <Tip label="Add an email" className="block">
-                      <button type="button" className="pb-cell-add" aria-label={`Add an email to ${row.title}`} onClick={() => edit.onAddAttempt(row)}>
+                      <button type="button" className="pb-cell-add" aria-label={`Add an email to ${row.title}`} onClick={(e) => edit.onAddAttempt(row, e.currentTarget)}>
                         <Icons.Plus />
                       </button>
                     </Tip>
