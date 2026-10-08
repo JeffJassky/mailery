@@ -16,6 +16,9 @@ import type { Mailer } from '../mailer.js'
 import { programDefinitionSchema } from '../../shared/schemas.js'
 import type { ProgramDefinition } from '../../shared/types.js'
 import type { ProgramDoc } from '../models/index.js'
+import type { ProgramSource } from '../../shared/program-board.js'
+import { ProgramSimulationError, type ProgramSimulationErrorCode } from '../runner/programs/simulate.js'
+import { referencedTemplateSlugs } from '../programs/validate.js'
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown
 function h(fn: Handler) {
@@ -188,6 +191,38 @@ export function createProgramsRouter(mailer: Mailer): Router {
     }),
   )
 
+  // ----- Board: simulate and lint -----------------------------------------------
+  // Read-only, so neither is audited.
+  r.post(
+    '/:slug/simulate',
+    h(async (req, res) => {
+      try {
+        res.json(await mailer.simulateProgram(String(req.params.slug), req.body ?? {}))
+      } catch (err) {
+        if (!(err instanceof ProgramSimulationError)) throw err
+        const status = SIMULATION_STATUS[err.code]
+        res.status(status.http).json({ error: status.error, message: err.message })
+      }
+    }),
+  )
+
+  r.get(
+    '/:slug/lint',
+    h(async (req, res) => {
+      const doc = await loadProgram(req, res)
+      if (!doc) return
+      const raw = req.query.source
+      if (raw !== undefined && raw !== 'published' && raw !== 'draft') {
+        return res.status(400).json({ error: 'validation_failed', message: 'source must be "published" or "draft"' })
+      }
+      const out = await mailer.lintProgram(doc.slug, raw as ProgramSource | undefined)
+      if (!out) {
+        return res.status(409).json({ error: 'no_definition', message: `program "${doc.slug}" has no ${raw ?? 'published'} definition` })
+      }
+      res.json(out)
+    }),
+  )
+
   // ----- Detail ----------------------------------------------------------------
   r.get(
     '/:slug',
@@ -206,6 +241,8 @@ export function createProgramsRouter(mailer: Mailer): Router {
         publishedAt: doc.publishedAt,
         publishedBy: doc.publishedBy,
         draft: doc.draft,
+        facts: mailer.config.factsAdapter?.declare ?? null,
+        templates: await referencedTemplates(doc),
         versions: versions.map((v) => ({ version: v.version, publishedAt: v.publishedAt, publishedBy: v.publishedBy })),
       })
     }),
@@ -343,7 +380,34 @@ export function createProgramsRouter(mailer: Mailer): Router {
     }),
   )
 
+  /** Every existing template the published or draft definition sends, for the board's cells. */
+  async function referencedTemplates(doc: ProgramDoc) {
+    const slugs = new Set<string>()
+    for (const d of [doc.definition, doc.draft?.definition]) {
+      if (d) for (const slug of referencedTemplateSlugs(d)) slugs.add(slug)
+    }
+    const rows = await c.templates
+      .find({ slug: { $in: [...slugs] } }, { projection: { slug: 1, name: 1, subject: 1, kind: 1, category: 1, 'body.html': 1 } })
+      .sort({ slug: 1 })
+      .toArray()
+    return rows.map((t) => ({
+      slug: t.slug,
+      name: t.name,
+      subject: t.subject,
+      kind: t.kind,
+      category: t.category ?? null,
+      published: !!t.body?.html,
+    }))
+  }
+
   return r
+}
+
+const SIMULATION_STATUS: Record<ProgramSimulationErrorCode, { http: number; error: string }> = {
+  invalid_input: { http: 400, error: 'validation_failed' },
+  not_found: { http: 404, error: 'not_found' },
+  no_definition: { http: 409, error: 'no_definition' },
+  no_facts_adapter: { http: 409, error: 'no_facts_adapter' },
 }
 
 // ---------------------------------------------------------------------------

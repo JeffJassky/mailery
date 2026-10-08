@@ -1773,6 +1773,8 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'POST', path: '/programs/:slug/enable', summary: 'Enable a published Program (requires MailerConfig.factsAdapter). Does not replay earlier entry events; backfill with /enter.' },
   { method: 'POST', path: '/programs/:slug/disable', summary: 'Disable a Program. Runs stay; nothing ticks.' },
   { method: 'GET', path: '/programs/:slug', summary: 'Published definition, draft, and the versions list.' },
+  { method: 'POST', path: '/programs/:slug/simulate', summary: 'Dry-run one tick and project the send sequence ({source?: published|draft, subjectId?, facts?, now?, horizonDays?}). Read-only; not audited. 409 no_definition / no_facts_adapter.' },
+  { method: 'GET', path: '/programs/:slug/lint?source=', summary: 'Lint the draft (default when one exists) or published definition: {source, issues: [{severity, code, path, message, actionId?, attempt?}]}. Errors are publish blockers; warnings are not.' },
   { method: 'GET', path: '/programs/:slug/runs?status=&arm=&limit=&skip=', summary: 'Runs, newest entry first.' },
   { method: 'GET', path: '/programs/:slug/runs/:subjectId?limit=&skip=', summary: 'One run plus its decisions, newest first.' },
   { method: 'GET', path: '/programs/:slug/state?subject=', summary: 'The checklist (getProgramState) for a subject.' },

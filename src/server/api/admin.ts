@@ -13,6 +13,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ObjectId } from 'mongodb'
+import { z } from 'zod'
 
 import type { Mailer } from '../mailer.js'
 import {
@@ -28,8 +29,9 @@ import { parseCategoryInput } from '../templates/category-input.js'
 import { lintTemplate, type LintResult } from '../templates/linter.js'
 import { validateHtmlSource, type HtmlSourceIssue } from '../templates/html-source.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
-import type { Contact } from '../../shared/types.js'
+import type { Contact, Facts } from '../../shared/types.js'
 import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
+import { buildProgramRenderVars } from '../runner/programs/hooks.js'
 import { runSetupChecks } from './setup-status.js'
 import { createProgramsRouter } from './programs.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
@@ -122,6 +124,16 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
 // ---------------------------------------------------------------------------
 // JSON API
 // ---------------------------------------------------------------------------
+
+/** `program` option of the template preview: render as a Program send would (plans/16 §7). */
+const previewProgramSchema = z.object({
+  slug: z.string().min(1).max(200),
+  source: z.enum(['published', 'draft']).optional(),
+  actionId: z.string().min(1).max(200),
+  attempt: z.number().int().min(1),
+  facts: z.record(z.string(), z.unknown()).optional(),
+  subjectId: z.string().min(1).max(256).optional(),
+})
 
 /**
  * The JSON API alone, without the SPA shell or the static assets. Exported
@@ -1741,6 +1753,16 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       const useDraft = req.body?.useDraft !== false
 
+      let programOpt: z.infer<typeof previewProgramSchema> | undefined
+      if (req.body?.program !== undefined) {
+        const parsed = previewProgramSchema.safeParse(req.body.program)
+        if (!parsed.success) {
+          const message = parsed.error.issues.map((i) => `program.${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
+          return res.status(400).json({ error: 'validation_failed', message })
+        }
+        programOpt = parsed.data
+      }
+
       // Inline body overrides, same tolerance as the lint endpoint. The editor
       // holds unsaved edits in local state; without this the only way to see
       // them rendered would be to write a draft — an audit-logged mutation —
@@ -1816,8 +1838,23 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         })
       }
 
+      // Program context (action/attempt/facts) wins over host vars, as at send time.
+      let programVars: Record<string, unknown> = {}
+      if (programOpt) {
+        const prog = await c.programs.findOne({ slug: programOpt.slug })
+        const source = programOpt.source ?? (prog?.draft ? 'draft' : 'published')
+        const def = source === 'draft' ? prog?.draft?.definition : prog?.definition
+        if (!def) {
+          return res.status(404).json({ error: 'program_not_found', message: `program "${programOpt.slug}" has no ${source} definition` })
+        }
+        const adapter = mailer.config.factsAdapter
+        const facts: Facts = (programOpt.facts as Facts | undefined) ?? (programOpt.subjectId && adapter ? await adapter.resolve(programOpt.subjectId) : {})
+        programVars = buildProgramRenderVars(def, programOpt, facts, 0)
+      }
+
       const renderCtx = {
         ...resolved,
+        ...programVars,
         contact,
         vars: req.body?.vars ?? {},
         event: eventProperties ?? {},
