@@ -245,11 +245,11 @@ factsAdapter: {
 ```ts
 {
   programSlug, programVersion, subjectId,
-  status: 'active' | 'dormant' | 'completed' | 'exited' | 'sunset',
+  status: 'active' | 'completed' | 'exited' | 'sunset',
   arm: 'treatment' | 'holdout',
   actions: {
     [actionId]: {
-      status: 'pending' | 'satisfied' | 'exhausted' | 'cooldown' | 'blocked',
+      status: 'pending' | 'satisfied' | 'exhausted' | 'cooldown',
       attempts: number, lastSentAt?, completedAt?,         // completedAt is monotonic
       exhaustedAt?, cooldownUntil?,
     }
@@ -625,6 +625,28 @@ from earlier sections, these win.
   `cancelled` with `exitReason: 'policy_expired'`.
 - **Send hooks** (`RunnerContext.sendHooks`) carry the re-verify guard and outcome
   callbacks per origin; the guard runs after suppression and before the policy.
+- **Audit resolutions** (Sonnet untested-surface audit, PR 1.4):
+  - The sunset ask tick has `reason: 'sunset'` and `chosen: '$sunset-ask'`; the ask is
+    "sent" (status → sunset) only when accepted. Silent decisions keep `chosen`.
+  - Runs always use the latest published definition (unlike flow runs, INVARIANT 15):
+    actions are keyed by id, so a new action appears on the next tick and a removed
+    action's pending send is cancelled at dispatch (`ineligible_before_send`).
+  - Run status `dormant` and action status `blocked` (§5.3) are dropped; `blockedBy`
+    on the decision carries that information.
+  - `setProgramEnabled(true)` moves the entry watermark to now. Entry events from before
+    enabling are not replayed; existing subjects are entered with `enterProgram`.
+  - The run's `inFlight` (with pre-generated send ids) is written before the send rows,
+    so a crash between writes cannot produce a second send on the next tick.
+  - A `failed` send is in flight (queue retries pending) until `queuedAt` is older than
+    1h, then terminal.
+  - Contact policy must hold under concurrent dispatch: two parallel marketing sends to
+    one address → one provider call.
+  - Opt-outs are never refused for an undeclared category (`unsubscribe`, one-click on
+    a token whose category was removed). `setPreferences` still rejects undeclared ids
+    because it is a settings write, not an opt-out.
+  - `POST /unsub/:token/preferences` is not mounted without categories.
+  - Template category rule lives in `templates/category.ts` (`templateCategoryIssue`)
+    and every template publish/edit path calls it.
 - **Open items resolved**: `decisionRetentionDays` default null (keep); `Facts Changed`
   carries no payload (always resolve); preference page reuses the unsub page shell;
   admin name "Programs".

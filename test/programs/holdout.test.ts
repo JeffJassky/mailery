@@ -48,15 +48,11 @@ describe('holdoutArm (pure, persisted semantics)', () => {
     expect(same).toBeLessThan(400)
   })
   it('is pinned: these values must never change (changing them reshuffles live arms)', () => {
-    expect(['acct-1', 'acct-2', 'acct-3', 'acct-4', 'acct-5'].map((id) => holdoutArm('activation', id, 50))).toMatchInlineSnapshot(`
-      [
-        "treatment",
-        "treatment",
-        "treatment",
-        "treatment",
-        "treatment",
-      ]
-    `)
+    const ids = Array.from({ length: 12 }, (_, i) => `acct-${i}`)
+    const arms = ids.map((id) => holdoutArm('activation', id, 50))
+    expect(arms).toContain('holdout')
+    expect(arms).toContain('treatment')
+    expect(arms.map((a) => (a === 'holdout' ? 'H' : 'T')).join('')).toMatchInlineSnapshot(`"TTTTTTTHTTTT"`)
   })
 })
 

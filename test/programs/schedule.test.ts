@@ -131,7 +131,8 @@ describe('delivery window', () => {
   })
 
   it('useContactTimezone reads the subject\'s `timezone` fact', async () => {
-    startClock() // Monday 15:00Z — 10:00 or 11:00 in New York, past the 09:00 slot + 1h grace
+    startClock() // Monday 15:00Z
+    advance(90 * MINUTE) // 16:30Z = 11:30 or 12:30 New York: well past 09:00 + the 1h grace
     const { subjectId } = await subject(P, { timezone: 'America/New_York' })
     await enter(P, 'local-mornings', subjectId)
     expect(await tickProgram(P.H.ctx, 'local-mornings', subjectId)).toMatchObject({ reason: 'delivery-window' })
