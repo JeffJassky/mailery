@@ -397,7 +397,11 @@ describe('entry, Facts Changed, definitions', () => {
     expect(run).toMatchObject({ status: 'active', arm: 'treatment' })
     const ds = await decisionsFor(P, slug, subjectId)
     expect(ds[0]).toMatchObject({ trigger: 'entry', chosen: 'connect-shopify' })
-    expect(P.H.provider.sent.filter((s) => s.to === owners[0]!.email)).toHaveLength(1)
+    // Other programs in this file also enter on 'Created'; count this program's mail only.
+    const mine = (await programSends(P, subjectId)).filter((s) => s.program!.slug === slug)
+    expect(mine).toHaveLength(1)
+    expect(mine[0]!.status).toBe('sent')
+    expect(P.H.provider.sent.some((s) => s.to === owners[0]!.email && s.subject.startsWith('connect-shopify-1'))).toBe(true)
   })
 
   it('re-firing the entry event does not create a second run', async () => {

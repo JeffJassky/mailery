@@ -114,7 +114,7 @@ describe('multi-recipient accounting (INV 18)', () => {
     run = (await getRun(P, slug, subjectId))!
     expect(run.actions['connect-shopify']!.attempts).toBe(1)
     expect(run.inFlight).toBeNull()
-    expect(delivered(P, owners)).toHaveLength(2)
+    expect(delivered(P, owners).filter((m) => m.subject.startsWith('connect-shopify'))).toHaveLength(2)
   })
 })
 

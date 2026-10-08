@@ -76,7 +76,9 @@ describe('send hooks in dispatchSend', () => {
     }
   }
   afterEach(() => {
-    P.H.ctx.sendHooks = saved
+    // Restore only when this test swapped the hooks; otherwise `saved` is stale.
+    if (saved !== undefined) P.H.ctx.sendHooks = saved
+    saved = undefined
     calls.length = 0
     verdict = 'send'
   })
