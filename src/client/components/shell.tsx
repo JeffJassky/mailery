@@ -62,6 +62,7 @@ export function Sidebar({
         <nav className="sidebar-nav">
           <Item icon={Icons.Flows} label="Flows" screen="flows" badge={formatCount(counts?.flows)} />
           <Item icon={Icons.Template} label="Templates" screen="templates" badge={formatCount(counts?.templates)} />
+          <Item icon={Icons.Tag} label="Categories" screen="categories" />
           <Item icon={Icons.Broadcast} label="Broadcasts" screen="broadcasts" badge={formatCount(counts?.broadcasts)} />
         </nav>
       </div>

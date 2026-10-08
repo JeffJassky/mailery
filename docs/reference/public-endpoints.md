@@ -71,13 +71,31 @@ A wrong signature is never graced — grace covers "this URL predates signing", 
 
 ## `GET /unsub/:token`
 
-HTML confirmation page (for browser visits).
+HTML page for browser visits.
 
 | | |
 |---|---|
 | Path param | `token` — HMAC-signed unsubscribe token |
-| Response | HTML page with a "Unsubscribe" button that POSTs to the same URL |
+| Response | Without `categories` configured: a confirmation page with an "Unsubscribe" button that POSTs to the same URL. With `categories` declared: the **preference page** (below) |
 | Status codes | 200 (valid), 400 (invalid/expired token) |
+
+### The preference page
+
+One checkbox per declared category (`value="<id>"`, label and description from config, checked when the recipient is opted in), a **Save preferences** button and a separate **Unsubscribe from all marketing email** button. Everything is HTML-escaped and transactional mail is never mentioned. The form posts to `POST /unsub/:token/preferences`.
+
+## `POST /unsub/:token/preferences`
+
+The preference page's form. **Mounted only when `categories` is non-empty**; otherwise the path is a 404.
+
+| | |
+|---|---|
+| Body | `application/x-www-form-urlencoded` |
+| `action=save` | Plus `category=<id>` once per checked box. Unchecked declared categories are opted out, checked ones opted back in, and marketing as a whole is opted back in. Ids that are not declared are ignored |
+| `action=unsubscribe-all` | Writes a `marketing` opt-out; categories are ignored |
+| Source | `source: 'preferences'` on rows it writes |
+| Status codes | 200 (recorded), 400 (invalid/expired token, unknown action), 503 (see below) |
+
+Durability follows [INVARIANT 8](https://github.com/JeffJassky/mailery/blob/main/plans/INVARIANTS.md) as far as it can. With Mongo unreachable, `unsubscribe-all` is a pure opt-out, so it is journaled and answers 200 like the one-click POST. `save` may contain opt-ins, which cannot be journaled: its opt-outs are journaled and it answers **503** rather than claim the page was saved. With no `pendingUnsubsPath` configured both answer 503. An invalid token writes nothing.
 
 ## `POST /unsub/:token`
 
@@ -87,7 +105,7 @@ RFC 8058 one-click unsubscribe. Gmail and other modern clients POST here when th
 |---|---|
 | Path param | `token` |
 | Response | Tiny "You are unsubscribed" HTML page |
-| Side effects | `mailer.unsubscribe(email, { scope })` with the scope embedded in the token, awaited within `unsubscribeWriteTimeoutMs` (default 5s) |
+| Side effects | `mailer.unsubscribe(email, { scope })` with the token's effective scope (`category:<id>` for categorised mail, else the signed scope), awaited within `unsubscribeWriteTimeoutMs` (default 5s) |
 | Fallback | If the write fails or times out, the opt-out is appended to `pendingUnsubsPath` and replayed by the tick drain |
 | Status codes | 200 (recorded, or durably journaled), 200 (invalid/expired token — never make a provider retry a token we will never accept), 503 (neither Mongo nor the journal could take it) |
 
@@ -100,9 +118,11 @@ See [Routers → The unsubscribe journal](./routers#the-unsubscribe-journal-inva
 ```
 ${base64url(payload)}.${base64url(hmac)}
 
-payload = JSON.stringify({ e: email, s: scope, x: expiresAtMs })
+payload = JSON.stringify({ e: email, s: scope, x: expiresAtMs, i?: sendId, c?: category })
 hmac    = HMAC-SHA256(unsubscribeSecret, payload)
 ```
+
+`c` (0.21) is the template's category. `s` stays `marketing` beside it, so a verifier that predates categories opts the recipient out of all marketing. A signed but malformed `c` rejects the token. Tokens without `c` mean what they always meant.
 
 Tokens expire after `unsubscribeTokenLifetimeDays` (default 90). Expired tokens fail verification but the confirmation page can re-request (V2 feature).
 

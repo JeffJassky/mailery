@@ -187,6 +187,19 @@ prefer it.
 }
 ```
 
+### `categories`
+
+Declare email categories to let recipients opt out of one stream and keep the rest. Undeclared by default; without them nothing about unsubscribing changes.
+
+```ts
+categories: [
+  { id: 'lifecycle.onboarding', label: 'Getting-started tips', description: 'Help setting up your account' },
+  { id: 'product.updates', label: 'Product updates' },
+]
+```
+
+`id` is a dotted slug and is permanent once mail carrying it has gone out: it appears in suppression scopes (`category:<id>`), unsubscribe tokens and the `List-ID` header. `label` and `description` show on the preference page. `defaultOptIn` is reserved: only opt-out categories exist in 0.21, and `false` is rejected at `Mailer.init`. A template's `category` must be one of these ids. See [Suppression → Categories](./suppression#categories-and-the-preference-page).
+
 ### `pendingUnsubsPath` — the unsubscribe journal
 
 `POST /m/unsub/:token` waits for the Mongo write before answering, bounded by `unsubscribeWriteTimeoutMs`. If that write fails or times out, the opt-out is appended to this file as JSONL and replayed by the tick (`drainPendingUnsubscribes`). If it fails and there is nowhere to journal it, the endpoint answers **503** rather than confirm an unsubscribe it did not record. See [INVARIANT 8](https://github.com/JeffJassky/mailery/blob/main/plans/INVARIANTS.md).

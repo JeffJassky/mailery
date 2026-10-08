@@ -7,6 +7,7 @@ import { Dashboard } from './screens/dashboard'
 import { Flows } from './screens/flows'
 import { FlowDetail } from './screens/flow-detail'
 import { Templates } from './screens/templates'
+import { Categories } from './screens/categories'
 // Maily editor is heavy (~1MB before split). Lazy-load it so the rest of the
 // SPA stays fast — the Maily chunk only loads when a user opens a template.
 const TemplateEditor = React.lazy(() =>
@@ -39,6 +40,7 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
     ),
     crumbs: (r) => ['Mailery', 'Templates', r.slug ?? ''],
   },
+  categories:        { Comp: (_r, setRoute) => <Categories setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Categories'] },
   broadcasts:        { Comp: (_r, setRoute) => <Broadcasts setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Broadcasts'] },
   'broadcast-new':   { Comp: (r, setRoute) => <BroadcastNew setRoute={setRoute} slug={r.slug} />,       crumbs: (r) => ['Mailery', 'Broadcasts', r.slug ?? 'New'] },
   contacts:          { Comp: (_r, setRoute) => <Contacts setRoute={setRoute} />,                        crumbs: () => ['Mailery', 'Contacts'] },

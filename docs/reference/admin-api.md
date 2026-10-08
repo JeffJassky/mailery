@@ -69,10 +69,15 @@ Set `enabled: false`. In-flight runs continue.
 ### `POST /api/flows/:slug/resume`
 Set `enabled: true`.
 
+## Categories
+
+### `GET /api/categories`
+The categories declared in `MailerConfig.categories`, as `{ id, label, description?, defaultOptIn? }[]`. Empty when none are declared. Read-only: config is the source of truth.
+
 ## Templates
 
 ### `GET /api/templates`
-List all templates, newest-updated first.
+List all templates, newest-updated first. Each carries its `category` when it has one.
 
 ### `GET /api/templates/:slug`
 Single template's full definition.
@@ -97,12 +102,14 @@ body: {
   fromEmail?: string
   replyTo?: string | null
   kind?: 'marketing' | 'transactional'
+  category?: string | null   // a declared category id; null clears it
   bodyFormat?: 'multipart' | 'text_only'
   trackOpens?: boolean
   trackClicks?: boolean
 }
 → { ok: true }
 → 400 { error: 'sender_domain_invalid', code: string, message: string }
+→ 400 { error: 'validation_failed', message: string }   // undeclared category, or a category on a transactional template
 ```
 
 ## Broadcasts
@@ -167,6 +174,7 @@ Contact detail — adapter fields + subscription + recent events + recent sends 
   recentEvents: EventDoc[]
   recentSends: SendDoc[]
   activeRuns: FlowRunDoc[]
+  preferences?: { marketing: boolean; categories: Record<string, boolean> }   // only when categories are declared
 }
 ```
 
@@ -279,7 +287,8 @@ body: {
 Publish the saved draft — its content may live in `html`, `mjml` or `editorJson`, resolved in that authoring precedence (`editorJson` → `mjml` → raw `html`); an HTML-only draft is stored verbatim with plain text derived. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` when a cached Mail-Tester score is below `minScore` (`code: 'low_score'`), or — with `mailTester.requireScore` enabled — when the content has no score at all (`code: 'no_score'`, `score: null`). Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
 
 ```ts
-body?: { bypassMailTester?: boolean }
+body?: { bypassMailTester?: boolean; category?: string | null }
+→ 400 { error: 'validation_failed', message }   // the resulting category is undeclared or on a transactional template
 → 200 { ok: true, version: number, warnings: CompilerWarning[], lint: LintResult }
 //   CompilerWarning ≈ { line?: number; message: string; tagName?: string; formattedMessage?: string }
 //   These come from the MJML / Maily compiler — formatting warnings that did

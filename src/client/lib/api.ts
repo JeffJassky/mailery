@@ -65,6 +65,7 @@ export const api = {
   resumeFlow: (slug: string) => json<{ ok: boolean }>(`/flows/${slug}/resume`, { method: 'POST' }),
 
   // Templates
+  categories: () => json<Array<{ id: string; label: string; description?: string; defaultOptIn?: boolean }>>('/categories'),
   templates: () => json<any[]>('/templates'),
   template: (slug: string) => json<any>(`/templates/${slug}`),
   createTemplate: (body: { slug: string; name: string; kind: 'marketing' | 'transactional'; subject?: string; preheader?: string; fromName?: string; fromEmail?: string }) =>
