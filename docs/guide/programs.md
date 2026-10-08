@@ -205,3 +205,23 @@ Actions come in priority order. `status` is `pending`, `satisfied`, `exhausted` 
 - `programs.decisionRetentionDays` (default keep forever) deletes older decision rows, at most hourly.
 - A tick that throws (your `resolve`, a deleted template) is logged, its lease released, and the run retried after 15 minutes.
 - Test with `mailery/testing`: `MemoryFactsAdapter`, `buildProgram`, `H.seedProgram`, `tickProgram`, and `H.drain()`, which runs the scheduler.
+
+## Admin UI and API
+
+Operators work with Programs in the admin UI (list, definition editor with draft and publish, funnel by arm, runs, and a per-run decision timeline with Force tick and Abort): see [Programs screens](/guide/admin-ui#programs-screens). The same operations are JSON routes on the admin API and the agent API: see [Admin REST API](/reference/admin-api#programs) and [Agent API](/reference/agent-api#programs).
+
+## Doctor and backfill
+
+```bash
+MAILER_MONGODB_URI=... MAILER_MONGODB_DB=... npx mailery doctor --categories lifecycle.onboarding,product.updates
+```
+
+`doctor` is read-only. It reports the mailery version; marketing templates with no category; used versus declared categories; Programs and which are enabled; whether the indexes for `mailer_programs`, `program_versions`, `program_runs`, `program_decisions` and `contact_locks` exist; suppression rows whose scope is not `all`, `marketing`, `transactional` or `category:<valid id>`; Program runs whose lease expired more than ten minutes ago (is the scheduler running?); and, for enabled Programs, a definition that no longer parses, a `requires` cycle, or a template that is missing, not marketing, or in a different category than the program. It exits non-zero when anything would make a Program tick fail (missing indexes once Programs exist, an enabled Program that fails the last check). Everything else is a warning.
+
+`MailerConfig` lives in your code, so `doctor` cannot read your declared categories: pass `--categories a,b` to compare, otherwise it lists the categories templates use. It does not inspect `factsAdapter` or `contactPolicy`; `setProgramEnabled` and publish check the adapter where it matters. `--json` prints the report as JSON.
+
+```bash
+npx mailery backfill-categories --map welcome-1=lifecycle.onboarding,news-june=product.updates --dry-run
+```
+
+`backfill-categories` sets `category` on marketing templates. It refuses transactional templates and malformed ids, will not replace a different existing category unless you pass `--overwrite`, writes an audit row per change (`template.backfill_category`), and is idempotent. It cannot see your declared categories either, so run `doctor --categories` afterwards.

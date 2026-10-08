@@ -44,6 +44,7 @@ import type { FlowRunDoc, SendDoc, TemplateDoc } from '../models/index.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 import { createAdminApiRouter, type AdminRouterOptions } from './admin.js'
 import { runSetupChecks } from './setup-status.js'
+import { createProgramsRouter } from './programs.js'
 import { consoleRouteLogger, type RouteLogger } from './wrap.js'
 import { derivePlaintext, renderTemplate, type RenderedTemplate } from '../templates/render.js'
 import { lintTemplate } from '../templates/linter.js'
@@ -196,6 +197,9 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
 
   // The admin JSON API, verbatim, with this token's actor.
   router.use('/api', createAdminApiRouter(mailer, { mailTesterClient: opts.mailTesterClient }))
+
+  // Programs (0.21): the same routes as the admin API, at the top level.
+  router.use('/programs', createProgramsRouter(mailer))
 
   const actorOf = (req: Request): string => String((req as any).actor)
 
@@ -1756,6 +1760,20 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'POST', path: '/broadcasts/:slug/pause', summary: 'Pause a sending broadcast by hand ({reason?}); its queued sends are held.' },
   { method: 'POST', path: '/broadcasts/:slug/resume', summary: 'Re-open a paused broadcast: {recipientCap?, stopRules?, confirmedCount}. Next wave: raise recipientCap (null = no cap). confirmedCount = /count recipientCount + heldSends. A stop-rule pause re-opens only when the (adjusted) rules no longer fire; a circuit-breaker pause only once the breaker is reset.' },
   { method: 'POST', path: '/broadcasts/:slug/cancel', summary: 'Cancel a broadcast.' },
+  { method: 'GET', path: '/programs', summary: 'Every Program: slug, name, version, enabled, draft?, run counts by status.' },
+  { method: 'POST', path: '/programs', summary: 'Save a draft from a definition (body: the ProgramDefinition, or {definition, notes}). 400 on structure errors; creates the program disabled at version 0.' },
+  { method: 'PATCH', path: '/programs/:slug', summary: 'Save the draft of an existing Program.' },
+  { method: 'POST', path: '/programs/:slug/publish', summary: 'Validate and publish the draft. 422 with {issues: [{path, message}]} when validation fails.' },
+  { method: 'POST', path: '/programs/:slug/enable', summary: 'Enable a published Program (requires MailerConfig.factsAdapter). Does not replay earlier entry events; backfill with /enter.' },
+  { method: 'POST', path: '/programs/:slug/disable', summary: 'Disable a Program. Runs stay; nothing ticks.' },
+  { method: 'GET', path: '/programs/:slug', summary: 'Published definition, draft, and the versions list.' },
+  { method: 'GET', path: '/programs/:slug/runs?status=&arm=&limit=&skip=', summary: 'Runs, newest entry first.' },
+  { method: 'GET', path: '/programs/:slug/runs/:subjectId?limit=&skip=', summary: 'One run plus its decisions, newest first.' },
+  { method: 'GET', path: '/programs/:slug/state?subject=', summary: 'The checklist (getProgramState) for a subject.' },
+  { method: 'GET', path: '/programs/:slug/stats', summary: 'Per action x arm funnel (evaluated, chosen, sent, satisfied) and per-arm run counts and completion rate.' },
+  { method: 'POST', path: '/programs/:slug/runs/:subjectId/tick', summary: 'Force one tick now (trigger: forced). Respects every rule a scheduled tick does.' },
+  { method: 'POST', path: '/programs/:slug/runs/:subjectId/abort', summary: 'Abort a run and cancel its queued sends ({reason?}).' },
+  { method: 'POST', path: '/programs/:slug/enter', summary: 'Enter {subjectId} now, without an entry event (backfill, preview).' },
   { method: 'POST', path: '/tick', summary: 'Run the runner tick now (trigger scan, sweeps, outbox, webhook backlog).' },
   { method: 'GET', path: '/webhooks/status', summary: 'Provider webhook ingest: last event received, counts by type (24h), unprocessed backlog.' },
   { method: 'GET', path: '/status', summary: 'One document with setup checks, health, every flow (enabled, version, watermark, gate, active runs), every template, and 24h counts.' },

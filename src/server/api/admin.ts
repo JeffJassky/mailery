@@ -30,6 +30,7 @@ import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars
 import type { Contact } from '../../shared/types.js'
 import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
 import { runSetupChecks } from './setup-status.js'
+import { createProgramsRouter } from './programs.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
 import { registeredProviderNames, resolveProvider } from '../provider-lookup.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -396,6 +397,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       return res.json({ ok: true })
     }),
   )
+
+  // ----- Programs (0.21) — see api/programs.ts ------------------------------
+  r.use('/programs', createProgramsRouter(mailer))
 
   // ----- Categories (read-only; the source of truth is MailerConfig) --------
   r.get(
