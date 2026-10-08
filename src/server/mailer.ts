@@ -18,14 +18,22 @@ import type {
   ProgramDefinition,
 } from '../shared/types.js'
 import type { ProgramDoc } from './models/index.js'
-import { programSendHooks, type ProgramTickResult } from './runner/programs/index.js'
+import {
+  abortProgramRun,
+  enterProgram as enterProgramRun,
+  FACTS_CHANGED_EVENT,
+  getProgramChecklist,
+  programSendHooks,
+  tickProgramRun,
+  type ProgramTickResult,
+} from './runner/programs/index.js'
 import { flowSendHooks } from './runner/flow-hooks.js'
 import { emitOutcome } from './runner/send.js'
-import type { ProgramValidationIssue } from './programs/validate.js'
-import { notImplemented } from './not-implemented.js'
+import { referencedTemplateSlugs, validateProgramDefinition, type ProgramValidationIssue } from './programs/validate.js'
 import {
   abortAllFlowsInputSchema,
   abortFlowInputSchema,
+  programDefinitionSchema,
   fireInputSchema,
   registerEventSchema,
   sendOneOffInputSchema,
@@ -283,6 +291,10 @@ export class Mailer {
         await queueDriver.scheduleRepeatingTick(config.tickIntervalSeconds)
       }
 
+      const events = new EventRegistry()
+      // 0.21: hosts fire this (externalId = subjectId) to wake a Program run.
+      if (config.factsAdapter) events.register({ name: FACTS_CHANGED_EVENT, dedupePolicy: 'every-time' })
+
       return new Mailer({
         config,
         db: config.db,
@@ -290,7 +302,7 @@ export class Mailer {
         adapter: config.adapter,
         providers: config.providers,
         queueDriver,
-        events: new EventRegistry(),
+        events,
         ownedClient,
       })
     } catch (err) {
@@ -666,10 +678,41 @@ export class Mailer {
    * `programDefinitionSchema`; semantic checks run at publish.
    */
   async saveProgramDraft(
-    _definition: ProgramDefinition,
-    _opts: { actor: string; notes?: string },
+    definition: ProgramDefinition,
+    opts: { actor: string; notes?: string },
   ): Promise<ProgramDoc> {
-    return notImplemented('Mailer.saveProgramDraft', 'PR4')
+    const parsed = programDefinitionSchema.parse(definition) as ProgramDefinition
+    const now = new Date()
+    const draft = {
+      definition: parsed,
+      notes: opts.notes ?? '',
+      lastModifiedBy: opts.actor,
+      lastModifiedAt: now,
+    }
+    const doc = await this.collections.programs.findOneAndUpdate(
+      { slug: parsed.slug },
+      {
+        $set: { draft, updatedAt: now },
+        $setOnInsert: {
+          slug: parsed.slug,
+          definition: null,
+          version: 0,
+          enabled: false,
+          lastEntryScanAt: null,
+          lastFactsScanAt: null,
+          publishedAt: null,
+          publishedBy: null,
+          createdAt: now,
+        },
+      },
+      { upsert: true, returnDocument: 'after' },
+    )
+    await this.audit({
+      actor: opts.actor,
+      action: 'program.save_draft',
+      resource: { collection: 'mailer_programs', slug: parsed.slug },
+    })
+    return doc as ProgramDoc
   }
 
   /**
@@ -679,20 +722,89 @@ export class Mailer {
    * instead of throwing when validation fails.
    */
   async publishProgram(
-    _slug: string,
-    _opts: { actor: string },
+    slug: string,
+    opts: { actor: string },
   ): Promise<{ ok: true; version: number } | { ok: false; issues: ProgramValidationIssue[] }> {
-    return notImplemented('Mailer.publishProgram', 'PR4')
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) throw new Error(`publishProgram: unknown program "${slug}"`)
+    if (!doc.draft) return { ok: false, issues: [{ path: '', message: 'there is no draft to publish' }] }
+
+    const draft = doc.draft.definition
+    const rows = await this.collections.templates
+      .find({ slug: { $in: referencedTemplateSlugs(draft) } }, { projection: { slug: 1, kind: 1, category: 1 } })
+      .toArray()
+    const result = validateProgramDefinition(draft, {
+      categories: this.config.categories ?? [],
+      facts: this.config.factsAdapter?.declare ?? null,
+      templates: new Map(rows.map((t) => [t.slug, { kind: t.kind, category: t.category ?? null }])),
+    })
+    if (!result.ok) return { ok: false, issues: result.issues }
+
+    const now = new Date()
+    const version = doc.version + 1
+    const claimed = await this.collections.programs.updateOne(
+      { slug, version: doc.version },
+      {
+        $set: {
+          definition: result.definition,
+          version,
+          draft: null,
+          publishedAt: now,
+          publishedBy: opts.actor,
+          updatedAt: now,
+        },
+      },
+    )
+    if (claimed.modifiedCount === 0) throw new Error(`publishProgram: "${slug}" changed while publishing; retry`)
+    await this.collections.programVersions.insertOne({
+      programId: doc._id!,
+      slug,
+      version,
+      definition: result.definition,
+      publishedAt: now,
+      publishedBy: opts.actor,
+    })
+    await this.audit({
+      actor: opts.actor,
+      action: 'program.publish',
+      resource: { collection: 'mailer_programs', slug },
+      diffSummary: `published version ${version}`,
+    })
+    return { ok: true, version }
   }
 
   /** Enable or disable a published program. Enabling an unpublished program throws. Audited. */
-  async setProgramEnabled(_slug: string, _enabled: boolean, _opts: { actor: string }): Promise<void> {
-    return notImplemented('Mailer.setProgramEnabled', 'PR4')
+  async setProgramEnabled(slug: string, enabled: boolean, opts: { actor: string }): Promise<void> {
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) throw new Error(`setProgramEnabled: unknown program "${slug}"`)
+    const now = new Date()
+    if (enabled) {
+      if (!doc.definition || doc.version < 1) {
+        throw new Error(`setProgramEnabled: program "${slug}" has never been published`)
+      }
+      if (!this.config.factsAdapter) {
+        throw new Error('setProgramEnabled: programs require MailerConfig.factsAdapter')
+      }
+      // Events from before enabling are history, not a backlog to mail (existing
+      // subjects are entered deliberately with `enterProgram`).
+      await this.collections.programs.updateOne(
+        { slug },
+        { $set: { enabled: true, lastEntryScanAt: now, lastFactsScanAt: now, updatedAt: now } },
+      )
+    } else {
+      await this.collections.programs.updateOne({ slug }, { $set: { enabled: false, updatedAt: now } })
+    }
+    await this.audit({
+      actor: opts.actor,
+      action: enabled ? 'program.enable' : 'program.disable',
+      resource: { collection: 'mailer_programs', slug },
+    })
   }
 
   /** Enter a subject into a program now, without an entry event (backfills, previews). */
-  async enterProgram(_slug: string, _subjectId: string): Promise<{ created: boolean }> {
-    return notImplemented('Mailer.enterProgram', 'PR4')
+  async enterProgram(slug: string, subjectId: string): Promise<{ created: boolean }> {
+    const { created } = await enterProgramRun(this.runnerContext, slug, subjectId)
+    return { created }
   }
 
   /**
@@ -700,22 +812,36 @@ export class Mailer {
    * Respects every rule a scheduled tick does — gap, policy, holdout — and
    * writes a decision row with `trigger: 'forced'`.
    */
-  async tickProgram(_slug: string, _subjectId: string): Promise<ProgramTickResult> {
-    return notImplemented('Mailer.tickProgram', 'PR4')
+  async tickProgram(slug: string, subjectId: string): Promise<ProgramTickResult> {
+    const run = await this.collections.programRuns.findOne(
+      { programSlug: slug, subjectId },
+      { projection: { _id: 1 } },
+    )
+    if (!run) throw new Error(`tickProgram: no run for program "${slug}" subject "${subjectId}"`)
+    return tickProgramRun(this.runnerContext, run._id!, { trigger: 'forced' })
   }
 
   /** Same semantics as `abortFlow`, for one subject's Program run. Audited when it aborts something. */
   async abortProgram(
-    _slug: string,
-    _subjectId: string,
-    _opts: { reason?: string } = {},
+    slug: string,
+    subjectId: string,
+    opts: { reason?: string } = {},
   ): Promise<{ aborted: boolean; cancelledSends: number }> {
-    return notImplemented('Mailer.abortProgram', 'PR4')
+    const res = await abortProgramRun(this.runnerContext, slug, subjectId, opts.reason ?? '')
+    if (res.aborted) {
+      await this.audit({
+        actor: 'host',
+        action: 'program.abort',
+        resource: { collection: 'mailer_program_runs', slug },
+        diffSummary: `subject ${subjectId}: ${opts.reason ?? 'no reason given'}; cancelled ${res.cancelledSends} send(s)`,
+      })
+    }
+    return res
   }
 
   /** Checklist for the host's in-app UI. Null when the subject has no run. §5.11. */
-  async getProgramState(_slug: string, _subjectId: string): Promise<ProgramChecklistItem[] | null> {
-    return notImplemented('Mailer.getProgramState', 'PR4')
+  async getProgramState(slug: string, subjectId: string): Promise<ProgramChecklistItem[] | null> {
+    return getProgramChecklist(this.runnerContext, slug, subjectId)
   }
 
   private async abortActiveRuns(

@@ -161,7 +161,7 @@ async function openOrClickCount(
  * URL signature is for; this filter's job is only to be honest about scanners
  * that identify themselves.
  */
-function isBotUserAgent(ua: string | null | undefined, botRe: RegExp): boolean {
+export function isBotUserAgent(ua: string | null | undefined, botRe: RegExp): boolean {
   if (typeof ua !== 'string' || ua.trim() === '') return false
   return botRe.test(ua)
 }

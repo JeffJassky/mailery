@@ -217,6 +217,76 @@ abortAllFlows(
 
 Same semantics with no flow filter — exits every active run for the contact across all flows (audit action `flow.abort_all`). For "stop everything" events: account deleted, churned.
 
+## Programs
+
+See the [Programs guide](../guide/programs) for the model. These need `factsAdapter` in the config.
+
+### `saveProgramDraft(definition, opts)`
+
+```ts
+saveProgramDraft(
+  definition: ProgramDefinition,
+  opts: { actor: string; notes?: string },
+): Promise<ProgramDoc>
+```
+
+Saves `definition` as the draft, creating the program (disabled, `version: 0`, never ticks) when the slug is new. Throws a `ZodError` on a structurally invalid definition; semantic checks run at publish. Audit action `program.save_draft`.
+
+### `publishProgram(slug, opts)`
+
+```ts
+publishProgram(
+  slug: string,
+  opts: { actor: string },
+): Promise<{ ok: true; version: number } | { ok: false; issues: Array<{ path: string; message: string }> }>
+```
+
+Validates the draft (categories, declared facts, templates, `requires` cycles) and publishes it: `version + 1`, snapshot in `mailer_program_versions`, draft cleared. Returns every issue instead of throwing. Throws on an unknown slug. Audit action `program.publish`.
+
+### `setProgramEnabled(slug, enabled, opts)`
+
+```ts
+setProgramEnabled(slug: string, enabled: boolean, opts: { actor: string }): Promise<void>
+```
+
+Throws for an unknown or never-published program, and when enabling without a `factsAdapter`. Enabling moves the entry and Facts Changed watermarks to now. Audit actions `program.enable` / `program.disable`.
+
+### `enterProgram(slug, subjectId)`
+
+```ts
+enterProgram(slug: string, subjectId: string): Promise<{ created: boolean }>
+```
+
+Creates the subject's run now, without an entry event (backfills, previews). `created: false` when the subject already has a run, whatever its status.
+
+### `tickProgram(slug, subjectId)`
+
+```ts
+tickProgram(slug: string, subjectId: string): Promise<ProgramTickResult>
+```
+
+Ticks the subject's run now with `trigger: 'forced'`. Every rule a scheduled tick has still applies. Throws when the subject has no run. Returns `{ status: 'skipped', skipped }` or `{ status: 'ticked', decisionId, reason, chosen, attempt, sendIds }`.
+
+### `abortProgram(slug, subjectId, opts?)`
+
+```ts
+abortProgram(
+  slug: string,
+  subjectId: string,
+  opts?: { reason?: string },
+): Promise<{ aborted: boolean; cancelledSends: number }>
+```
+
+Like `abortFlow`: ends an active run immediately (`exitReason: 'aborted_by_host: <reason>'`) and cancels its queued, deferred and held sends. No-op when there is no active run. Audit action `program.abort` when it aborted something.
+
+### `getProgramState(slug, subjectId)`
+
+```ts
+getProgramState(slug: string, subjectId: string): Promise<ProgramChecklistItem[] | null>
+```
+
+The checklist for your in-app UI: `[{ actionId, title, cta, status, isNext, attempts, completedAt }]` in priority order, or `null` when the subject has no run.
+
 ## GDPR
 
 ### `forget(externalId)`
