@@ -201,3 +201,27 @@ Every call is attributable: the `webhook_called` audit entry records the resolve
 `verifyWebhook` returns `false` for anything it cannot positively authenticate — malformed input, missing headers, no signing key configured — and never throws (the public router treats a thrown error as a 500).
 
 This binds every provider including the no-op ones. `NullProvider.verifyWebhook()` returns `false`: it holds no signing key, so it can never establish authenticity, and answering "yes" would mean unsigned payloads are accepted as genuine in exactly the dev/staging configurations where that is easiest to miss.
+
+## 18. A Program attempt is consumed only by an accepted send
+
+Evaluation, contact-policy deferral, quiet hours, session suppression, sunset and holdout never increment `attempts`. Otherwise a capped recipient exhausts a ladder without receiving anything (the Braze "skipped but advanced" failure). See `15-programs.md` §5.5.
+
+## 19. Program sends re-verify at dispatch
+
+Immediately before the provider call — including after a contact-policy deferral — `satisfied` and `eligible` are re-evaluated against fresh facts. A satisfied action cancels the send. Extends INVARIANT 3 to Program state. `15-programs.md` §5.6.
+
+## 20. Facts are host state, never mailer state
+
+`factsAdapter.resolve` reads the host's data. A fact must not be computed from `mailer_sends`, `mailer_events` or any `mailer_*` collection; an action whose own send flips a fact it reads is a loop. `15-programs.md` §5.2.
+
+## 21. Action completion is monotonic
+
+`completedAt` is written once and never cleared by a later fact regression. A regression that deserves a nudge is a different action. The checklist and the email therefore never disagree about "done". `15-programs.md` §5.7.
+
+## 22. Category unsubscribe is scoped
+
+A `category:C` suppression blocks only marketing templates in category C. It never blocks transactional mail (INVARIANT 4) and never blocks another category. `all` and `marketing` keep their current reach. `15-programs.md` §3.2.
+
+## 23. Every Program tick writes a decision row
+
+Including ticks that send nothing. The row lists every candidate with `blockedBy`. Logging only winners makes "why didn't they get X" unanswerable and makes any later ranking impossible to evaluate. `15-programs.md` §5.3.
