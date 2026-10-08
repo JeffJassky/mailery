@@ -57,19 +57,26 @@ describe('cellLens', () => {
   it('marks the next cell with the reason in words', () => {
     expect(cellLens(s, dates, 'a', 2)).toMatchObject({ kind: 'next', text: 'Waiting for the gap', at: '2026-10-11T10:00:00.000Z' })
   })
-  it('numbers projected cells by sequence position, mutes the rest', () => {
-    expect(cellLens(s, dates, 'b', 1)).toEqual({ kind: 'projected', position: 2, at: '2026-10-14T10:00:00.000Z' })
+  it('numbers projected cells after the next one 1, 2, 3; mutes the rest', () => {
+    expect(cellLens(s, dates, 'b', 1)).toEqual({ kind: 'projected', position: 1, at: '2026-10-14T10:00:00.000Z' })
     expect(cellLens(s, dates, 'b', 2)).toEqual({ kind: 'muted' })
+  })
+  it('numbers from 1 when the projection does not start with the next cell', () => {
+    const t = sim({ ...s, next: { reason: 'none-eligible', actionId: null, attempt: null, templateSlug: null, at: null } } as any)
+    expect(cellLens(t, dates, 'a', 2)).toMatchObject({ kind: 'projected', position: 1 })
+    expect(cellLens(t, dates, 'b', 1)).toMatchObject({ kind: 'projected', position: 2 })
   })
 })
 
 describe('sentDates', () => {
   it('takes the newest decision per (action, attempt)', () => {
     const m = sentDates([
-      { chosen: 'a', attempt: 1, at: '2026-10-09', reason: 'highest-rank' },
-      { chosen: 'a', attempt: 1, at: '2026-09-01', reason: 'highest-rank' },
-      { chosen: null, attempt: null, at: '2026-10-10', reason: 'none-eligible' },
-      { chosen: 'b', attempt: 2, at: '2026-10-02', reason: 'holdout' },
+      { chosen: 'a', attempt: 1, at: '2026-10-11', reason: 'in-flight', sendIds: [] },
+      { chosen: 'a', attempt: 1, at: '2026-10-09', reason: 'highest-rank', sendIds: ['s2'] },
+      { chosen: 'a', attempt: 1, at: '2026-09-01', reason: 'highest-rank', sendIds: ['s1'] },
+      { chosen: null, attempt: null, at: '2026-10-10', reason: 'none-eligible', sendIds: [] },
+      { chosen: 'b', attempt: 2, at: '2026-10-02', reason: 'holdout', sendIds: ['s3'] },
+      { chosen: 'c', attempt: 1, at: '2026-10-03', reason: 'min-gap', sendIds: [] },
     ])
     expect(m.get('a#1')).toBe('2026-10-09')
     expect(m.get('b#2')).toBe('2026-10-02')

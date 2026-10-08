@@ -89,11 +89,15 @@ export type CellLens =
   | { kind: 'muted' }
 
 /** Newest-first decisions (as the run endpoint returns them): date each attempt went out. */
-export function sentDates(decisions: Array<{ chosen?: string | null; attempt?: number | null; at?: string; reason?: string }>): Map<string, string> {
+export function sentDates(
+  decisions: Array<{ chosen?: string | null; attempt?: number | null; at?: string; reason?: string; sendIds?: unknown[] }>,
+): Map<string, string> {
   const m = new Map<string, string>()
   for (const d of decisions) {
     if (!d.chosen || !d.attempt || !d.at) continue
-    if (d.reason && (d.reason === 'none-eligible' || d.reason === 'completed' || d.reason === 'exited')) continue
+    // Only decisions that created sends. Silent ticks (in-flight, min-gap, ...) repeat `chosen`/`attempt`
+    // and are newer than the send, so they would otherwise win.
+    if (!Array.isArray(d.sendIds) || d.sendIds.length === 0) continue
     const k = `${d.chosen}#${d.attempt}`
     if (!m.has(k)) m.set(k, d.at)
   }
@@ -109,7 +113,12 @@ export function cellLens(sim: Sim, dates: ReadonlyMap<string, string>, actionId:
     return { kind: 'next', at: n.at, reason: n.reason, text }
   }
   const pos = sim.sequence.findIndex((s) => s.actionId === actionId && s.attempt === attempt)
-  if (pos >= 0) return { kind: 'projected', position: pos + 1, at: sim.sequence[pos]!.at }
+  if (pos >= 0) {
+    // The next email has its own marker; number what comes after it 1, 2, 3 …
+    const first = sim.sequence[0]
+    const offset = first && first.actionId === n.actionId && first.attempt === n.attempt ? 0 : 1
+    return { kind: 'projected', position: pos + offset, at: sim.sequence[pos]!.at }
+  }
   return { kind: 'muted' }
 }
 

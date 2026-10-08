@@ -2,6 +2,7 @@
    above the target (flips below near the top edge). A fixed-position element,
    so scroll containers never clip it. */
 import React from 'react'
+import { createPortal } from 'react-dom'
 import { placeTip } from '../lib/place-tip'
 
 const DELAY_MS = 250
@@ -66,7 +67,11 @@ export function Tip({
       className={'tip-wrap' + (className ? ' ' + className : '')}
       onMouseEnter={show}
       onMouseLeave={hide}
-      onFocus={show}
+      onFocus={(e) => {
+        // Keyboard focus only: a panel that focuses its close button on open must not pop that tooltip.
+        const t = e.target as Element
+        if (typeof t.matches !== 'function' || t.matches(':focus-visible')) show()
+      }}
       onBlur={hide}
       onClick={hide}
       tabIndex={focusable ? 0 : undefined}
@@ -75,17 +80,20 @@ export function Tip({
       aria-describedby={open ? id : undefined}
     >
       {children}
-      {open && (
-        <span
-          ref={bubble}
-          id={id}
-          role="tooltip"
-          className="tip-bubble"
-          style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
-        >
-          {label}
-        </span>
-      )}
+      {/* Portalled: an ancestor with overflow/transform (board scroller, drawer) would clip a fixed bubble. */}
+      {open &&
+        createPortal(
+          <span
+            ref={bubble}
+            id={id}
+            role="tooltip"
+            className="tip-bubble"
+            style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+          >
+            {label}
+          </span>,
+          document.body,
+        )}
     </span>
   )
 }
