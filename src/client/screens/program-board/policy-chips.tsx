@@ -78,14 +78,14 @@ function ChipForm({ chipKey, def, onEdit }: { chipKey: ChipKey; def: ProgramDefi
   }
   return (
     <div className="pb-pop-row">
-      {fields.map((f) => (
-        <FieldInput key={f.name} f={f} value={vals[f.name] ?? ''} onChange={(v) => set(f.name, v)} />
+      {fields.map((f, i) => (
+        <FieldInput key={f.name} first={i === 0} f={f} value={vals[f.name] ?? ''} onChange={(v) => set(f.name, v)} />
       ))}
     </div>
   )
 }
 
-function FieldInput({ f, value, onChange }: { f: ChipField; value: string; onChange: (v: string) => void }) {
+function FieldInput({ f, value, onChange, first }: { f: ChipField; value: string; onChange: (v: string) => void; first: boolean }) {
   if (f.kind === 'bool') {
     return (
       <Tip label={f.label}>
@@ -102,6 +102,7 @@ function FieldInput({ f, value, onChange }: { f: ChipField; value: string; onCha
         className="input"
         style={{ width: f.kind === 'time' ? 84 : 64 }}
         aria-label={f.label}
+        autoFocus={first}
         type={f.kind === 'number' ? 'number' : 'text'}
         placeholder={f.kind === 'time' ? 'HH:MM' : ''}
         value={value}

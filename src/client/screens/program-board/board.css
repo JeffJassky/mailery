@@ -15,7 +15,7 @@
 button.pb-chip:hover { background: var(--bg-hover); color: var(--fg); border-color: var(--border-strong); }
 button.pb-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .pb-chip.editable { border-style: dashed; }
-.pb-right { display: flex; align-items: center; gap: 8px; flex: none; }
+.pb-right { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; flex-wrap: wrap; }
 .pb-lens { position: relative; display: flex; align-items: center; }
 .pb-lens > .icon { position: absolute; left: 8px; width: 14px; height: 14px; color: var(--fg-subtle); pointer-events: none; }
 .pb-lens .input { width: 180px; padding-left: 28px; padding-right: 26px; height: 28px; }
