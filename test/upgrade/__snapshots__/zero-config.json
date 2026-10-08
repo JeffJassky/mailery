@@ -31,6 +31,36 @@
       ]
     },
     {
+      "to": "u4@example.com",
+      "from": "Test <hello@example.com>",
+      "replyTo": null,
+      "subject": "Welcome Dee",
+      "headers": {
+        "List-Unsubscribe": "<http://localhost:3000/m/unsub/<token>>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+      },
+      "html": "<p>Hi Dee</p><a href=\"http://localhost:3000/m/click/<id>/<link>/<sig>\">Start</a><a href=\"http://localhost:3000/m/unsub/<token>\">Unsubscribe</a><img src=\"http://localhost:3000/m/open/<id>.<sig>.png\" width=\"1\" height=\"1\" alt=\"\" style=\"display:block;border:0\" />",
+      "text": "Hi Dee\n\nStart [https://example.com/start]Unsubscribe [http://localhost:3000/m/unsub/<token>]",
+      "meta": [
+        "sendId"
+      ]
+    },
+    {
+      "to": "u5@example.com",
+      "from": "Test <hello@example.com>",
+      "replyTo": null,
+      "subject": "Welcome Eve",
+      "headers": {
+        "List-Unsubscribe": "<http://localhost:3000/m/unsub/<token>>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+      },
+      "html": "<p>Hi Eve</p><a href=\"http://localhost:3000/m/click/<id>/<link>/<sig>\">Start</a><a href=\"http://localhost:3000/m/unsub/<token>\">Unsubscribe</a><img src=\"http://localhost:3000/m/open/<id>.<sig>.png\" width=\"1\" height=\"1\" alt=\"\" style=\"display:block;border:0\" />",
+      "text": "Hi Eve\n\nStart [https://example.com/start]Unsubscribe [http://localhost:3000/m/unsub/<token>]",
+      "meta": [
+        "sendId"
+      ]
+    },
+    {
       "to": "u3@example.com",
       "from": "Test <hello@example.com>",
       "replyTo": null,
@@ -98,6 +128,36 @@
       },
       "html": "<!doctype html>\n<html lang=\"und\" dir=\"auto\" xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n  <head>\n    <title></title>\n    <!--[if !mso]><!-->\n    <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\n    <!--<![endif]-->\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <style type=\"text/css\">\n      #outlook a { padding:0; }\n      body { margin:0;padding:0;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%; }\n      table, td { border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt; }\n      img { border:0;height:auto;line-height:100%; outline:none;text-decoration:none;-ms-interpolation-mode:bicubic; }\n      p { display:block;margin:13px 0; }\n    </style>\n    <!--[if mso]>\n    <noscript>\n    <xml>\n    <o:OfficeDocumentSettings>\n      <o:AllowPNG/>\n      <o:PixelsPerInch>96</o:PixelsPerInch>\n    </o:OfficeDocumentSettings>\n    </xml>\n    </noscript>\n    <![endif]-->\n    <!--[if lte mso 11]>\n    <style type=\"text/css\">\n      .mj-outlook-group-fix { width:100% !important; }\n    </style>\n    <![endif]-->\n    \n      <!--[if !mso]><!-->\n        <link href=\"https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700\" rel=\"stylesheet\" type=\"text/css\">\n        <style type=\"text/css\">\n          @import url(https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700);\n        </style>\n      <!--<![endif]-->\n\n    \n    \n    <style type=\"text/css\">\n      @media only screen and (min-width:480px) {\n        .mj-column-per-100 { width:100% !important; max-width: 100%; }\n      }\n    </style>\n    <style media=\"screen and (min-width:480px)\">\n      .moz-text-html .mj-column-per-100 { width:100% !important; max-width: 100%; }\n    </style>\n    \n    \n  \n    \n    \n    \n  </head>\n  \n      <body  style=\"word-spacing:normal;\">\n        \n        <div\n           aria-roledescription=\"email\" role=\"article\" lang=\"und\" dir=\"auto\" style=\"word-spacing:normal;\"\n        >\n        \n      \n      <!--[if mso | IE]><table align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" class=\"\" role=\"presentation\" style=\"width:600px;\" width=\"600\" ><tr><td style=\"line-height:0px;font-size:0px;mso-line-height-rule:exactly;\"><![endif]-->\n    \n      \n      <div  style=\"margin:0px auto;max-width:600px;\">\n        \n        <table\n           align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"width:100%;\"\n        >\n          <tbody>\n            <tr>\n              <td\n                 style=\"direction:ltr;font-size:0px;padding:20px 0;text-align:center;\"\n              >\n                <!--[if mso | IE]><table role=\"presentation\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td class=\"\" style=\"vertical-align:top;width:600px;\" ><![endif]-->\n            \n      <div\n         class=\"mj-column-per-100 mj-outlook-group-fix\" style=\"font-size:0px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;\"\n      >\n        \n      <table\n         border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"vertical-align:top;\" width=\"100%\"\n      >\n        <tbody>\n          \n              <tr>\n                <td\n                   align=\"left\" style=\"font-size:0px;padding:10px 25px;word-break:break-word;\"\n                >\n                  \n      <div\n         style=\"font-family:Ubuntu, Helvetica, Arial, sans-serif;font-size:13px;line-height:1;text-align:left;color:#000000;\"\n      >Nudge Cara</div>\n    \n                </td>\n              </tr>\n            \n        </tbody>\n      </table>\n    \n      </div>\n    \n          <!--[if mso | IE]></td></tr></table><![endif]-->\n              </td>\n            </tr>\n          </tbody>\n        </table>\n        \n      </div>\n    \n      \n      <!--[if mso | IE]></td></tr></table><![endif]-->\n    \n    \n      </div>\n      </body>\n    \n</html>\n  ",
       "text": "Nudge Cara",
+      "meta": [
+        "sendId"
+      ]
+    },
+    {
+      "to": "u4@example.com",
+      "from": "Test <hello@example.com>",
+      "replyTo": null,
+      "subject": "Still there?",
+      "headers": {
+        "List-Unsubscribe": "<http://localhost:3000/m/unsub/<token>>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+      },
+      "html": "<!doctype html>\n<html lang=\"und\" dir=\"auto\" xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n  <head>\n    <title></title>\n    <!--[if !mso]><!-->\n    <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\n    <!--<![endif]-->\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <style type=\"text/css\">\n      #outlook a { padding:0; }\n      body { margin:0;padding:0;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%; }\n      table, td { border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt; }\n      img { border:0;height:auto;line-height:100%; outline:none;text-decoration:none;-ms-interpolation-mode:bicubic; }\n      p { display:block;margin:13px 0; }\n    </style>\n    <!--[if mso]>\n    <noscript>\n    <xml>\n    <o:OfficeDocumentSettings>\n      <o:AllowPNG/>\n      <o:PixelsPerInch>96</o:PixelsPerInch>\n    </o:OfficeDocumentSettings>\n    </xml>\n    </noscript>\n    <![endif]-->\n    <!--[if lte mso 11]>\n    <style type=\"text/css\">\n      .mj-outlook-group-fix { width:100% !important; }\n    </style>\n    <![endif]-->\n    \n      <!--[if !mso]><!-->\n        <link href=\"https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700\" rel=\"stylesheet\" type=\"text/css\">\n        <style type=\"text/css\">\n          @import url(https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700);\n        </style>\n      <!--<![endif]-->\n\n    \n    \n    <style type=\"text/css\">\n      @media only screen and (min-width:480px) {\n        .mj-column-per-100 { width:100% !important; max-width: 100%; }\n      }\n    </style>\n    <style media=\"screen and (min-width:480px)\">\n      .moz-text-html .mj-column-per-100 { width:100% !important; max-width: 100%; }\n    </style>\n    \n    \n  \n    \n    \n    \n  </head>\n  \n      <body  style=\"word-spacing:normal;\">\n        \n        <div\n           aria-roledescription=\"email\" role=\"article\" lang=\"und\" dir=\"auto\" style=\"word-spacing:normal;\"\n        >\n        \n      \n      <!--[if mso | IE]><table align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" class=\"\" role=\"presentation\" style=\"width:600px;\" width=\"600\" ><tr><td style=\"line-height:0px;font-size:0px;mso-line-height-rule:exactly;\"><![endif]-->\n    \n      \n      <div  style=\"margin:0px auto;max-width:600px;\">\n        \n        <table\n           align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"width:100%;\"\n        >\n          <tbody>\n            <tr>\n              <td\n                 style=\"direction:ltr;font-size:0px;padding:20px 0;text-align:center;\"\n              >\n                <!--[if mso | IE]><table role=\"presentation\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td class=\"\" style=\"vertical-align:top;width:600px;\" ><![endif]-->\n            \n      <div\n         class=\"mj-column-per-100 mj-outlook-group-fix\" style=\"font-size:0px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;\"\n      >\n        \n      <table\n         border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"vertical-align:top;\" width=\"100%\"\n      >\n        <tbody>\n          \n              <tr>\n                <td\n                   align=\"left\" style=\"font-size:0px;padding:10px 25px;word-break:break-word;\"\n                >\n                  \n      <div\n         style=\"font-family:Ubuntu, Helvetica, Arial, sans-serif;font-size:13px;line-height:1;text-align:left;color:#000000;\"\n      >Nudge Dee</div>\n    \n                </td>\n              </tr>\n            \n        </tbody>\n      </table>\n    \n      </div>\n    \n          <!--[if mso | IE]></td></tr></table><![endif]-->\n              </td>\n            </tr>\n          </tbody>\n        </table>\n        \n      </div>\n    \n      \n      <!--[if mso | IE]></td></tr></table><![endif]-->\n    \n    \n      </div>\n      </body>\n    \n</html>\n  ",
+      "text": "Nudge Dee",
+      "meta": [
+        "sendId"
+      ]
+    },
+    {
+      "to": "u5@example.com",
+      "from": "Test <hello@example.com>",
+      "replyTo": null,
+      "subject": "Still there?",
+      "headers": {
+        "List-Unsubscribe": "<http://localhost:3000/m/unsub/<token>>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+      },
+      "html": "<!doctype html>\n<html lang=\"und\" dir=\"auto\" xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\">\n  <head>\n    <title></title>\n    <!--[if !mso]><!-->\n    <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\n    <!--<![endif]-->\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <style type=\"text/css\">\n      #outlook a { padding:0; }\n      body { margin:0;padding:0;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%; }\n      table, td { border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt; }\n      img { border:0;height:auto;line-height:100%; outline:none;text-decoration:none;-ms-interpolation-mode:bicubic; }\n      p { display:block;margin:13px 0; }\n    </style>\n    <!--[if mso]>\n    <noscript>\n    <xml>\n    <o:OfficeDocumentSettings>\n      <o:AllowPNG/>\n      <o:PixelsPerInch>96</o:PixelsPerInch>\n    </o:OfficeDocumentSettings>\n    </xml>\n    </noscript>\n    <![endif]-->\n    <!--[if lte mso 11]>\n    <style type=\"text/css\">\n      .mj-outlook-group-fix { width:100% !important; }\n    </style>\n    <![endif]-->\n    \n      <!--[if !mso]><!-->\n        <link href=\"https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700\" rel=\"stylesheet\" type=\"text/css\">\n        <style type=\"text/css\">\n          @import url(https://fonts.googleapis.com/css?family=Ubuntu:300,400,500,700);\n        </style>\n      <!--<![endif]-->\n\n    \n    \n    <style type=\"text/css\">\n      @media only screen and (min-width:480px) {\n        .mj-column-per-100 { width:100% !important; max-width: 100%; }\n      }\n    </style>\n    <style media=\"screen and (min-width:480px)\">\n      .moz-text-html .mj-column-per-100 { width:100% !important; max-width: 100%; }\n    </style>\n    \n    \n  \n    \n    \n    \n  </head>\n  \n      <body  style=\"word-spacing:normal;\">\n        \n        <div\n           aria-roledescription=\"email\" role=\"article\" lang=\"und\" dir=\"auto\" style=\"word-spacing:normal;\"\n        >\n        \n      \n      <!--[if mso | IE]><table align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" class=\"\" role=\"presentation\" style=\"width:600px;\" width=\"600\" ><tr><td style=\"line-height:0px;font-size:0px;mso-line-height-rule:exactly;\"><![endif]-->\n    \n      \n      <div  style=\"margin:0px auto;max-width:600px;\">\n        \n        <table\n           align=\"center\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"width:100%;\"\n        >\n          <tbody>\n            <tr>\n              <td\n                 style=\"direction:ltr;font-size:0px;padding:20px 0;text-align:center;\"\n              >\n                <!--[if mso | IE]><table role=\"presentation\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td class=\"\" style=\"vertical-align:top;width:600px;\" ><![endif]-->\n            \n      <div\n         class=\"mj-column-per-100 mj-outlook-group-fix\" style=\"font-size:0px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;\"\n      >\n        \n      <table\n         border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"vertical-align:top;\" width=\"100%\"\n      >\n        <tbody>\n          \n              <tr>\n                <td\n                   align=\"left\" style=\"font-size:0px;padding:10px 25px;word-break:break-word;\"\n                >\n                  \n      <div\n         style=\"font-family:Ubuntu, Helvetica, Arial, sans-serif;font-size:13px;line-height:1;text-align:left;color:#000000;\"\n      >Nudge Eve</div>\n    \n                </td>\n              </tr>\n            \n        </tbody>\n      </table>\n    \n      </div>\n    \n          <!--[if mso | IE]></td></tr></table><![endif]-->\n              </td>\n            </tr>\n          </tbody>\n        </table>\n        \n      </div>\n    \n      \n      <!--[if mso | IE]></td></tr></table><![endif]-->\n    \n    \n      </div>\n      </body>\n    \n</html>\n  ",
+      "text": "Nudge Eve",
       "meta": [
         "sendId"
       ]
@@ -235,6 +295,98 @@
       ],
       "templateSlug": "nudge",
       "to": "u3@example.com",
+      "kind": "marketing",
+      "status": "sent",
+      "errorMessage": null,
+      "bounceType": null,
+      "openCount": 0,
+      "origin": "broadcast"
+    },
+    {
+      "keys": [
+        "_id",
+        "bodyHash",
+        "bounceReason",
+        "bounceType",
+        "broadcastId",
+        "clickCount",
+        "clickedLinks",
+        "complainedAt",
+        "dedupeKey",
+        "deliveredAt",
+        "emailAtSend",
+        "errorMessage",
+        "externalId",
+        "firstClickAt",
+        "flowRunId",
+        "fromEmail",
+        "fromName",
+        "kind",
+        "links",
+        "manualSendBy",
+        "notBefore",
+        "openCount",
+        "openedAt",
+        "provider",
+        "providerMessageId",
+        "queuedAt",
+        "sentAt",
+        "status",
+        "subject",
+        "templateId",
+        "templateSlug",
+        "unsubscribedAt",
+        "updatedAt",
+        "vars"
+      ],
+      "templateSlug": "nudge",
+      "to": "u4@example.com",
+      "kind": "marketing",
+      "status": "sent",
+      "errorMessage": null,
+      "bounceType": null,
+      "openCount": 0,
+      "origin": "broadcast"
+    },
+    {
+      "keys": [
+        "_id",
+        "bodyHash",
+        "bounceReason",
+        "bounceType",
+        "broadcastId",
+        "clickCount",
+        "clickedLinks",
+        "complainedAt",
+        "dedupeKey",
+        "deliveredAt",
+        "emailAtSend",
+        "errorMessage",
+        "externalId",
+        "firstClickAt",
+        "flowRunId",
+        "fromEmail",
+        "fromName",
+        "kind",
+        "links",
+        "manualSendBy",
+        "notBefore",
+        "openCount",
+        "openedAt",
+        "provider",
+        "providerMessageId",
+        "queuedAt",
+        "sentAt",
+        "status",
+        "subject",
+        "templateId",
+        "templateSlug",
+        "unsubscribedAt",
+        "updatedAt",
+        "vars"
+      ],
+      "templateSlug": "nudge",
+      "to": "u5@example.com",
       "kind": "marketing",
       "status": "sent",
       "errorMessage": null,
@@ -421,6 +573,96 @@
       "bounceType": "hard",
       "openCount": 0,
       "origin": "flow"
+    },
+    {
+      "keys": [
+        "_id",
+        "bodyHash",
+        "bounceReason",
+        "bounceType",
+        "broadcastId",
+        "clickCount",
+        "clickedLinks",
+        "complainedAt",
+        "dedupeKey",
+        "deliveredAt",
+        "emailAtSend",
+        "errorMessage",
+        "externalId",
+        "firstClickAt",
+        "flowRunId",
+        "fromEmail",
+        "fromName",
+        "kind",
+        "links",
+        "manualSendBy",
+        "openCount",
+        "openedAt",
+        "provider",
+        "providerMessageId",
+        "queuedAt",
+        "sentAt",
+        "status",
+        "subject",
+        "templateId",
+        "templateSlug",
+        "unsubscribedAt",
+        "updatedAt",
+        "vars"
+      ],
+      "templateSlug": "welcome",
+      "to": "u4@example.com",
+      "kind": "marketing",
+      "status": "sent",
+      "errorMessage": null,
+      "bounceType": null,
+      "openCount": 0,
+      "origin": "flow"
+    },
+    {
+      "keys": [
+        "_id",
+        "bodyHash",
+        "bounceReason",
+        "bounceType",
+        "broadcastId",
+        "clickCount",
+        "clickedLinks",
+        "complainedAt",
+        "dedupeKey",
+        "deliveredAt",
+        "emailAtSend",
+        "errorMessage",
+        "externalId",
+        "firstClickAt",
+        "flowRunId",
+        "fromEmail",
+        "fromName",
+        "kind",
+        "links",
+        "manualSendBy",
+        "openCount",
+        "openedAt",
+        "provider",
+        "providerMessageId",
+        "queuedAt",
+        "sentAt",
+        "status",
+        "subject",
+        "templateId",
+        "templateSlug",
+        "unsubscribedAt",
+        "updatedAt",
+        "vars"
+      ],
+      "templateSlug": "welcome",
+      "to": "u5@example.com",
+      "kind": "marketing",
+      "status": "complained",
+      "errorMessage": null,
+      "bounceType": null,
+      "openCount": 0,
+      "origin": "flow"
     }
   ],
   "runs": [
@@ -447,6 +689,31 @@
         "exited"
       ],
       "exitReason": "bounced"
+    },
+    {
+      "externalId": "u4",
+      "status": "completed",
+      "step": 5,
+      "history": [
+        "entered",
+        "sent",
+        "wait_started",
+        "condition_evaluated",
+        "tagged"
+      ],
+      "exitReason": "completed"
+    },
+    {
+      "externalId": "u5",
+      "status": "exited",
+      "step": 2,
+      "history": [
+        "entered",
+        "sent",
+        "wait_started",
+        "exited"
+      ],
+      "exitReason": "complained"
     }
   ],
   "suppressions": [
@@ -483,6 +750,256 @@
       "scope": "all",
       "reason": "hard_bounce",
       "source": "provider_webhook"
+    },
+    {
+      "keys": [
+        "_id",
+        "addedAt",
+        "email",
+        "emailHash",
+        "expiresAt",
+        "notes",
+        "reason",
+        "scope",
+        "source"
+      ],
+      "email": "u5@example.com",
+      "scope": "all",
+      "reason": "complaint",
+      "source": "provider_webhook"
+    }
+  ],
+  "click": {
+    "status": 302
+  },
+  "broadcasts": [
+    {
+      "status": "sent",
+      "stats": {
+        "sent": 0,
+        "delivered": 0,
+        "opened": 0,
+        "clicked": 0,
+        "bounced": 0,
+        "complained": 0,
+        "unsubscribed": 0
+      },
+      "keys": [
+        "_id",
+        "completedAt",
+        "confirmationRequired",
+        "confirmedAt",
+        "confirmedBy",
+        "confirmedCount",
+        "createdAt",
+        "createdBy",
+        "dispatchGeneration",
+        "dispatchLeaseId",
+        "name",
+        "recipientCount",
+        "scheduledAt",
+        "segmentDefinition",
+        "slug",
+        "startedAt",
+        "stats",
+        "status",
+        "templateSlug",
+        "updatedAt"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "keys": [
+        "_id",
+        "createdAt",
+        "dedupeKey",
+        "externalId",
+        "name",
+        "occurredAt",
+        "properties"
+      ],
+      "name": "Created",
+      "externalId": "u1"
+    },
+    {
+      "keys": [
+        "_id",
+        "createdAt",
+        "dedupeKey",
+        "externalId",
+        "name",
+        "occurredAt",
+        "properties"
+      ],
+      "name": "Created",
+      "externalId": "u2"
+    },
+    {
+      "keys": [
+        "_id",
+        "createdAt",
+        "dedupeKey",
+        "externalId",
+        "name",
+        "occurredAt",
+        "properties"
+      ],
+      "name": "Created",
+      "externalId": "u4"
+    },
+    {
+      "keys": [
+        "_id",
+        "createdAt",
+        "dedupeKey",
+        "externalId",
+        "name",
+        "occurredAt",
+        "properties"
+      ],
+      "name": "Created",
+      "externalId": "u5"
+    }
+  ],
+  "runKeys": [
+    [
+      "_id",
+      "attemptsForCurrentStep",
+      "createdAt",
+      "currentBranchPath",
+      "currentStepIndex",
+      "emailAtEntry",
+      "enteredAt",
+      "exitReason",
+      "exitedAt",
+      "externalId",
+      "flowId",
+      "flowSlug",
+      "flowVersion",
+      "history",
+      "nextActionAt",
+      "status",
+      "triggerDedupeKey",
+      "triggerEvent",
+      "updatedAt"
+    ],
+    [
+      "_id",
+      "attemptsForCurrentStep",
+      "createdAt",
+      "currentBranchPath",
+      "currentStepIndex",
+      "emailAtEntry",
+      "enteredAt",
+      "exitReason",
+      "exitedAt",
+      "externalId",
+      "flowId",
+      "flowSlug",
+      "flowVersion",
+      "history",
+      "nextActionAt",
+      "status",
+      "triggerDedupeKey",
+      "triggerEvent",
+      "updatedAt"
+    ],
+    [
+      "_id",
+      "attemptsForCurrentStep",
+      "createdAt",
+      "currentBranchPath",
+      "currentStepIndex",
+      "emailAtEntry",
+      "enteredAt",
+      "exitReason",
+      "exitedAt",
+      "externalId",
+      "flowId",
+      "flowSlug",
+      "flowVersion",
+      "history",
+      "nextActionAt",
+      "status",
+      "triggerDedupeKey",
+      "triggerEvent",
+      "updatedAt"
+    ],
+    [
+      "_id",
+      "attemptsForCurrentStep",
+      "createdAt",
+      "currentBranchPath",
+      "currentStepIndex",
+      "emailAtEntry",
+      "enteredAt",
+      "exitReason",
+      "exitedAt",
+      "externalId",
+      "flowId",
+      "flowSlug",
+      "flowVersion",
+      "history",
+      "nextActionAt",
+      "status",
+      "triggerDedupeKey",
+      "triggerEvent",
+      "updatedAt"
+    ]
+  ],
+  "templates": [
+    {
+      "slug": "nudge",
+      "stats": {
+        "sent": 0,
+        "delivered": 0,
+        "opened": 0,
+        "clicked": 0,
+        "bounced": 0,
+        "complained": 0,
+        "unsubscribed": 0,
+        "lastSentAt": null
+      }
+    },
+    {
+      "slug": "plain",
+      "stats": {
+        "sent": 0,
+        "delivered": 0,
+        "opened": 0,
+        "clicked": 0,
+        "bounced": 0,
+        "complained": 0,
+        "unsubscribed": 0,
+        "lastSentAt": null
+      }
+    },
+    {
+      "slug": "receipt",
+      "stats": {
+        "sent": 0,
+        "delivered": 0,
+        "opened": 0,
+        "clicked": 0,
+        "bounced": 0,
+        "complained": 0,
+        "unsubscribed": 0,
+        "lastSentAt": null
+      }
+    },
+    {
+      "slug": "welcome",
+      "stats": {
+        "sent": 0,
+        "delivered": 0,
+        "opened": 0,
+        "clicked": 0,
+        "bounced": 0,
+        "complained": 0,
+        "unsubscribed": 0,
+        "lastSentAt": null
+      }
     }
   ],
   "unsubscribe": {
@@ -503,6 +1020,14 @@
     {
       "externalId": "u3",
       "status": "subscribed"
+    },
+    {
+      "externalId": "u4",
+      "status": "subscribed"
+    },
+    {
+      "externalId": "u5",
+      "status": "complained"
     }
   ]
 }

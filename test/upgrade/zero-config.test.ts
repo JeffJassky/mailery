@@ -72,7 +72,7 @@ describe('0.21 with no new config behaves as 0.20', () => {
     const { mailer } = H
     const ctx = H.ctx
 
-    for (const [id, first] of [['u1', 'Alice'], ['u2', 'Bob'], ['u3', 'Cara']] as const) {
+    for (const [id, first] of [['u1', 'Alice'], ['u2', 'Bob'], ['u3', 'Cara'], ['u4', 'Dee'], ['u5', 'Eve']] as const) {
       await H.seedContact({ externalId: id, email: `${id}@example.com`, tags: [], fields: { firstName: first } })
     }
     await H.seedTemplate({
@@ -103,6 +103,8 @@ describe('0.21 with no new config behaves as 0.20', () => {
     // Flow entry for two contacts.
     await mailer.fire('Created', 'u1')
     await mailer.fire('Created', 'u2')
+    await mailer.fire('Created', 'u4')
+    await mailer.fire('Created', 'u5')
     await H.drain()
 
     // One-offs: transactional and text-only marketing.
@@ -142,6 +144,12 @@ describe('0.21 with no new config behaves as 0.20', () => {
     const welcome2 = await ctx.collections.sends.findOne({ templateSlug: 'welcome', externalId: 'u2' })
     await applyWebhookEvent({ type: 'bounce', providerEventId: 'e3', providerMessageId: welcome2!.providerMessageId!, email: 'u2@example.com', occurredAt: new Date(), details: { bounceType: 'hard', bounceReason: '550' } }, ctx)
 
+    const w5 = await ctx.collections.sends.findOne({ templateSlug: 'welcome', externalId: 'u5' })
+    await applyWebhookEvent({ type: 'complaint', providerEventId: 'e4', providerMessageId: w5!.providerMessageId!, email: 'u5@example.com', occurredAt: new Date(), details: {} } as any, ctx)
+    const w4 = await ctx.collections.sends.findOne({ templateSlug: 'welcome', externalId: 'u4' })
+    await applyWebhookEvent({ type: 'click', providerEventId: 'e5', providerMessageId: w4!.providerMessageId!, email: 'u4@example.com', occurredAt: new Date(), details: { url: 'https://example.com/start' } } as any, ctx)
+    const clickPath = new URL(H.provider.sent.find((s) => s.to === 'u4@example.com')!.html!.match(/href="([^"]*\/click\/[^"]*)"/)![1]).pathname
+    const click = await http('GET', clickPath)
     // Unsubscribe page + one-click for u1, using the URL that went out.
     const header = H.provider.sent.find((s) => s.to === 'u1@example.com')!.headers!['List-Unsubscribe']!
     const unsubPath = new URL(header.slice(1, -1)).pathname
@@ -186,6 +194,11 @@ describe('0.21 with no new config behaves as 0.20', () => {
         exitReason: r.exitReason,
       })),
       suppressions: suppressions.map((s) => ({ keys: Object.keys(s).sort(), email: s.email, scope: s.scope, reason: s.reason, source: s.source })),
+      click: { status: click.status },
+      broadcasts: (await ctx.collections.broadcasts.find({}).toArray()).map((b: any) => ({ status: b.status, stats: b.stats, keys: Object.keys(b).sort() })),
+      events: (await ctx.collections.events.find({}).sort({ externalId: 1, name: 1 }).toArray()).map((e: any) => ({ keys: Object.keys(e).sort(), name: e.name, externalId: e.externalId })),
+      runKeys: runs.map((r: any) => Object.keys(r).sort()),
+      templates: (await ctx.collections.templates.find({}).sort({ slug: 1 }).toArray()).map((t: any) => ({ slug: t.slug, stats: t.stats })),
       unsubscribe: { getStatus: page.status, getBody: page.body, postStatus: oneClick.status, postBody: oneClick.body },
       subscriptions: (await ctx.collections.subscriptions.find({}).sort({ externalId: 1 }).toArray()).map((s) => ({
         externalId: s.externalId,
