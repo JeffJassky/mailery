@@ -40,6 +40,11 @@ async function main() {
   const adapter = new MemoryContactAdapter(seedContacts())
   const provider = new NullProvider()
 
+  // MAILERY_E2E_PROGRAM=1: a Programs-enabled harness with a seeded activation
+  // program for the board (test/e2e/program-seed.ts). Off by default.
+  const board = process.env.MAILERY_E2E_PROGRAM === '1' ? await import('./program-seed.js') : null
+  const boardFacts = board?.createFactsAdapter()
+
   const mailer = await Mailer.init({
     db,
     adapter,
@@ -51,10 +56,12 @@ async function main() {
     senderAddress: '12 Main St, Brooklyn NY 11201, USA',
     fromDefaults: { name: 'E2E', email: 'e2e@example.com' },
     workerless: true,
+    ...(board ? { categories: board.BOARD_CATEGORIES, factsAdapter: boardFacts } : {}),
   })
 
   mailer.registerEvent({ name: 'Created', dedupePolicy: 'once-per-contact' })
   mailer.registerEvent({ name: 'Activated', dedupePolicy: 'once-per-contact' })
+  if (board && boardFacts) await board.seedProgramBoard(mailer, adapter, boardFacts)
 
   const app = express()
   app.use(express.json())

@@ -94,7 +94,13 @@ Validates the draft (categories, facts, templates, `requires` cycles) and publis
 Enable requires a published definition (`409 not_published`) and `MailerConfig.factsAdapter` (`409 facts_adapter_required`). Enabling moves the entry watermark to now: entry events from before are not replayed, so enter existing accounts with `/enter`.
 
 ### `GET /api/programs/:slug`
-`{ slug, version, enabled, published, publishedAt, publishedBy, draft, versions: [{ version, publishedAt, publishedBy }] }`; `published` and `draft` are definitions (or null).
+`{ slug, version, enabled, published, publishedAt, publishedBy, draft, facts, templates, versions: [{ version, publishedAt, publishedBy }] }`; `published` and `draft` are definitions (or null). `facts` is the facts adapter's declaration (or null); `templates` lists every existing template either definition sends: `[{ slug, name, subject, kind, category, published }]`.
+
+### `POST /api/programs/:slug/simulate`
+`{ source?, subjectId?, facts?, now?, horizonDays? }`. A read-only dry run of one tick plus the projected send sequence (assuming facts stay as they are and the subject never engages). With `subjectId` it uses that account's run and resolved facts (`facts` are merged over them); without, it simulates a brand-new subject from `facts`. Returns `{ source, version, now, subjectId, facts, run, arm, candidates, next, sequence, sequenceEnd }`; `next.reason` is `send | holdout | min-gap | delivery-window | session-suppressed | in-flight | no-recipients | none-eligible | completed | exited | sunset`. Not audited. `400 validation_failed`, `404 not_found`, `409 no_definition | no_facts_adapter`.
+
+### `GET /api/programs/:slug/lint?source=`
+`{ source, issues }` for the draft (default when one exists) or the published definition. Each issue is `{ severity, code, path, message, actionId?, attempt? }`: errors (`invalid`) are the publish-validation issues; warnings (`template-unpublished`, `template-reused`, `priority-tie`, `no-cta`, `sunset-early`) do not block publish. `400` for a bad `source`, `404 not_found`, `409 no_definition`.
 
 ### `GET /api/programs/:slug/runs?status=&arm=&limit=&skip=`
 `{ runs, total, limit, skip }`, newest entry first. `status` is `active | completed | exited | sunset`, `arm` is `treatment | holdout`; `limit` 1–200 (default 50).
@@ -284,6 +290,8 @@ The host's `varsAdapter` schema as JSON Schema (drives editor autocomplete and t
 Render the draft (or published body with `useDraft: false`). Pass `contactId` to render as a real contact — the contact is loaded through the adapter and the `varsAdapter` resolver runs (`reason: 'preview'`). Without it, a sample contact and empty host vars are used.
 
 Pass `html`, `mjml` or `editorJson` to render that content instead of the stored draft, resolved in the usual authoring precedence. This is how the editor previews unsaved edits: a preview is a read, and making one should not write a draft — which is an audit-logged mutation — just to see the result.
+
+Pass `program: { slug, source?, actionId, attempt, facts?, subjectId? }` to render as that Program's send would: `{{program}}`, `{{action}}`, `{{attempt}}` and `{{facts}}` are filled from the chosen definition (`source` defaults to the draft when one exists), and win over host vars. `facts` default to the resolved facts of `subjectId`, else empty. `400 validation_failed` for a malformed option, `404 program_not_found` when the program or that definition is missing.
 
 Pass `eventProperties` to simulate a trigger event — both `{{event.*}}` and the resolver's `info.eventProperties` receive it.
 
