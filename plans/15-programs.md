@@ -336,9 +336,13 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
     (terminal → clear inFlight; counting already happened in the dispatch hook)
 10. last_session_at within suppressIfSessionWithinHours  → 'session-suppressed'
 11. gap: (chosen attempt's minGapDays ?? policy.minGapDays) × (slowFactor if stage ≥ 1),
-    from run.lastSentAt                                   → 'min-gap'
-12. delivery window (policy.delivery; useContactTimezone reads the `timezone` fact)
-                                                          → 'delivery-window'
+    from run.lastSentAt; with progress since lastSentAt (an action completedAt >
+    lastSentAt, or a human click) and policy.progressGapDays: the smaller of that and
+    progressGapDays (plans/17 F4)                         → 'min-gap'
+12. send time = programSendTime (plans/17 F2, F5): policy.delivery (useContactTimezone reads
+    the `timezone` fact; useSessionHour swaps timeOfDay for usual_session_hour_utc) and the
+    contact policy's blackoutDates, applied until stable
+                                                          → 'delivery-window' | 'blackout'
 13. recipients = factsAdapter.recipients(subjectId, rule), minus empty emails and
     addresses suppressed for (marketing, program.category) → none: 'no-recipients'
 14. one send row per recipient, dedupeKey `program:<slug>:<subjectId>:<decisionId>:<externalId>`,
@@ -349,7 +353,7 @@ Normative order (PR 1 contract; tests in `test/programs/` assert exactly this):
 ```
 
 `nextTickAt` by outcome: sent/holdout → lastSentAt + effective gap; min-gap /
-delivery-window → the instant the constraint lifts; session-suppressed →
+delivery-window / blackout → the instant the constraint lifts; session-suppressed →
 last_session_at + window; in-flight → now + 1h; none-eligible / no-recipients →
 now + minGapDays; sunset → now + minGapDays × slowFactor; contact-policy deferral (via
 hook) → the send's notBefore.
@@ -656,6 +660,11 @@ from earlier sections, these win.
 - **Open items resolved**: `decisionRetentionDays` default null (keep); `Facts Changed`
   carries no payload (always resolve); preference page reuses the unsub page shell;
   admin name "Programs".
+- **Cadence controls, PR B (plans/17)**: step 11 uses `progressGapDays` after progress; step 12
+  is `programSendTime` (usual hour, then blackout dates, until stable) and writes reason
+  `blackout` when a blackout moved the time. A human, non-bot click on a program send sets
+  `nextTickAt = min(nextTickAt, now)` on an active or sunset run. The simulator uses the
+  `completedAt` progress test only (no clicks) and applies it to the next send alone.
 
 ## 15. Open items (historical)
 - `decisionRetentionDays` default: none vs 180. Decide at build.

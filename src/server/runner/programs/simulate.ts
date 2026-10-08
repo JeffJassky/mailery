@@ -17,16 +17,16 @@ import {
   type ProgramSimulationStep,
   type ProgramSource,
 } from '../../../shared/program-board.js'
-import type { Facts, ProgramDefinition } from '../../../shared/types.js'
+import type { ContactPolicy, Facts, ProgramDefinition } from '../../../shared/types.js'
 import type { ProgramRunActionState, ProgramRunDoc } from '../../models/index.js'
 import { SUNSET_ASK_ACTION_ID } from '../../programs/validate.js'
-import { computeDeliveryTime } from '../delivery-window.js'
 import { isSuppressed } from '../suppression.js'
 import type { RunnerContext } from '../index.js'
 import { DAY_MS, HOUR_MS, holdoutArm, sendIsInFlight, timezoneFact } from './common.js'
 import { toEpochMs } from './predicate.js'
 import { evaluateCandidates, type CandidateEvaluation, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
+import { programSendTime } from './window.js'
 
 export type ProgramSimulationErrorCode = 'not_found' | 'no_definition' | 'no_facts_adapter' | 'invalid_input'
 
@@ -211,26 +211,38 @@ function chooseNext(def: ProgramDefinition, ranked: CandidateWork[], book: Pick<
   }
 }
 
-/** Earliest instant the choice may go out: after the session rule and the gap, inside the delivery window. */
+/**
+ * Earliest instant the choice may go out: after the session rule and the gap,
+ * inside the delivery window (usual hour) and outside blackout dates.
+ * `progress` shortens the gap (plans/17 F4); only the first decision has it.
+ */
 function sendTimeFor(
   def: ProgramDefinition,
   facts: Facts,
+  contactPolicy: ContactPolicy | undefined,
   choice: Choice,
   book: Book,
   from: Date,
-): { at: Date; gate: 'session-suppressed' | 'min-gap' | null } {
+  progress = false,
+): { at: Date; gate: 'session-suppressed' | 'min-gap' | 'delivery-window' | 'blackout' | null } {
   let sessionUntil = 0
   const hours = def.policy.suppressIfSessionWithinHours
   if (hours !== undefined) {
     const lastSession = toEpochMs(facts.last_session_at)
     if (Number.isFinite(lastSession)) sessionUntil = lastSession + hours * HOUR_MS
   }
-  const gap = gapMs(def, choice.asking ? undefined : choice.first.action, choice.asking ? 0 : choice.first.st.attempts, book.stage)
+  const gap = gapMs(def, choice.asking ? undefined : choice.first.action, choice.asking ? 0 : choice.first.st.attempts, book.stage, progress)
   const gapUntil = book.lastSentAt ? book.lastSentAt.getTime() + gap : 0
   const earliest = new Date(Math.max(from.getTime(), sessionUntil, gapUntil))
-  const at = def.policy.delivery ? computeDeliveryTime(earliest, def.policy.delivery, timezoneFact(facts) ?? undefined) : earliest
-  const gate = sessionUntil > from.getTime() ? 'session-suppressed' : gapUntil > from.getTime() ? 'min-gap' : null
-  return { at, gate }
+  const timing = programSendTime(earliest, def, facts, contactPolicy)
+  // The tick's order: session rule, then gap, then window/blackout.
+  const gate = sessionUntil > from.getTime() ? 'session-suppressed' : gapUntil > from.getTime() ? 'min-gap' : timing.gate
+  return { at: timing.at, gate }
+}
+
+/** An action completed after the last send (the simulator assumes no clicks). */
+function progressSince(works: CandidateWork[], lastSentAt: Date | null): boolean {
+  return !!lastSentAt && works.some((w) => (w.st.completedAt?.getTime() ?? 0) > lastSentAt.getTime())
 }
 
 interface NextArgs {
@@ -279,7 +291,9 @@ async function decideNext(ctx: RunnerContext, a: NextArgs): Promise<ProgramSimul
     if (rows.some((s) => sendIsInFlight(s, now))) return chosen('in-flight', null)
   }
 
-  const timing = sendTimeFor(def, a.facts, choice, book, now)
+  // Progress at the first decision: an action completed since the last send (no engagement is assumed).
+  const progress = progressSince(evaluation.works, book.lastSentAt)
+  const timing = sendTimeFor(def, a.facts, ctx.config.contactPolicy, choice, book, now, progress)
   if (timing.at.getTime() > now.getTime()) return chosen(timing.gate ?? 'delivery-window', timing.at)
 
   if (a.subjectId && !(await hasRecipient(ctx, def, a.subjectId))) return chosen('no-recipients', null)
@@ -345,7 +359,8 @@ async function project(
       continue
     }
 
-    const { at } = sendTimeFor(def, facts, choice, book, t)
+    // Progress counts for the next send only: once a send is projected, lastSentAt passes every completedAt.
+    const { at } = sendTimeFor(def, facts, ctx.config.contactPolicy, choice, book, t, progressSince(ev.works, book.lastSentAt))
     if (at.getTime() > horizon) return end('horizon')
     if (at.getTime() > t.getTime()) {
       t = at

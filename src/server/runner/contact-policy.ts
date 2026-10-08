@@ -25,6 +25,9 @@
  *   quiet     if t falls inside quiet hours (recipient-local) → t = the end of
  *             that quiet period
  *   expire    if t > queuedAt + deferral.maxHours → drop (policy_expired)
+ *   blackout  if t falls on a blackout date (recipient-local) → t = the local
+ *             midnight after the range, then quiet hours again. Never drops:
+ *             expiry is judged before this step (plans/17 F5).
  *   result    t == now → send; else defer to t
  *
  * `reason` is the constraint that produced the latest `t` (quiet hours win a
@@ -113,14 +116,28 @@ export function decideContactPolicy(input: ContactPolicyInput): ContactPolicyDec
     }
   }
 
-  const { t, reason } = st
-  if (reason === null) return { action: 'send' }
-
-  const maxHours = m.deferral?.maxHours ?? CONTACT_POLICY_DEFAULTS.deferralMaxHours
-  if (t > input.queuedAt.getTime() + maxHours * HOUR_MS) {
-    return { action: 'drop', reason, wouldBe: new Date(t) }
+  // expire — judged on the time the rules above produced, before any blackout,
+  // so a blackout can never turn a defer into a drop.
+  if (st.reason !== null) {
+    const maxHours = m.deferral?.maxHours ?? CONTACT_POLICY_DEFAULTS.deferralMaxHours
+    if (st.t > input.queuedAt.getTime() + maxHours * HOUR_MS) {
+      return { action: 'drop', reason: st.reason, wouldBe: new Date(st.t) }
+    }
   }
-  return { action: 'defer', notBefore: new Date(t), reason }
+
+  // blackout — a defer past the calendar range, then quiet hours again
+  const blackout = blackoutEnd(new Date(st.t), m.blackoutDates, input.timezone)
+  if (blackout !== null) {
+    st.t = blackout.getTime()
+    st.reason = 'blackout'
+    if (m.quietHours) {
+      const end = quietPeriodEnd(blackout, m.quietHours.start, m.quietHours.end, input.timezone)
+      if (end !== null) st.t = end.getTime()
+    }
+  }
+
+  if (st.reason === null) return { action: 'send' }
+  return { action: 'defer', notBefore: new Date(st.t), reason: st.reason }
 }
 
 const HOUR_MS = 60 * 60 * 1000
@@ -151,8 +168,25 @@ function quietPeriodEnd(at: Date, start: string, end: string, timezone: string):
  * (inclusive 'YYYY-MM-DD' ranges), the local midnight after the last
  * consecutive range; else null. Pure. plans/17 F5.
  */
-export function blackoutEnd(_at: Date, _dates: Array<{ from: string; to: string }> | undefined, _timezone: string): Date | null {
-  throw new Error('blackoutEnd: not implemented (plans/17 PR B)')
+export function blackoutEnd(at: Date, dates: Array<{ from: string; to: string }> | undefined, timezone: string): Date | null {
+  if (!dates || dates.length === 0) return null
+  const local = localParts(at, timezone)
+  const key = (y: number, mo: number, d: number) => `${String(y).padStart(4, '0')}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  const today = key(local.y, local.mo, local.d)
+  const covering = (day: string) => dates.filter((r) => r.from <= day && day <= r.to)
+  let hits = covering(today)
+  if (hits.length === 0) return null
+  // Walk forward over consecutive or overlapping ranges to the last blacked-out day.
+  let last = hits.reduce((acc, r) => (r.to > acc ? r.to : acc), today)
+  for (let guard = 0; guard < 400; guard++) {
+    const [y, mo, d] = last.split('-').map(Number) as [number, number, number]
+    const nd = new Date(Date.UTC(y, mo - 1, d + 1))
+    const next = key(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate())
+    hits = covering(next)
+    if (hits.length === 0) return utcFromLocal(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate(), 0, 0, timezone)
+    last = hits.reduce((acc, r) => (r.to > acc ? r.to : acc), next)
+  }
+  return null
 }
 
 /** contact.timezone → send.timezoneHint → policy defaultTimezone → 'UTC'. Invalid zones are skipped. */

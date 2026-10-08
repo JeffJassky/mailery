@@ -16,6 +16,7 @@ Mailer.init({
       quietHours: { start: '21:00', end: '08:00' },     // recipient-local; start > end spans midnight
       defaultTimezone: 'America/New_York',              // used when nothing better is known
       deferral: { maxHours: 72 },                       // default 72
+      blackoutDates: [{ from: '2026-11-26', to: '2026-11-27', label: 'Thanksgiving' }], // inclusive local dates
     },
     sourcePriority: ['transactional', 'flow', 'oneoff', 'broadcast', 'program'], // this is the default
   },
@@ -41,7 +42,7 @@ For one send, `now` is dispatch time:
 | Priority | if a *strictly higher-priority* origin has a pending send to the same address that is due now: `now + minGapHours` (one hour when `minGapHours` is unset) |
 | Quiet hours | applied last: if that time falls inside quiet hours, the moment the quiet period ends |
 
-The send is allowed at the latest of those. If that is `now`, it goes. Otherwise it is **deferred** to that time, and the reason recorded is the rule that produced it (`min_gap`, `rolling_cap`, `priority`, `quiet_hours`; quiet hours win a tie because they are applied last).
+The send is allowed at the latest of those. If that is `now`, it goes. Otherwise it is **deferred** to that time, and the reason recorded is the rule that produced it (`min_gap`, `rolling_cap`, `priority`, `quiet_hours`, `blackout`; quiet hours win a tie because they are applied last, and `blackout` is applied after them).
 
 Quiet hours are computed in the recipient's local time and are DST-correct: a quiet period that spans a clock change still ends at the right local wall-clock time.
 
@@ -58,6 +59,14 @@ On re-dispatch everything runs again: suppression, the circuit breaker, the orig
 Expiry is measured from when the send was **queued**, and judged on the final time, after quiet hours. If the earliest allowed time is later than `queuedAt + deferral.maxHours`, the send is not deferred but **dropped**: `status: 'cancelled'`, `exitReason: 'policy_expired'`, no provider call. Sending a two-day-old "your trial ends tomorrow" would be worse than not sending it.
 
 A deferred send is not history, so it does not push other sends back; only what was actually sent does.
+
+## Blackout dates
+
+`blackoutDates` is a list of inclusive calendar ranges (`'YYYY-MM-DD'`, at most 50, optional `label` up to 64 characters) on which no marketing is sent. The date is the recipient's local date (the same zone chain as quiet hours). A send that lands on one is **deferred** to local midnight after the last consecutive range, then quiet hours are applied again; the reason recorded is `blackout`. Adjacent or overlapping ranges act as one.
+
+A blackout never drops a send. Expiry is judged on the time the other rules produced, before the blackout, and the deferral past a blackout never expires. A policy whose `marketing` holds only `blackoutDates` is a live policy.
+
+Flows, broadcasts and one-offs need nothing extra: their sends defer at dispatch and the origin's guard re-runs on release. Programs check the same ranges in the tick, so the board and `simulateProgram` show the true next send (reason `blackout`). Transactional mail is untouched.
 
 ## Priority
 

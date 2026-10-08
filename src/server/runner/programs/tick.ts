@@ -16,7 +16,6 @@ import type {
   SendDoc,
 } from '../../models/index.js'
 import { SUNSET_ASK_ACTION_ID } from '../../programs/validate.js'
-import { computeDeliveryTime } from '../delivery-window.js'
 import { DEFAULT_BOT_UA_RE, isBotUserAgent } from '../predicate.js'
 import { isSuppressed } from '../suppression.js'
 import type { RunnerContext } from '../index.js'
@@ -35,6 +34,7 @@ import { acquireLease, LeaseLostError, PROCESS_WORKER, releaseLease, renewLease 
 import { toEpochMs } from './predicate.js'
 import { evaluateCandidates, type CandidateWork } from './rank.js'
 import { gapMs, sunsetStageFor } from './sunset.js'
+import { programSendTime } from './window.js'
 import type { ProgramTickOptions, ProgramTickResult } from './index.js'
 
 const ACTIVE_STATUSES = ['active', 'sunset'] as const
@@ -353,17 +353,23 @@ async function tickLeased(
   // 11. gap.
   const chosenAction = asking ? undefined : first.action
   const attemptIndex = asking ? 0 : first.st.attempts
-  const gap = gapMs(def, chosenAction, attemptIndex, stage)
+  // Momentum (plans/17 F4): an action completed, or a human click, since the last send.
+  let progress = false
+  if (run.lastSentAt && def.policy.progressGapDays !== undefined) {
+    const sentMs = run.lastSentAt.getTime()
+    progress = works.some((w) => (w.st.completedAt?.getTime() ?? 0) > sentMs) || (await hasHumanClick(ctx, runId, run.lastSentAt))
+  }
+  const gap = gapMs(def, chosenAction, attemptIndex, stage, progress)
   if (run.lastSentAt) {
     const eligibleAt = run.lastSentAt.getTime() + gap
     if (eligibleAt > nowMs) return silent('min-gap', new Date(eligibleAt))
   }
 
-  // 12. delivery window.
+  // 12. delivery window, usual hour and blackout dates.
   const tz = timezoneFact(facts)
-  if (def.policy.delivery) {
-    const at = computeDeliveryTime(now, def.policy.delivery, tz ?? undefined)
-    if (at.getTime() > nowMs) return silent('delivery-window', at)
+  {
+    const timing = programSendTime(now, def, facts, ctx.config.contactPolicy)
+    if (timing.at.getTime() > nowMs) return silent(timing.gate ?? 'delivery-window', timing.at)
   }
 
   // 13. recipients.

@@ -39,6 +39,7 @@ import type { SendDoc } from '../models/index.js'
 import type { CategoryDef, PreferenceState } from '../../shared/types.js'
 import type { SuppressionScope } from '../../shared/enums.js'
 import { resolveProvider } from '../provider-lookup.js'
+import { DEFAULT_BOT_UA_RE, isBotUserAgent } from '../runner/predicate.js'
 import { appendPendingUnsub } from '../unsub-journal.js'
 import { attributeUnsubscribeToSend } from '../runner/broadcast-control.js'
 import { mountDmarcInbound, type DmarcInboundOptions } from './dmarc-inbound.js'
@@ -232,7 +233,7 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
 
     const send = await mailer.collections.sends.findOne(
       { _id: sendId },
-      { projection: { links: 1, firstClickAt: 1, queuedAt: 1 } },
+      { projection: { links: 1, firstClickAt: 1, queuedAt: 1, 'program.runId': 1 } },
     )
     if (!send) return res.status(404).end()
 
@@ -283,6 +284,23 @@ export function createPublicRouter(mailer: Mailer, opts: PublicRouterOptions = {
       )
     } catch (err) {
       logger.error?.({ err, sendId: sendIdStr, linkId }, 'mailery: click recording failed')
+    }
+
+    // plans/17 F4: a human click on a program email wakes the run, so a
+    // shorter gap after progress (and a sunset reset) needs no scheduled tick.
+    if (send.program) {
+      try {
+        const ua = requestUserAgent(req)
+        const botRe = mailer.config.botFilter?.userAgentPattern ?? DEFAULT_BOT_UA_RE
+        if (!isBotUserAgent(ua, botRe)) {
+          await mailer.collections.programRuns.updateOne(
+            { _id: send.program.runId, status: { $in: ['active', 'sunset'] } },
+            { $min: { nextTickAt: new Date() } },
+          )
+        }
+      } catch (err) {
+        logger.error?.({ err, sendId: sendIdStr }, 'mailery: program wake on click failed')
+      }
     }
   }))
 

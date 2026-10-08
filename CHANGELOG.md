@@ -10,6 +10,9 @@ Additive. No forced data migration: every new field is optional, every new colle
 - **Contact policy** (`MailerConfig.contactPolicy`): minimum gap, rolling cap, quiet hours and source priority across flows, broadcasts, one-offs and Programs. Contention defers a send; expiry cancels it with `exitReason: 'policy_expired'`.
 - **Programs.** Definitions with prioritised actions, attempt ladders, `requires`, cooldowns, sunset and holdout; `factsAdapter`; the tick, scheduler and decision log; `mailer.saveProgramDraft`, `publishProgram`, `setProgramEnabled`, `enterProgram`, `tickProgram`, `abortProgram`, `getProgramState`. Guide: `docs/guide/programs.md`.
 - **Programs surface.** Admin and agent routes (`/programs`: list, save draft, publish with 422 issues, enable, disable, detail, runs, run with decisions, state, stats by arm, force tick, abort, enter); admin screens (list, detail with JSON editor and funnel, run view with decision timeline).
+- **Send at the subject's usual hour.** `policy.delivery.useSessionHour` and `sessionHourOffsetMinutes` take the send time from the reserved `usual_session_hour_utc` fact, with `timeOfDay` as the fallback.
+- **Momentum.** `policy.progressGapDays` shortens the gap after progress (an action completed or a human click); a human click also wakes the run.
+- **Blackout dates.** `contactPolicy.marketing.blackoutDates`: calendar ranges with no marketing sends; sends defer (reason `blackout`), never drop; programs show the true next send.
 - **`mailery doctor`** (read-only upgrade check, non-zero on anything that would make a Program tick fail) and **`mailery backfill-categories --map slug=category[,...] [--dry-run]`**.
 
 ### Changed — new statuses

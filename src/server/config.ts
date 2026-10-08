@@ -514,6 +514,14 @@ export function assertValidCategories(categories: CategoryDef[] | undefined): vo
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/
 
+/** 'YYYY-MM-DD' that is a real calendar date. */
+function isCalendarDate(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+  const [y, mo, d] = v.split('-').map(Number) as [number, number, number]
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d
+}
+
 export function assertValidContactPolicy(policy: ContactPolicy | undefined): void {
   if (!policy) return
   const problems: string[] = []
@@ -538,6 +546,29 @@ export function assertValidContactPolicy(policy: ContactPolicy | undefined): voi
       problems.push(`marketing.defaultTimezone "${m.defaultTimezone}" is not an IANA zone`)
     }
     if (m.deferral !== undefined && !positive(m.deferral.maxHours)) problems.push('marketing.deferral.maxHours must be > 0')
+    if (m.blackoutDates !== undefined) {
+      const dates: unknown = m.blackoutDates
+      if (!Array.isArray(dates)) {
+        problems.push('marketing.blackoutDates must be an array')
+      } else {
+        if (dates.length > 50) problems.push('marketing.blackoutDates has at most 50 entries')
+        dates.forEach((r: any, i: number) => {
+          const at = `marketing.blackoutDates[${i}]`
+          if (!r || typeof r !== 'object') {
+            problems.push(`${at} must be an object with from and to`)
+            return
+          }
+          const fromOk = isCalendarDate(r.from)
+          const toOk = isCalendarDate(r.to)
+          if (!fromOk) problems.push(`${at}.from must be YYYY-MM-DD`)
+          if (!toOk) problems.push(`${at}.to must be YYYY-MM-DD`)
+          if (fromOk && toOk && r.from > r.to) problems.push(`${at}: from must not be after to`)
+          if (r.label !== undefined && (typeof r.label !== 'string' || r.label.length > 64)) {
+            problems.push(`${at}.label must be at most 64 characters`)
+          }
+        })
+      }
+    }
   }
   if (policy.sourcePriority !== undefined) {
     const allowed = new Set(['transactional', 'flow', 'broadcast', 'program', 'oneoff'])

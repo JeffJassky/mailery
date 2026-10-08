@@ -28,8 +28,9 @@ export function gapMs(
   stage: number,
   progress = false,
 ): number {
-  void progress // plans/17 F4: implemented in PR B
   const days = action?.attempts[attemptIndex]?.minGapDays ?? def.policy.minGapDays
   const factor = stage >= 1 && def.policy.sunset ? def.policy.sunset.slowFactor : 1
-  return days * DAY_MS * factor
+  const normal = days * DAY_MS * factor
+  const fast = def.policy.progressGapDays
+  return progress && fast !== undefined ? Math.min(normal, fast * DAY_MS) : normal
 }

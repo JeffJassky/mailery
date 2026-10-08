@@ -25,16 +25,24 @@ export function gapChip(days: number): PolicyChip {
 }
 
 /** plans/17 F4: `policy.progressGapDays`. Icon Rocket, value `Nd`, tip `Gap after progress: N day(s)`. */
-export function progressChip(_days: number | undefined): PolicyChip | null {
-  return null // implemented in PR B
+export function progressChip(days: number | undefined): PolicyChip | null {
+  if (!days) return null
+  return { key: 'progress', icon: 'Rocket', value: `${trimNum(days)}d`, tip: `Gap after progress: ${plural(days, 'day', 'days')}` }
 }
 
 export function windowChip(d: ProgramDefinition['policy']['delivery']): PolicyChip | null {
   if (!d) return null
   const time = d.timeOfDay
-  if (!d.weekdaysOnly && !time) return null
-  const value = [d.weekdaysOnly ? 'Wkdays' : '', time ?? ''].filter(Boolean).join(' ')
-  const when = [d.weekdaysOnly ? 'weekdays' : 'every day', time ? `at ${time}` : ''].filter(Boolean).join(' ')
+  const usual = d.useSessionHour === true
+  if (!d.weekdaysOnly && !time && !usual) return null
+  const offset = d.sessionHourOffsetMinutes ?? 0
+  const value = [d.weekdaysOnly ? 'Wkdays' : '', usual ? 'Usual hr' : (time ?? '')].filter(Boolean).join(' ')
+  let at = time ? `at ${time}` : ''
+  if (usual) {
+    const extras = [time ? `fallback ${time}` : '', offset ? `${offset > 0 ? '+' : '-'}${Math.abs(offset)} min` : ''].filter(Boolean)
+    at = `at the subject's usual hour${extras.length ? ` (${extras.join(', ')})` : ''}`
+  }
+  const when = [d.weekdaysOnly ? 'weekdays' : 'every day', at].filter(Boolean).join(' ')
   const zone = d.useContactTimezone
     ? `in the contact's timezone${d.timezone ? ` (fallback ${d.timezone})` : ''}`
     : d.timezone ?? ''
@@ -64,6 +72,7 @@ export function holdoutChip(pct: number | undefined): PolicyChip | null {
 export function policyChips(def: ProgramDefinition): PolicyChip[] {
   const out: Array<PolicyChip | null> = [
     def.policy.minGapDays != null ? gapChip(def.policy.minGapDays) : null,
+    progressChip(def.policy.progressGapDays),
     windowChip(def.policy.delivery),
     quietChip(def.policy.suppressIfSessionWithinHours),
     sunsetChip(def.policy.sunset),
