@@ -31,7 +31,7 @@ beforeEach(async () => {
 })
 
 const tpl = (slug: string, kind: 'marketing' | 'transactional', category?: string) => ({
-  slug, name: slug, kind, category: category ?? null, createdAt: NOW, updatedAt: NOW,
+  slug, name: slug, kind, category: category ?? null, createdAt: NOW, updatedAt: NOW, publishedAt: NOW,
 }) as any
 const ONE = { id: 'a', title: 'A', priority: 1, attempts: 1, satisfied: { fact: 'x' } } as const
 const check = (r: DoctorReport, id: string) => r.checks.find((k) => k.id === id)!
@@ -113,9 +113,20 @@ describe('doctor', () => {
     expect(k.detail[0]).toContain('p/old')
   })
 
-  it('fails when Programs exist and their indexes are missing, passes once indexes are synced', async () => {
+  it('missing indexes: warn while no Program is enabled, fail once one is; sends indexes carry a count and createIndex command; synced passes', async () => {
     const c = getCollections(db)
     await c.programs.insertOne(buildProgramDoc(buildProgram({ slug: 'p1', actions: [ONE] }), { enabled: false }))
+    await c.sends.insertMany([{ dedupeKey: 'a' }, { dedupeKey: 'b' }] as any)
+    const warn = await runDoctor(db, { version: 'x', now: NOW })
+    expect(check(warn, 'indexes').status).toBe('warn')
+    expect(warn.ok).toBe(true)
+    const line = check(warn, 'indexes').detail.find((d) => d.includes('"emailAtSend":1'))!
+    expect(line).toContain('~2 document(s)')
+    expect(line).toContain('createIndex({"emailAtSend":1,"kind":1,"sentAt":-1})')
+    expect(check(warn, 'indexes').detail.some((d) => d.includes('"program.slug":1') && d.includes('partialFilterExpression'))).toBe(true)
+    expect(check(warn, 'indexes').detail.some((d) => d.includes('"status":1,"notBefore":1'))).toBe(true)
+
+    await c.programs.updateOne({ slug: 'p1' }, { $set: { enabled: true } })
     const bad = await runDoctor(db, { version: 'x', now: NOW })
     expect(check(bad, 'indexes').status).toBe('fail')
     expect(bad.ok).toBe(false)
@@ -153,6 +164,39 @@ describe('doctor', () => {
     expect(check(await runDoctor(db, { version: 'x', now: NOW }), 'programs-valid').status).toBe('ok')
     await c.templates.updateOne({ slug: slugs[1]! }, { $set: { category: 'other.cat' } })
     expect(check(await runDoctor(db, { version: 'x', now: NOW }), 'programs-valid').status).toBe('fail')
+  })
+
+  it('fails an enabled program that references an unpublished template', async () => {
+    const c = getCollections(db)
+    await ensureIndexes(db)
+    const def = buildProgram({ slug: 'act2', category: 'lifecycle.onboarding', actions: [ONE] })
+    await c.programs.insertOne(buildProgramDoc(def, { enabled: true }))
+    const slugs = def.actions.flatMap((a) => a.attempts.flatMap((t) => t.deliveries.map((d) => d.templateSlug)))
+    await c.templates.insertMany(slugs.map((s) => ({ ...tpl(s, 'marketing', 'lifecycle.onboarding'), publishedAt: null })))
+    const k = check(await runDoctor(db, { version: 'x', now: NOW }), 'programs-valid')
+    expect(k.status).toBe('fail')
+    expect(k.detail.join(' ')).toContain('is not published')
+  })
+
+  it('stale-lease message uses the configured threshold; config limits are stated', async () => {
+    const c = getCollections(db)
+    await c.programRuns.insertOne({ programSlug: 'p', subjectId: 's', lease: { until: new Date(NOW.getTime() - 3 * 60_000), worker: 'w' } } as any)
+    const r = await runDoctor(db, { version: 'x', now: NOW, staleLeaseMs: 2 * 60_000 })
+    expect(check(r, 'stale-leases').title).toContain('2 minute(s)')
+    expect(check(r, 'config-unreadable').detail).toEqual([])
+    expect(check(r, 'config-unreadable').title).toMatch(/contactPolicy, factsAdapter/)
+    expect(formatDoctor(r)).toContain('contactPolicy')
+  })
+
+  it('ensureIndexes can build the 0.21 sends indexes in the background', async () => {
+    await ensureIndexes(db, 'mailer_', { backgroundSends: true })
+    const c = getCollections(db)
+    for (let i = 0; i < 50; i++) {
+      const keys = (await c.sends.indexes()).map((x) => JSON.stringify(x.key))
+      if (keys.includes('{"emailAtSend":1,"kind":1,"sentAt":-1}') && keys.includes('{"program.runId":1}')) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error('sends indexes were not built')
   })
 
   it('fails an enabled program whose stored definition no longer parses, or has no published definition', async () => {

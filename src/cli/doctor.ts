@@ -17,7 +17,7 @@
 import type { Db } from 'mongodb'
 
 import { categoryScopeSchema, programDefinitionSchema } from '../shared/schemas.js'
-import { getCollections } from '../server/models/index.js'
+import { getCollections, SENDS_0_21_INDEXES } from '../server/models/index.js'
 import { findRequiresCycle, referencedTemplateSlugs } from '../server/programs/validate.js'
 import type { ProgramDefinition } from '../shared/types.js'
 
@@ -51,14 +51,22 @@ export interface DoctorOptions {
 const STATIC_SCOPES = new Set(['all', 'marketing', 'transactional'])
 
 /** Index key patterns the 0.21 collections need (see models/index.ts `ensureIndexes`). */
-const EXPECTED_INDEXES: Array<{ coll: string; keys: Record<string, 1 | -1>; why: string }> = [
-  { coll: 'programs', keys: { slug: 1 }, why: 'unique slug' },
-  { coll: 'program_versions', keys: { programId: 1, version: 1 }, why: 'unique version per program' },
-  { coll: 'program_runs', keys: { programSlug: 1, subjectId: 1 }, why: 'one run per subject (unique)' },
-  { coll: 'program_runs', keys: { programSlug: 1, enteredAt: -1 }, why: 'runs list, newest first' },
-  { coll: 'program_runs', keys: { status: 1, nextTickAt: 1 }, why: 'scheduler scan' },
-  { coll: 'program_decisions', keys: { runId: 1, at: -1 }, why: 'run timeline' },
-  { coll: 'contact_locks', keys: { expiresAt: 1 }, why: 'TTL for the contact-policy lock' },
+const EXPECTED_INDEXES: Array<{
+  coll: string
+  keys: Record<string, 1 | -1>
+  why: string
+  /** Needed only by Programs: a miss is a failure when a Program is enabled. */
+  program: boolean
+  partial?: Record<string, unknown>
+}> = [
+  { coll: 'programs', keys: { slug: 1 }, why: 'unique slug', program: true },
+  { coll: 'program_versions', keys: { programId: 1, version: 1 }, why: 'unique version per program', program: true },
+  { coll: 'program_runs', keys: { programSlug: 1, subjectId: 1 }, why: 'one run per subject (unique)', program: true },
+  { coll: 'program_runs', keys: { programSlug: 1, enteredAt: -1 }, why: 'runs list, newest first', program: true },
+  { coll: 'program_runs', keys: { status: 1, nextTickAt: 1 }, why: 'scheduler scan', program: true },
+  { coll: 'program_decisions', keys: { runId: 1, at: -1 }, why: 'run timeline', program: true },
+  { coll: 'contact_locks', keys: { expiresAt: 1 }, why: 'TTL for the contact-policy lock', program: false },
+  ...SENDS_0_21_INDEXES.map((x) => ({ coll: 'sends', keys: x.key, why: x.why, program: x.program, partial: x.partialFilterExpression })),
 ]
 
 const same = (a: Record<string, unknown>, b: Record<string, unknown>) => JSON.stringify(a) === JSON.stringify(b)
@@ -130,8 +138,8 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
   )
 
   // Indexes ---------------------------------------------------------------------
-  const programsInUse = programs.length > 0
   const missing: string[] = []
+  let programIndexMissing = false
   const indexCache = new Map<string, Array<{ key: Record<string, unknown> }>>()
   for (const e of EXPECTED_INDEXES) {
     if (!indexCache.has(e.coll)) {
@@ -141,17 +149,26 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
         indexCache.set(e.coll, [])
       }
     }
-    if (!indexCache.get(e.coll)!.some((ix) => same(ix.key, e.keys))) {
-      missing.push(`${prefix}${e.coll} ${JSON.stringify(e.keys)} (${e.why})`)
+    if (indexCache.get(e.coll)!.some((ix) => same(ix.key, e.keys))) continue
+    if (e.program) programIndexMissing = true
+    let line = `${prefix}${e.coll} ${JSON.stringify(e.keys)} (${e.why})`
+    if (e.coll === 'sends') {
+      let n: number | string = '?'
+      try {
+        n = await db.collection(`${prefix}sends`).estimatedDocumentCount()
+      } catch { /* collection absent */ }
+      const opt = e.partial ? `, { partialFilterExpression: ${JSON.stringify(e.partial)} }` : ''
+      line += `; ~${n} document(s). Pre-build: db.getCollection("${prefix}sends").createIndex(${JSON.stringify(e.keys)}${opt})`
     }
+    missing.push(line)
   }
   if (missing.length === 0) {
-    add('indexes', 'ok', 'Program and contact-lock indexes are present')
+    add('indexes', 'ok', 'Program, contact-policy and contact-lock indexes are present')
   } else {
     add(
       'indexes',
-      programsInUse ? 'fail' : 'warn',
-      'Missing indexes: start the app once with 0.21 (Mailer.init syncs indexes) before enabling Programs',
+      programIndexMissing && enabled.length > 0 ? 'fail' : 'warn',
+      'Missing 0.21 indexes (Mailer.init builds them; on a large mailer_sends pre-build them with the commands below)',
       missing,
     )
   }
@@ -170,18 +187,20 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
   }
 
   // Stale leases -----------------------------------------------------------------
-  const staleBefore = new Date(now.getTime() - (opts.staleLeaseMs ?? 10 * 60_000))
+  const staleMs = opts.staleLeaseMs ?? 10 * 60_000
+  const staleLabel = staleMs % 60_000 === 0 ? `${staleMs / 60_000} minute(s)` : `${staleMs / 1000} second(s)`
+  const staleBefore = new Date(now.getTime() - staleMs)
   const stale = await c.programRuns
     .find({ 'lease.until': { $lt: staleBefore } }, { projection: { programSlug: 1, subjectId: 1, lease: 1 } })
     .limit(50)
     .toArray()
   if (stale.length === 0) {
-    add('stale-leases', 'ok', 'No Program run holds a lease that expired more than 10 minutes ago')
+    add('stale-leases', 'ok', `No Program run holds a lease that expired more than ${staleLabel} ago`)
   } else {
     add(
       'stale-leases',
       'warn',
-      'Program runs with a lease expired > 10 minutes ago (is the scheduler running? an expired lease is reclaimed on the next sweep)',
+      `Program runs with a lease expired > ${staleLabel} ago (is the scheduler running? an expired lease is reclaimed on the next sweep)`,
       stale.map((r) => `${r.programSlug}/${r.subjectId} lease expired ${r.lease!.until.toISOString()}`),
     )
   }
@@ -203,12 +222,13 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
     if (cycle) problems.push(`${p.slug}: requires cycle ${cycle.join(' -> ')}`)
     const slugs = referencedTemplateSlugs(def)
     const rows = await c.templates
-      .find({ slug: { $in: slugs } }, { projection: { slug: 1, kind: 1, category: 1 } })
+      .find({ slug: { $in: slugs } }, { projection: { slug: 1, kind: 1, category: 1, publishedAt: 1 } })
       .toArray()
     const bySlug = new Map(rows.map((t) => [t.slug, t]))
     for (const s of slugs) {
       const t = bySlug.get(s)
       if (!t) problems.push(`${p.slug}: template "${s}" does not exist`)
+      else if (!t.publishedAt) problems.push(`${p.slug}: template "${s}" is not published`)
       else if (t.kind !== 'marketing') problems.push(`${p.slug}: template "${s}" is not marketing`)
       else if ((t.category ?? null) !== def.category) {
         problems.push(`${p.slug}: template "${s}" has category ${t.category ?? '(none)'}, program is ${def.category}`)
@@ -225,6 +245,12 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
   } else {
     add('programs-valid', 'fail', 'Enabled Programs that would fail to tick', problems)
   }
+
+  add(
+    'config-unreadable',
+    'info',
+    'doctor reads the database only: MailerConfig (contactPolicy, factsAdapter, categories) lives in host code and is not checked. Verify those in your config; pass --categories a,b to compare categories.',
+  )
 
   return { version: opts.version, ok: !checks.some((k) => k.status === 'fail'), checks }
 }

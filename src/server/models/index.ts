@@ -973,8 +973,59 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
 // Index ensurer
 // ---------------------------------------------------------------------------
 
-export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
+/**
+ * The 0.21 indexes on `mailer_sends`. On a large collection each build takes
+ * a while, so `Mailer.init` builds them in the background (`ensureIndexes`
+ * option `backgroundSends`), and `mailery doctor` tells hosts how to pre-build
+ * them. `program: true` marks the ones only Programs need.
+ */
+export const SENDS_0_21_INDEXES: Array<{
+  key: Record<string, 1 | -1>
+  partialFilterExpression?: Record<string, unknown>
+  why: string
+  program: boolean
+}> = [
+  { key: { emailAtSend: 1, kind: 1, sentAt: -1 }, why: 'contact-policy history lookup', program: false },
+  {
+    key: { status: 1, notBefore: 1 },
+    partialFilterExpression: { status: 'deferred' },
+    why: 'deferred-send release',
+    program: false,
+  },
+  {
+    key: { 'program.runId': 1 },
+    partialFilterExpression: { 'program.runId': { $exists: true } },
+    why: 'sends of a Program run',
+    program: true,
+  },
+  {
+    key: { 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 },
+    partialFilterExpression: { 'program.slug': { $exists: true } },
+    why: 'per-program stats',
+    program: true,
+  },
+]
+
+export interface EnsureIndexesOptions {
+  /**
+   * Build the 0.21 `mailer_sends` indexes without awaiting them (a failure is
+   * logged once). Everything else is awaited as before. Default false.
+   */
+  backgroundSends?: boolean
+}
+
+export async function ensureIndexes(db: Db, prefix = 'mailer_', opts: EnsureIndexesOptions = {}): Promise<void> {
   const c = getCollections(db, prefix)
+  const toSpec = (x: (typeof SENDS_0_21_INDEXES)[number]) => ({
+    key: x.key,
+    ...(x.partialFilterExpression ? { partialFilterExpression: x.partialFilterExpression } : {}),
+  })
+  const sends21 = () => c.sends.createIndexes(SENDS_0_21_INDEXES.map(toSpec))
+  if (opts.backgroundSends) {
+    sends21().catch((err: any) => {
+      console.warn(`mailery: building the 0.21 indexes on ${prefix}sends failed (will retry on next init): ${err?.message ?? err}`)
+    })
+  }
 
   await Promise.all([
     c.subscriptions.createIndexes([
@@ -1022,16 +1073,8 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { providerMessageId: 1 }, sparse: true },
       { key: { status: 1, queuedAt: 1 } },
       { key: { status: 1, updatedAt: 1 } },
-      // 0.21: contact-policy history lookup and deferred-send release.
-      { key: { emailAtSend: 1, kind: 1, sentAt: -1 } },
-      { key: { status: 1, notBefore: 1 }, partialFilterExpression: { status: 'deferred' } },
-      { key: { 'program.runId': 1 }, partialFilterExpression: { 'program.runId': { $exists: true } } },
-      // 0.21: per-program stats (sends by action, holdout vs real).
-      {
-        key: { 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 },
-        partialFilterExpression: { 'program.slug': { $exists: true } },
-      },
     ]),
+    opts.backgroundSends ? Promise.resolve() : sends21(),
     c.suppressions.createIndexes([
       { key: { email: 1, scope: 1 }, unique: true, partialFilterExpression: { email: { $type: 'string' } } },
       { key: { emailHash: 1 } },

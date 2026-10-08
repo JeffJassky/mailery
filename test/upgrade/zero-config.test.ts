@@ -148,7 +148,7 @@ describe('0.21 with no new config behaves as 0.20', () => {
     await applyWebhookEvent({ type: 'complaint', providerEventId: 'e4', providerMessageId: w5!.providerMessageId!, email: 'u5@example.com', occurredAt: new Date(), details: {} } as any, ctx)
     const w4 = await ctx.collections.sends.findOne({ templateSlug: 'welcome', externalId: 'u4' })
     await applyWebhookEvent({ type: 'click', providerEventId: 'e5', providerMessageId: w4!.providerMessageId!, email: 'u4@example.com', occurredAt: new Date(), details: { url: 'https://example.com/start' } } as any, ctx)
-    const clickPath = new URL(H.provider.sent.find((s) => s.to === 'u4@example.com')!.html!.match(/href="([^"]*\/click\/[^"]*)"/)![1]).pathname
+    const clickPath = new URL(H.provider.sent.find((s) => s.to === 'u4@example.com')!.html!.match(/href="([^"]*\/click\/[^"]*)"/)![1]!).pathname
     const click = await http('GET', clickPath)
     // Unsubscribe page + one-click for u1, using the URL that went out.
     const header = H.provider.sent.find((s) => s.to === 'u1@example.com')!.headers!['List-Unsubscribe']!

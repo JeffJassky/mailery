@@ -284,7 +284,7 @@ export class Mailer {
         adapter: typeof input.adapter === 'function' ? input.adapter(db) : input.adapter,
       })
       const collections = getCollections(config.db, config.collectionPrefix)
-      await ensureIndexes(config.db, config.collectionPrefix)
+      await ensureIndexes(config.db, config.collectionPrefix, { backgroundSends: true })
 
       const queueDriver = await createQueueDriver(config.queue, config.db)
       if (!config.workerless && config.queue.driver !== 'noop') {

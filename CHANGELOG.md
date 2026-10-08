@@ -12,6 +12,27 @@ Additive. No forced data migration: every new field is optional, every new colle
 - **Programs surface.** Admin and agent routes (`/programs`: list, save draft, publish with 422 issues, enable, disable, detail, runs, run with decisions, state, stats by arm, force tick, abort, enter); admin screens (list, detail with JSON editor and funnel, run view with decision timeline).
 - **`mailery doctor`** (read-only upgrade check, non-zero on anything that would make a Program tick fail) and **`mailery backfill-categories --map slug=category[,...] [--dry-run]`**.
 
+### Changed — new statuses
+
+- `SendStatus` gains `deferred` and `holdout`. `SendDoc.exitReason` gains `policy_expired`, `satisfied_before_send`, `ineligible_before_send` and `run_inactive`. Code that switches on `status` or `exitReason` must tolerate the new values.
+
+### Pre-build indexes on large hosts
+
+`Mailer.init` builds the four 0.21 `mailer_sends` indexes in the background and does not wait for them. On a large collection, pre-build them before deploying:
+
+```js
+db.mailer_sends.createIndex({ emailAtSend: 1, kind: 1, sentAt: -1 })
+db.mailer_sends.createIndex({ status: 1, notBefore: 1 }, { partialFilterExpression: { status: 'deferred' } })
+db.mailer_sends.createIndex({ 'program.runId': 1 }, { partialFilterExpression: { 'program.runId': { $exists: true } } })
+db.mailer_sends.createIndex({ 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 }, { partialFilterExpression: { 'program.slug': { $exists: true } } })
+```
+
+`mailery doctor` lists the missing ones with a count and the command.
+
+### Rolling back to 0.20
+
+Disable Programs; cancel or re-queue `deferred` sends; cancel queued Program sends (0.20 would send them without the re-check); do not roll back once categorised templates have sent, or first convert `category:*` suppressions to `marketing` ones (0.20 ignores them). Commands are in [Upgrading to 0.21](docs/guide/upgrading-0.21.md#rolling-back-to-0-20).
+
 ### Changed — check before upgrading
 
 - **One semantic shift, and only when you opt in.** Giving a marketing template a `category` changes that template's unsubscribe link from "all marketing" to "this category". Templates without a category are unchanged. The one-click token still carries a signed `marketing` scope, so a rollback to 0.20 opts the person out of marketing rather than failing.

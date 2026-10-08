@@ -537,8 +537,11 @@ templates are unchanged.
 
 **`mailery doctor`** (new CLI command): connects with the host's config and reports
 mailery version, marketing templates without a category, declared vs used categories,
-whether `contactPolicy` / `factsAdapter` / programs are configured, index status for
-new collections, suppression rows with unknown scopes, and program runs with stale
+which programs exist and are enabled (`contactPolicy` / `factsAdapter` live in host
+code and cannot be read from the database; doctor says so and does not check them),
+that every template an enabled program uses exists, is marketing, in the program's
+category and published, index status for new collections (including the 0.21
+`mailer_sends` indexes, with a count and the createIndex command to pre-build), suppression rows with unknown scopes, and program runs with stale
 leases. Exit code non-zero on anything that would make a Program tick fail.
 
 **Per-host checklist** (CHANGELOG "check before upgrading"):
