@@ -58,9 +58,9 @@ db.mailer_sends.createIndex(
    ```js
    db.mailer_sends.updateMany({ status: 'deferred' }, { $set: { status: 'cancelled', exitReason: 'policy_expired', updatedAt: new Date() } })
    ```
-   or re-queue them, and 0.20's stranded-send sweep dispatches them:
+   or hand them to 0.20's stranded-send sweep, which re-queues `sending` rows untouched for 5 minutes (it never picks up plain `queued` rows without a job):
    ```js
-   db.mailer_sends.updateMany({ status: 'deferred' }, { $set: { status: 'queued', updatedAt: new Date() }, $unset: { policyDeferral: '' } })
+   db.mailer_sends.updateMany({ status: 'deferred' }, { $set: { status: 'sending', updatedAt: new Date(0) }, $unset: { policyDeferral: '' } })
    ```
 3. **Cancel queued Program sends.** 0.20 would send them without the dispatch-time re-check (satisfied, ineligible, run exited):
    ```js
