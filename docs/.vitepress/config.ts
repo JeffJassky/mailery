@@ -63,6 +63,7 @@ export default defineConfig({
             { text: 'Broadcasts', link: '/guide/broadcasts' },
             { text: 'Contact policy', link: '/guide/contact-policy' },
             { text: 'Programs', link: '/guide/programs' },
+            { text: 'Upgrading to 0.21', link: '/guide/upgrading-0.21' },
             { text: 'Suppression & unsubscribe', link: '/guide/suppression' },
             { text: 'Tracking', link: '/guide/tracking' },
           ],

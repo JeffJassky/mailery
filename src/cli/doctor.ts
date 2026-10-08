@@ -55,6 +55,7 @@ const EXPECTED_INDEXES: Array<{ coll: string; keys: Record<string, 1 | -1>; why:
   { coll: 'programs', keys: { slug: 1 }, why: 'unique slug' },
   { coll: 'program_versions', keys: { programId: 1, version: 1 }, why: 'unique version per program' },
   { coll: 'program_runs', keys: { programSlug: 1, subjectId: 1 }, why: 'one run per subject (unique)' },
+  { coll: 'program_runs', keys: { programSlug: 1, enteredAt: -1 }, why: 'runs list, newest first' },
   { coll: 'program_runs', keys: { status: 1, nextTickAt: 1 }, why: 'scheduler scan' },
   { coll: 'program_decisions', keys: { runId: 1, at: -1 }, why: 'run timeline' },
   { coll: 'contact_locks', keys: { expiresAt: 1 }, why: 'TTL for the contact-policy lock' },
@@ -89,10 +90,18 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
   }
 
   const used = [...new Set(marketing.map((t) => t.category).filter((x): x is string => !!x))].sort()
-  if (opts.categories) {
+  const declaredList = opts.categories ?? []
+  if (opts.categories && declaredList.length === 0) {
+    add(
+      'categories-flag-empty',
+      'warn',
+      '--categories was given without a value: comparison skipped (pass --categories a,b, or omit the flag)',
+    )
+  }
+  if (declaredList.length > 0) {
     const declared = new Set(opts.categories)
     const undeclared = used.filter((u) => !declared.has(u))
-    const unused = opts.categories.filter((d) => !used.includes(d))
+    const unused = declaredList.filter((d) => !used.includes(d))
     if (undeclared.length > 0) {
       add('categories-undeclared', 'warn', 'Templates use categories that are not declared', undeclared)
     } else {
@@ -205,7 +214,7 @@ export async function runDoctor(db: Db, opts: DoctorOptions): Promise<DoctorRepo
         problems.push(`${p.slug}: template "${s}" has category ${t.category ?? '(none)'}, program is ${def.category}`)
       }
     }
-    if (opts.categories && !opts.categories.includes(def.category)) {
+    if (declaredList.length > 0 && !declaredList.includes(def.category)) {
       problems.push(`${p.slug}: category "${def.category}" is not in --categories`)
     }
   }

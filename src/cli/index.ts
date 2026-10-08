@@ -4,7 +4,7 @@
  *
  *   npx mailery setup-sendgrid --domain X --webhook-url Y [--cloudflare]
  *   npx mailery setup-dmarc --domain X --rua-mailbox Y [--cloudflare]
- *   npx mailery doctor [--categories a,b] [--json]
+ *   npx mailery doctor [--categories a,b] [--prefix p_] [--json]
  *   npx mailery backfill-categories --map slug=category[,slug=category] [--dry-run]
  *
  * See src/cli/setup-{sendgrid,dmarc}.ts for the full option lists.
@@ -154,9 +154,10 @@ async function main() {
     case 'doctor': {
       const opts = parseArgs(argv.slice(1))
       const categories = opts.categories !== undefined ? collectStringList(opts.categories) : undefined
+      const prefix = typeof opts.prefix === 'string' && opts.prefix ? opts.prefix : undefined
       const { client, db } = await connectDb()
       try {
-        const report = await runDoctor(db, { version: VERSION, categories })
+        const report = await runDoctor(db, { version: VERSION, categories, prefix })
         console.log(opts.json ? JSON.stringify(report, null, 2) : formatDoctor(report))
         process.exitCode = report.ok ? 0 : 1
       } catch (err: any) {
@@ -182,9 +183,10 @@ async function main() {
         process.exit(2)
       }
       const dryRun = Boolean(opts['dry-run'])
+      const prefix = typeof opts.prefix === 'string' && opts.prefix ? opts.prefix : undefined
       const { client, db } = await connectDb()
       try {
-        const results = await backfillCategories(db, map, { dryRun, overwrite: Boolean(opts.overwrite) })
+        const results = await backfillCategories(db, map, { dryRun, overwrite: Boolean(opts.overwrite), prefix })
         console.log(formatBackfill(results, dryRun))
         process.exitCode = results.some((r) => r.status === 'error') ? 1 : 0
       } catch (err: any) {
@@ -276,8 +278,8 @@ function printUsage() {
 mailery CLI
 
 Usage:
-  mailery doctor [--categories a,b] [--json]        (read-only 0.21 upgrade check; exit 1 on blocking problems)
-  mailery backfill-categories --map slug=category[,slug=category] [--dry-run] [--overwrite]
+  mailery doctor [--categories a,b] [--prefix p_] [--json]        (read-only 0.21 upgrade check; exit 1 on blocking problems)
+  mailery backfill-categories --map slug=category[,slug=category] [--dry-run] [--overwrite] [--prefix p_]
   mailery setup-sendgrid                              (interactive — prompts you for everything)
   mailery setup-sendgrid --domain <d>[,<d>...] --webhook-url <u> [options]   (non-interactive)
 

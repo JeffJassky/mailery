@@ -148,7 +148,7 @@ body: {
 
 ## Programs
 
-The same routes as the admin API's Programs section, at the top level (they are also reachable at `/api/programs`). See the [Programs guide](/guide/programs). All routes answer `404 { error: 'not_found' }` for an unknown program and `404 { error: 'run_not_found' }` for a subject with no run. Every mutating route is audited (`program.save_draft`, `program.publish`, `program.enable`, `program.disable`, `program.enter`, `program.force_tick`, `program.abort`) with this surface's actor; `program.abort` is written by the engine with actor `host`.
+The same routes as the admin API's Programs section, at the top level (they are also reachable at `/api/programs`). See the [Programs guide](/guide/programs). All routes answer `404 { error: 'not_found' }` for an unknown program and `404 { error: 'run_not_found' }` for a subject with no run. Every mutating route is audited (`program.save_draft`, `program.publish`, `program.enable`, `program.disable`, `program.enter`, `program.force_tick`, `program.abort`) with this surface's actor (`program.abort` included: the route passes it to `mailer.abortProgram`).
 
 ### `GET /programs`
 `[{ slug, name, version, enabled, draft, category, publishedAt, runs: { active, completed, exited, sunset, total } }]`. `draft` is true when an unpublished draft exists.

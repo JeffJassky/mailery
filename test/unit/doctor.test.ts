@@ -58,6 +58,31 @@ describe('doctor', () => {
     expect(check(noDecl, 'categories-used').detail).toEqual(['news', 'old'])
   })
 
+  it('--categories with no value is treated as not provided and says so', async () => {
+    const c = getCollections(db)
+    await c.templates.insertMany([tpl('b', 'marketing', 'news')])
+    const r = await runDoctor(db, { version: 'x', now: NOW, categories: [] })
+    expect(check(r, 'categories-flag-empty').status).toBe('warn')
+    expect(r.checks.find((k) => k.id === 'categories-undeclared')).toBeUndefined()
+    expect(check(r, 'categories-used').detail).toEqual(['news'])
+    expect(r.ok).toBe(true)
+  })
+
+  it('categories-undeclared is ok when every used category is declared', async () => {
+    const c = getCollections(db)
+    await c.templates.insertMany([tpl('b', 'marketing', 'news')])
+    const r = await runDoctor(db, { version: 'x', now: NOW, categories: ['news'] })
+    expect(check(r, 'categories-undeclared').status).toBe('ok')
+    expect(r.checks.find((k) => k.id === 'categories-flag-empty')).toBeUndefined()
+  })
+
+  it('honours a collection prefix', async () => {
+    const c = getCollections(db, 'x_')
+    await c.templates.insertMany([tpl('a', 'marketing')])
+    const r = await runDoctor(db, { version: 'x', now: NOW, prefix: 'x_' })
+    expect(check(r, 'templates-uncategorised')).toMatchObject({ status: 'warn', detail: ['a'] })
+  })
+
   it('flags suppression rows with an unknown scope', async () => {
     const c = getCollections(db)
     const base = { emailHash: 'h', reason: 'user_request', source: 't', notes: null, addedAt: NOW, expiresAt: null } as any
