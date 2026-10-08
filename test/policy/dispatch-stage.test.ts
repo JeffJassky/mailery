@@ -58,9 +58,10 @@ describe('rules end to end', () => {
   it('a 4th marketing send in 7 days defers until the oldest leaves the window', async () => {
     const t = freezeAt('2027-02-01T12:00:00Z')
     const id = await contact()
-    for (let i = 0; i < 3; i++) {
+    // Sends at t, t+3d, t+4d; the 4th at t+5d waits for t+7d (48h, inside the 72h expiry).
+    for (const step of [3 * DAY, DAY, DAY]) {
       expect((await send(id)).status).toBe('sent')
-      advance(DAY)
+      advance(step)
     }
     const fourth = await send(id)
     expect(fourth).toMatchObject({ status: 'deferred', notBefore: new Date(t.getTime() + 7 * DAY) })

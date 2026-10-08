@@ -41,7 +41,7 @@ function input(over: Partial<ContactPolicyInput> = {}): ContactPolicyInput {
     now: NOW,
     kind: 'marketing',
     origin: 'flow',
-    queuedAt: NOW,
+    queuedAt: over.now ?? NOW,
     timezone: 'UTC',
     history: [],
     pending: [],
@@ -99,7 +99,9 @@ describe('maxPerRollingDays (rolling, not calendar)', () => {
     })
   })
   it('uses the count-th most recent send, ignoring older ones', () => {
-    const d = decideContactPolicy(input({ policy: cap, history: [at(-1 * DAY), at(-2 * DAY), at(-3 * DAY), at(-5 * DAY)] }))
+    // +4d is past the default 72h expiry, so widen it: this vector is about the cap.
+    const wide = only({ maxPerRollingDays: { days: 7, count: 3 }, deferral: { maxHours: 24 * 30 } })
+    const d = decideContactPolicy(input({ policy: wide, history: [at(-1 * DAY), at(-2 * DAY), at(-3 * DAY), at(-5 * DAY)] }))
     expect(d).toMatchObject({ action: 'defer', notBefore: at(4 * DAY) })
   })
   it('a send just outside the window does not count', () => {
