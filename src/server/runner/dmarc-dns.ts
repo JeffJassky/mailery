@@ -17,6 +17,8 @@ import type {
 // Bounded so a dead resolver cannot hold up the runner tick that calls this.
 const systemResolver = new Resolver({ timeout: 3000, tries: 2 })
 
+const MAX_RUA_CHECKED = 10
+
 export const defaultDmarcDnsResolver: DmarcDnsResolver = {
   resolveTxt: (host) => systemResolver.resolveTxt(host),
   resolveMx: (host) => systemResolver.resolveMx(host),
@@ -171,7 +173,7 @@ export async function checkDmarcDns(domain: string, opts: CheckDmarcDnsOptions =
 
     const policyDomain = result.inheritedFrom ?? domain
     const seen = new Set<string>()
-    for (const ruaAddress of rua) {
+    for (const ruaAddress of rua.slice(0, MAX_RUA_CHECKED)) {
       const ruaDomain = ruaAddress.slice(ruaAddress.lastIndexOf('@') + 1)
       if (!ruaDomain) continue
       if (organizationalDomain(ruaDomain) !== org) {
