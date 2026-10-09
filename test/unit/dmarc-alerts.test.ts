@@ -3,7 +3,7 @@
  * Pure functions, no Mongo. Contract tests: red until PR 1B lands.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
   buildResolvedAlert,
@@ -27,6 +27,16 @@ import type {
 const DAY = 86_400_000
 const NOW = new Date('2026-10-09T12:00:00Z')
 const D = 'example.com'
+
+// The rules must take time only from `input.now`. Pinning the system clock far
+// away makes any stray Date.now() (e.g. in suggestPolicyProgression) fail here.
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2031-06-01T00:00:00Z'))
+})
+afterAll(() => {
+  vi.useRealTimers()
+})
 
 function daysAgo(n: number): Date {
   return new Date(NOW.getTime() - n * DAY)
@@ -281,6 +291,23 @@ describe('alignment_drop', () => {
     expect(only(computeDmarcAlertCandidates(input({ reports: r(800, 200) })), 'alignment_drop')[0]!.severity).toBe('critical')
   })
 
+  it('the message counts pass + adjusted fail; the summary stays raw', () => {
+    const c = only(
+      computeDmarcAlertCandidates(
+        input({
+          reports: r(900, 100),
+          failures: [failure('203.0.113.9', 25)],
+          tags: new Map([tag('203.0.113.9', 'Forwarder', true)]),
+        }),
+      ),
+      'alignment_drop',
+    )[0]!
+    expect(c.message).toBe('900 of 975 messages passed DMARC in the last 7 days (92.3%), below your 98.0% threshold.')
+    expect(c.summary.totalMessages).toBe(1000)
+    expect(c.summary.alignmentRate).toBe(0.9)
+    expect(c.sources).toEqual([])
+  })
+
   it('discounts failures from ignored sources', () => {
     const c = computeDmarcAlertCandidates(
       input({
@@ -311,6 +338,11 @@ describe('reports_stopped', () => {
 
   it('does not fire while reports are recent', () => {
     expect(only(computeDmarcAlertCandidates(input({ reports: [report({ ago: 6 })] })), 'reports_stopped')).toEqual([])
+  })
+
+  it('uses every input report, not only the window', () => {
+    const c = computeDmarcAlertCandidates(input({ reports: [report({ ago: 5 })], settings: settings({ windowDays: 3 }) }))
+    expect(only(c, 'reports_stopped')).toEqual([])
   })
 
   it('does not fire for a domain that never had reports', () => {

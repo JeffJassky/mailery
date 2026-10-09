@@ -159,13 +159,10 @@ describe('GET /dmarc/monitoring', () => {
     expect(r.body.domains).toEqual([
       { domain: 'example.com', origin: ['config'], ignored: false, lastReportAt: null, reportCount30d: 0, dns: null },
     ])
+    expect(r.body.inbound).toEqual({ mounted: false, path: null, url: null, allowedDomains: [], lastInboundReportAt: null })
   })
 
   it('reports the inbound route once mounted, without ever exposing the secret', async () => {
-    const before = await api('GET', '/dmarc/monitoring')
-    if (!pub) {
-      expect(before.body.inbound).toEqual({ mounted: false, path: null, url: null, allowedDomains: [], lastInboundReportAt: null })
-    }
     await mountInbound()
     const r = await api('GET', '/dmarc/monitoring')
     expect(r.body.inbound).toMatchObject({
@@ -174,7 +171,7 @@ describe('GET /dmarc/monitoring', () => {
       url: 'http://localhost:3000/m/inbound/dmarc',
       lastInboundReportAt: null,
     })
-    expect(r.body.inbound.allowedDomains).toContain('example.com')
+    expect(r.body.inbound.allowedDomains).toEqual(['example.com'])
     expect(r.raw).not.toContain(SECRET)
   })
 
@@ -240,6 +237,9 @@ describe('settings', () => {
     expect(r.body.settings.extraDomains).toEqual(['side.io'])
     expect(r.body.settings.reportAddress).toBe('reports@in.example.com')
 
+    const stored = await H.mailer.collections.dmarcSettings.findOne({ _id: 'settings' })
+    expect(stored?.patch).toEqual({ alerts: { windowDays: 14 }, extraDomains: ['side.io'] })
+
     const m = await api('GET', '/dmarc/monitoring')
     expect(m.body.hasDbOverride).toBe(true)
     expect(m.body.domains.map((d: any) => d.domain)).toEqual(['example.com', 'side.io'])
@@ -286,6 +286,13 @@ describe('DNS checks', () => {
     expect(m.body.domains[0].dns.issues.map((i: any) => i.code)).toContain('rua_missing_report_address')
   })
 
+  it('a re-check always hits DNS, even right after a check', async () => {
+    await api('POST', '/dmarc/dns/check', {})
+    dnsCalls.length = 0
+    await api('POST', '/dmarc/dns/check', {})
+    expect(dnsCalls).toContain('txt:_dmarc.example.com')
+  })
+
   it('a named domain must be monitored', async () => {
     const r = await api('POST', '/dmarc/dns/check', { domain: 'evil.example' })
     expect(r.status).toBe(400)
@@ -312,6 +319,26 @@ describe('DNS checks', () => {
 })
 
 describe('alerts', () => {
+  it('evaluate is always forced', async () => {
+    expect((await api('POST', '/dmarc/alerts/evaluate')).body.ran).toBe(true)
+    expect((await api('POST', '/dmarc/alerts/evaluate')).body.ran).toBe(true)
+  })
+
+  it('recent lists resolved alerts only, newest first, at most 50', async () => {
+    const base = { kind: 'reports_stopped' as const, domain: 'example.com', severity: 'warning' as const, title: 't', subjectKeys: [],
+      firstDetectedAt: new Date(), lastDetectedAt: new Date(), lastFiredAt: new Date(), fireCount: 1, lastDelivery: null,
+      lastAlert: {} as DmarcAlert }
+    await H.mailer.collections.dmarcAlerts.insertMany([
+      ...Array.from({ length: 55 }, (_, i) => ({ ...base, _id: `r${i}`, status: 'resolved' as const, resolvedAt: new Date(Date.UTC(2026, 0, 1, 0, i)) })),
+      { ...base, _id: 'still-open', status: 'open' as const, resolvedAt: null },
+    ])
+    const r = await api('GET', '/dmarc/monitoring')
+    expect(r.body.alerts.recent).toHaveLength(50)
+    expect(r.body.alerts.recent[0].id).toBe('r54')
+    expect(r.body.alerts.recent.every((a: any) => a.status === 'resolved')).toBe(true)
+    expect(r.body.alerts.open.map((a: any) => a.id)).toEqual(['still-open'])
+  })
+
   it('POST /dmarc/alerts/test delivers through the hook', async () => {
     const r = await api('POST', '/dmarc/alerts/test')
     expect(r.status).toBe(200)

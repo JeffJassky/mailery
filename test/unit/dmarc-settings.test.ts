@@ -80,7 +80,7 @@ describe('validateDmarcSettingsPatch', () => {
         knownSourceMinMessages: 1_000_000,
         alignmentMinRate: 0.5,
         alignmentMinMessages: 1,
-        reportsStoppedDays: 60,
+        reportsStoppedDays: 30,
         realertAfterHours: 0,
         dnsCheckIntervalHours: 720,
       },
@@ -112,12 +112,32 @@ describe('validateDmarcSettingsPatch', () => {
     expect(bad({ alerts: { unknownSourceMinMessages: 0 } })).toMatch(/unknownSourceMinMessages/)
     expect(bad({ alerts: { knownSourceMinMessages: 1_000_001 } })).toMatch(/knownSourceMinMessages/)
     expect(bad({ alerts: { alignmentMinMessages: '100' } })).toMatch(/alignmentMinMessages/)
-    expect(bad({ alerts: { reportsStoppedDays: 61 } })).toMatch(/reportsStoppedDays/)
+    expect(bad({ alerts: { reportsStoppedDays: 31 } })).toMatch(/reportsStoppedDays/)
+    expect(bad({ alerts: { reportsStoppedDays: 0 } })).toMatch(/reportsStoppedDays/)
+    expect(bad({ alerts: { realertAfterHours: 8761 } })).toMatch(/realertAfterHours/)
+    expect(bad({ alerts: { dnsCheckIntervalHours: -1 } })).toMatch(/dnsCheckIntervalHours/)
+    expect(bad({ alerts: { alignmentMinRate: Number.NaN } })).toMatch(/alignmentMinRate/)
+    expect(bad({ alerts: { alignmentMinRate: '0.9' } })).toMatch(/alignmentMinRate/)
     expect(bad({ alerts: { realertAfterHours: -1 } })).toMatch(/realertAfterHours/)
     expect(bad({ alerts: { dnsCheckIntervalHours: 721 } })).toMatch(/dnsCheckIntervalHours/)
     expect(bad({ alerts: { alignmentMinRate: 0.49 } })).toMatch(/alignmentMinRate/)
     expect(bad({ alerts: { alignmentMinRate: 1.01 } })).toMatch(/alignmentMinRate/)
     expect(bad({ alerts: { enabled: 'yes' } })).toMatch(/enabled/)
+  })
+
+  it('rejects prototype keys at both levels (save deep-merges patches)', () => {
+    expect(bad(JSON.parse('{"__proto__":{"enabled":false}}'))).toMatch(/__proto__/)
+    expect(bad({ alerts: JSON.parse('{"__proto__":{"x":1}}') })).toMatch(/__proto__/)
+    expect(bad({ constructor: {} })).toMatch(/constructor/)
+    expect(bad({ alerts: { prototype: 1 } })).toMatch(/prototype/)
+  })
+
+  it('rejects wrong container types instead of crashing', () => {
+    expect(bad({ alerts: null })).toMatch(/alerts/)
+    expect(bad({ alerts: [] })).toMatch(/alerts/)
+    expect(bad({ alerts: 5 })).toMatch(/alerts/)
+    expect(bad({ alerts: { disabledKinds: 'policy_ready' } })).toMatch(/disabledKinds/)
+    expect(bad({ extraDomains: [5] })).toMatch(/extraDomains/)
   })
 
   it('rejects unknown alert kinds, including test', () => {

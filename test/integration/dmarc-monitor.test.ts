@@ -10,6 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createTestMailer, type TestMailerHarness } from '../../src/testing/index.js'
+import { runTick } from '../../src/server/runner/index.js'
 import {
   _resetDmarcMonitorThrottle,
   evaluateDmarcAlerts,
@@ -101,13 +102,15 @@ async function clearAll(H: TestMailerHarness) {
 
 let H1: TestMailerHarness
 const fired: DmarcAlert[] = []
-let hookMode: 'ok' | 'throw' = 'ok'
+let hookMode: 'ok' | 'throw' | 'reject' | 'slow' = 'ok'
 
 beforeAll(async () => {
   H1 = await createTestMailer({
     config: {
-      onDmarcAlert: (a: DmarcAlert) => {
+      onDmarcAlert: async (a: DmarcAlert) => {
         if (hookMode === 'throw') throw new Error('slack is down')
+        if (hookMode === 'reject') return Promise.reject(new Error('webhook 500'))
+        if (hookMode === 'slow') await new Promise((r) => setTimeout(r, 50))
         fired.push(a)
       },
     },
@@ -260,6 +263,61 @@ describe('alert lifecycle', () => {
     await saveDmarcSettingsPatch(H1.ctx, { ignoredDomains: ['example.com'] }, 'test')
     await evalAt(1)
     expect(fired.map((a) => a.event)).toEqual(['opened'])
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.status).toBe('resolved')
+  })
+
+  it('a rejecting async hook is recorded as failed', async () => {
+    hookMode = 'reject'
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await evalAt(0)
+    const state = (await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!
+    expect(state.lastDelivery).toMatchObject({ outcome: 'failed', error: 'webhook 500' })
+  })
+
+  it('an async hook is awaited before delivery is recorded', async () => {
+    hookMode = 'slow'
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await evalAt(0)
+    expect(fired).toHaveLength(1)
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.lastDelivery).toMatchObject({ outcome: 'delivered' })
+  })
+
+  it('concurrent evaluators resolve, reopen and remind exactly once each', async () => {
+    await saveDmarcSettingsPatch(H1.ctx, { alerts: { realertAfterHours: 2 } }, 'test')
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await evalAt(0)
+    await H1.mailer.collections.dmarcFailures.deleteMany({})
+    await Promise.all([evalAt(1), evalAt(1), evalAt(1)])
+    await seedFailure(H1, '198.51.100.1', 50)
+    await Promise.all([evalAt(2), evalAt(2), evalAt(2)])
+    await Promise.all([evalAt(5), evalAt(5), evalAt(5)])
+    expect(fired.map((a) => a.event)).toEqual(['opened', 'resolved', 'opened', 'reminder'])
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.fireCount).toBe(2)
+  })
+
+  it('open test-kind rows are never resolved', async () => {
+    await seedReport(H1)
+    await seedOpenState(H1, 'test|example.com|x', 'test')
+    await evalAt(0)
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'test|example.com|x' }))!.status).toBe('open')
+  })
+
+  it('the tick runs the monitor', async () => {
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await runTick(H1.ctx)
+    expect(fired.map((a) => a.id)).toContain(ID_UNKNOWN)
+  })
+
+  it('a throwing hook does not break the tick', async () => {
+    hookMode = 'throw'
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await expect(runTick(H1.ctx)).resolves.not.toThrow()
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.lastDelivery).toMatchObject({ outcome: 'failed' })
   })
 
   it('a throwing hook is recorded and does not break the run', async () => {

@@ -89,7 +89,7 @@ Tests (red until implemented): `test/unit/dmarc-{dns,settings,alerts,domains}.te
 | `GET /dmarc/monitoring` | — | `DmarcMonitoringPayload` |
 | `PUT /dmarc/settings` | `DmarcSettingsPatch` | `{ settings }`, or 400 `validation_failed` |
 | `DELETE /dmarc/settings` | — | `{ settings }` |
-| `POST /dmarc/dns/check` | `{ domain?: string }` | `{ results: DmarcDnsCheckResult[] }`, 400 `validation_failed` for an unmonitored domain |
+| `POST /dmarc/dns/check` | `{ domain?: string }` | `{ results: DmarcDnsCheckResult[] }` (always `force: true`), 400 `validation_failed` for an unmonitored domain |
 | `POST /dmarc/alerts/evaluate` | — | `{ ran, reason?, fired, open }` (always `force: true`) |
 | `POST /dmarc/alerts/test` | — | `{ delivery, alert }` |
 
@@ -108,10 +108,11 @@ trimmed, deduplicated; returns a fresh object (never the shared default); ignore
 `DmarcConfig` keys that are not settings.
 
 `validateDmarcSettingsPatch(body)`: body must be a plain object. Unknown keys rejected
-at both levels, message names the key. Integers: `windowDays` 1–30,
+at both levels, message names the key; `__proto__`, `constructor` and `prototype` are
+unknown keys. `alerts` must itself be a plain object. Integers: `windowDays` 1–30,
 `unknownSourceMinMessages` / `knownSourceMinMessages` / `alignmentMinMessages`
-1–1 000 000, `reportsStoppedDays` 1–60, `realertAfterHours` 0–8760,
-`dnsCheckIntervalHours` 0–720. `alignmentMinRate` number 0.5–1. `enabled` boolean.
+1–1 000 000, `reportsStoppedDays` 1–30, `realertAfterHours` 0–8760,
+`dnsCheckIntervalHours` 0–720. (`reportsStoppedDays` is capped at 30 so it always fits inside the 35-day report load in §6.4.) `alignmentMinRate` number 0.5–1. `enabled` boolean.
 `disabledKinds` ⊂ `DMARC_ALERT_KINDS`. Domains match
 `/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/` after lowercasing,
 max 100 per list; returned lowercased. `reportAddress` null or `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`.
@@ -164,7 +165,8 @@ tagged and not ignored = known.
 | `policy_ready` | `suggestPolicyProgression` (same inputs as `GET /dmarc`, plus `now`) is non-null | `` `${policy}:${pct}` `` | `[]` | `info` | null |
 | `dns_misconfigured` | stored DNS check has ≥1 `error` issue | `''` | error codes | `critical` if `dmarc_missing`, else `warning` | null |
 
-`dnsIssues` = the error issues for `dns_misconfigured`, else `[]`. `suggestedPolicy`
+`dnsIssues` = the error issues for `dns_misconfigured`, else `[]`. `sources` is `[]`
+for every kind except the two source kinds. `suggestedPolicy`
 set only for `policy_ready`. `id = dmarcAlertId(kind, domain, subject)`.
 
 `summary`: `reportCount`, `passCount`, `failCount`, `totalMessages = pass + fail`
@@ -298,8 +300,10 @@ Upserts `{ _id: domain, result, checkedAt: now }`. Returns the results it produc
 ## 7. DNS checks (`dmarc-dns.ts`)
 
 `ENOTFOUND` / `ENODATA` = no records. Any other error code → one `lookup_failed`
-warning for that lookup and skip what depended on it (never report `dmarc_missing`
-on a failed lookup). TXT records arrive as chunks; join each record's chunks with `''`.
+warning for that lookup and skip what depended on it. A failed lookup never produces
+the issue its absence would (`dmarc_missing`, `external_auth_missing`,
+`rua_domain_no_mx`, `spf_missing`), and a failed `_dmarc.{sub}` lookup does not fall
+through to the organizational domain. TXT records arrive as chunks; join each record's chunks with `''`.
 
 `checkDmarcDns(domain, opts)`:
 
@@ -315,7 +319,7 @@ on a failed lookup). TXT records arrive as chunks; join each record's chunks wit
 4. `parseDmarcRecord`: split on `;`, `k=v` trimmed, keys lowercased, `p`/`sp`/`adkim`/
    `aspf` values lowercased. `valid` = `p` ∈ none/quarantine/reject. `pct` integer
    0–100 else null. `rua`/`ruf`: comma-split, strip `mailto:`, strip a `!size` suffix,
-   lowercase. Invalid → `dmarc_invalid` (error).
+   lowercase. Invalid → `dmarc_invalid` (error); steps 5–7 still run on whatever `rua` parsed.
 5. `rua` empty → `rua_missing` (error). `reportAddress` set and not in `rua`
    (case-insensitive) → `rua_missing_report_address` (warning).
 6. For each rua address whose `organizationalDomain(ruaDomain) !== org`: TXT at

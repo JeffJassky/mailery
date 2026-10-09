@@ -187,6 +187,9 @@ describe('checkDmarcDns', () => {
     expect(r.dmarc.found).toBe(true)
     expect(r.dmarc.raw).toHaveLength(2)
     expect(r.dmarc.policy).toBeNull()
+    expect(r.dmarc.rua).toEqual([])
+    expect(issue(r, 'rua_missing')).toBeUndefined()
+    expect(r.ruaMx).toEqual([])
   })
 
   it('invalid record → dmarc_invalid', async () => {
@@ -384,6 +387,40 @@ describe('checkDmarcDns', () => {
     expect(issue(r, 'lookup_failed')!.severity).toBe('warning')
     expect(issue(r, 'dmarc_missing')).toBeUndefined()
     expect(r.ok).toBe(true)
+  })
+
+  it('a failed lookup never raises the issue its absence would', async () => {
+    const zone: FakeZone = {
+      txt: {
+        '_dmarc.maxed.ai': [['v=DMARC1; p=none; rua=mailto:jeff@jeffjassky.com']],
+      },
+      fail: {
+        'maxed.ai._report._dmarc.jeffjassky.com': 'ETIMEOUT',
+        'jeffjassky.com': 'ESERVFAIL',
+        'maxed.ai': 'ESERVFAIL',
+      },
+    }
+    const r = await checkDmarcDns('maxed.ai', { resolver: fake(zone) })
+    expect(issue(r, 'external_auth_missing')).toBeUndefined()
+    expect(issue(r, 'rua_domain_no_mx')).toBeUndefined()
+    expect(issue(r, 'spf_missing')).toBeUndefined()
+    expect(r.issues.filter((i) => i.code === 'lookup_failed').length).toBeGreaterThanOrEqual(3)
+    expect(r.ok).toBe(true)
+  })
+
+  it('a failed subdomain lookup does not fall through to the org record', async () => {
+    const resolver = fake({ ...clean, fail: { '_dmarc.news.example.com': 'ESERVFAIL' } })
+    const r = await checkDmarcDns('news.example.com', { resolver })
+    expect(r.inheritedFrom).toBeNull()
+    expect(issue(r, 'lookup_failed')).toBeDefined()
+    expect(resolver.calls).not.toContain('txt:_dmarc.example.com')
+  })
+
+  it('a missing record still checks SPF but no rua steps', async () => {
+    const resolver = fake({ txt: { 'example.com': [['v=spf1 +all']] } })
+    const r = await checkDmarcDns('example.com', { resolver })
+    expect(issue(r, 'spf_permissive')!.severity).toBe('error')
+    expect(resolver.calls.some((c) => c.startsWith('mx:'))).toBe(false)
   })
 
   it('ok is false exactly when some issue is an error', async () => {
