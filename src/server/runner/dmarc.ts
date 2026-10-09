@@ -282,7 +282,7 @@ const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-
 const AUTH_RESULTS = new Set<string>(['pass', 'fail', 'softfail', 'neutral', 'temperror', 'permerror', 'none', 'unknown'])
 
 function authResult(v: unknown): DmarcAuthResult {
-  const s = String(v ?? 'none').trim()
+  const s = String(v ?? 'none').trim().toLowerCase()
   return AUTH_RESULTS.has(s) ? (s as DmarcAuthResult) : 'unknown'
 }
 

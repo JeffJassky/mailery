@@ -65,6 +65,18 @@ describe('enumerated report fields are whitelisted', () => {
     expect(p.failures[0]!.spfResult).toBe('unknown')
   })
 
+  it('auth results and policy are matched case-insensitively (some receivers capitalize)', () => {
+    const doc = xml(
+      `<record><row><source_ip>198.51.100.7</source_ip><count>5</count>
+        <policy_evaluated><disposition>none</disposition><dkim>PASS</dkim><spf>Fail</spf></policy_evaluated></row>
+        <identifiers><header_from>example.com</header_from></identifiers></record>`,
+    ).replace('<p>none</p>', '<p>Quarantine</p>')
+    const p = parseDmarcReport(doc)
+    expect(p.report.policyP).toBe('quarantine')
+    expect(p.report.passCount).toBe(5)
+    expect(p.failures).toEqual([])
+  })
+
   it('a report whose domain is not a domain is rejected', () => {
     expect(() => parseDmarcReport(xml(record('198.51.100.7', 5)).replace('<domain>example.com</domain>', `<domain>example.com${evil}</domain>`))).toThrow()
   })
