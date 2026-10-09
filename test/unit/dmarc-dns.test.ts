@@ -484,3 +484,13 @@ describe('lookupPtr', () => {
     expect(resolver.calls).toEqual([])
   })
 })
+
+describe('checkDmarcDns bounds', () => {
+  it('checks at most the first 10 rua addresses', async () => {
+    const rua = Array.from({ length: 12 }, (_, i) => `mailto:r@reports${i}.net`).join(',')
+    const resolver = fake({ txt: { '_dmarc.example.com': [[`v=DMARC1; p=none; rua=${rua}`]] } })
+    const r = await checkDmarcDns('example.com', { resolver })
+    expect(r.externalAuth).toHaveLength(10)
+    expect(resolver.calls.filter((c) => c.startsWith('mx:'))).toHaveLength(10)
+  })
+})

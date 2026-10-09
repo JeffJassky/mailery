@@ -41,7 +41,12 @@ export interface DmarcAlertInput {
       | 'failCount'
     >
   >
-  /** Failure rows with `receivedAt` in the last 30 days. */
+  /**
+   * The newest report per domain over all time (not only the 35-day load), so
+   * `reports_stopped` stays detected however long a domain has been silent.
+   */
+  latestReports: Map<string, Pick<DmarcReportDoc, 'rangeEnd' | 'policyP' | 'policyPct'>>
+  /** Failure rows with `receivedAt` in the last 30 days (capped; see plans/18 §6.4). */
   failures: DmarcFailureDoc[]
   tags: Map<string, ResolvedSourceTag>
   /** Latest stored DNS check per domain. */

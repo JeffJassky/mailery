@@ -301,10 +301,10 @@ describe('DNS checks', () => {
 
   it('setup status warns about stored DNS problems', async () => {
     await H.mailer.collections.dmarcDnsChecks.insertOne({
-      _id: 'broken.example',
+      _id: 'example.com',
       checkedAt: new Date(),
       result: {
-        domain: 'broken.example', checkedAt: new Date(), inheritedFrom: null,
+        domain: 'example.com', checkedAt: new Date(), inheritedFrom: null,
         dmarc: { host: '_dmarc.broken.example', found: false, raw: [], policy: null, subdomainPolicy: null, pct: null, rua: [], ruf: [], adkim: null, aspf: null },
         externalAuth: [], ruaMx: [], spf: { found: false, raw: [], all: null },
         issues: [{ code: 'dmarc_missing', severity: 'error', message: 'No DMARC record.', fix: null }],
@@ -314,7 +314,7 @@ describe('DNS checks', () => {
     const status = await runSetupChecks(H.mailer)
     const check = status.checks.find((c) => c.name === 'dmarc')!
     expect(check.severity).toBe('warn')
-    expect(check.message).toContain('broken.example')
+    expect(check.message).toContain('example.com')
   })
 })
 

@@ -47,8 +47,8 @@ function resolver(): DmarcDnsResolver & { calls: string[] } {
   }
 }
 
-async function seedReport(H: TestMailerHarness, over: { reportId?: string; domain?: string; daysAgo?: number; pass?: number; fail?: number } = {}) {
-  const end = new Date(T0.getTime() - (over.daysAgo ?? 1) * DAY)
+async function seedReport(H: TestMailerHarness, over: { reportId?: string; domain?: string; daysAgo?: number; pass?: number; fail?: number; base?: Date } = {}) {
+  const end = new Date((over.base ?? T0).getTime() - (over.daysAgo ?? 1) * DAY)
   const pass = over.pass ?? 5000
   const fail = over.fail ?? 0
   await H.mailer.collections.dmarcReports.insertOne({
@@ -67,7 +67,7 @@ async function seedReport(H: TestMailerHarness, over: { reportId?: string; domai
   })
 }
 
-async function seedFailure(H: TestMailerHarness, ip: string, count: number, daysAgo = 1) {
+async function seedFailure(H: TestMailerHarness, ip: string, count: number, daysAgo = 1, base = T0) {
   await H.mailer.collections.dmarcFailures.insertOne({
     reportId: `f-${ip}-${daysAgo}`,
     domain: 'example.com',
@@ -77,8 +77,8 @@ async function seedFailure(H: TestMailerHarness, ip: string, count: number, days
     dkimResult: 'fail',
     spfResult: 'fail',
     dispositionApplied: 'none',
-    day: dayStr(daysAgo),
-    receivedAt: T0,
+    day: new Date(base.getTime() - daysAgo * DAY).toISOString().slice(0, 10),
+    receivedAt: base,
   })
 }
 
@@ -131,6 +131,10 @@ beforeEach(async () => {
 
 const evalAt = (hours: number, r = resolver()) =>
   evaluateDmarcAlerts(H1.ctx, { now: at(hours), resolver: r, force: true })
+
+// Concurrent evaluators each get a distinct `now`, as real instances would; with a
+// shared `now`, an unguarded $set reports modifiedCount 0 and hides a missing guard.
+const evalRace = (hours: number) => Promise.all([0, 1, 2].map((ms) => evaluateDmarcAlerts(H1.ctx, { now: new Date(at(hours).getTime() + ms), resolver: resolver(), force: true })))
 
 describe('activation gate', () => {
   it('with no dmarc config and no reports, the monitor does nothing at all', async () => {
@@ -307,12 +311,68 @@ describe('alert lifecycle', () => {
     await seedFailure(H1, '198.51.100.1', 50)
     await evalAt(0)
     await H1.mailer.collections.dmarcFailures.deleteMany({})
-    await Promise.all([evalAt(1), evalAt(1), evalAt(1)])
+    await evalRace(1)
     await seedFailure(H1, '198.51.100.1', 50)
-    await Promise.all([evalAt(2), evalAt(2), evalAt(2)])
-    await Promise.all([evalAt(5), evalAt(5), evalAt(5)])
+    await evalRace(2)
+    await evalRace(5)
     expect(fired.map((a) => a.event)).toEqual(['opened', 'resolved', 'opened', 'reminder'])
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.fireCount).toBe(2)
+  })
+
+  it('reports_stopped stays open however long the domain is silent', async () => {
+    await seedReport(H1, { daysAgo: 10 })
+    await evalAt(0)
+    await evalAt(24 * 40)
+    expect(fired.map((a) => `${a.kind}:${a.event}`)).toEqual(['reports_stopped:opened'])
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'reports_stopped|example.com|' }))!.status).toBe('open')
+  })
+
+  it('a delivery that failed is retried an hour later with the same event', async () => {
+    hookMode = 'throw'
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50)
+    await evalAt(0)
+    hookMode = 'ok'
+    await evalAt(0.5)
+    expect(fired).toEqual([])
+    await evalAt(2)
+    expect(fired.map((a) => a.event)).toEqual(['opened'])
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.lastDelivery).toMatchObject({ outcome: 'delivered' })
+    await evalAt(3)
+    expect(fired).toHaveLength(1)
+  })
+
+  it('a severity rise fires updated even with no new source', async () => {
+    await seedReport(H1)
+    await seedFailure(H1, '198.51.100.1', 50, 1)
+    await evalAt(0)
+    expect(fired[0]!.severity).toBe('warning')
+    await seedFailure(H1, '198.51.100.1', 100, 2)
+    await evalAt(1)
+    expect(fired.map((a) => `${a.event}:${a.severity}`)).toEqual(['opened:warning', 'updated:critical'])
+    expect(fired[1]!.newSourceIps).toEqual([])
+  })
+
+  it('an alert detected after this run started is not resolved by it', async () => {
+    await seedReport(H1)
+    await seedOpenState(H1, 'alignment_drop|example.com|', 'alignment_drop')
+    await evalAt(-1)
+    expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'alignment_drop|example.com|' }))!.status).toBe('open')
+  })
+
+  it('stored subject keys never exceed 500', async () => {
+    await seedReport(H1)
+    await H1.mailer.collections.dmarcFailures.insertMany(
+      Array.from({ length: 600 }, (_, i) => ({
+        reportId: `bulk-${i}`, domain: 'example.com', sourceIp: `10.${Math.floor(i / 250)}.${i % 250}.1`, count: 20,
+        headerFrom: 'example.com', dkimResult: 'fail' as const, spfResult: 'fail' as const, dispositionApplied: 'none',
+        day: dayStr(1), receivedAt: T0,
+      })),
+    )
+    await evalAt(0)
+    const state = (await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!
+    expect(state.subjectKeys.length).toBeLessThanOrEqual(500)
+    expect(fired[0]!.sources).toHaveLength(25)
   })
 
   it('open test-kind rows are never resolved', async () => {
@@ -322,17 +382,20 @@ describe('alert lifecycle', () => {
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'test|example.com|x' }))!.status).toBe('open')
   })
 
+  // runTick reads the wall clock, so these seed relative to it.
   it('the tick runs the monitor', async () => {
-    await seedReport(H1)
-    await seedFailure(H1, '198.51.100.1', 50)
+    const now = new Date()
+    await seedReport(H1, { base: now })
+    await seedFailure(H1, '198.51.100.1', 50, 1, now)
     await runTick(H1.ctx)
     expect(fired.map((a) => a.id)).toContain(ID_UNKNOWN)
   })
 
   it('a throwing hook does not break the tick', async () => {
     hookMode = 'throw'
-    await seedReport(H1)
-    await seedFailure(H1, '198.51.100.1', 50)
+    const now = new Date()
+    await seedReport(H1, { base: now })
+    await seedFailure(H1, '198.51.100.1', 50, 1, now)
     await expect(runTick(H1.ctx)).resolves.not.toThrow()
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!.lastDelivery).toMatchObject({ outcome: 'failed' })
   })
@@ -351,7 +414,7 @@ describe('alert lifecycle', () => {
   it('two instances evaluating at once fire exactly once', async () => {
     await seedReport(H1)
     await seedFailure(H1, '198.51.100.1', 50)
-    await Promise.all([evalAt(0), evalAt(0), evalAt(0)])
+    await evalRace(0)
     expect(fired.filter((a) => a.id === ID_UNKNOWN)).toHaveLength(1)
     const state = (await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!
     expect(state.fireCount).toBe(1)
@@ -362,7 +425,7 @@ describe('alert lifecycle', () => {
     await seedFailure(H1, '198.51.100.1', 50)
     await evalAt(0)
     await seedFailure(H1, '198.51.100.2', 20)
-    await Promise.all([evalAt(1), evalAt(1), evalAt(1)])
+    await evalRace(1)
     expect(fired.map((a) => a.event)).toEqual(['opened', 'updated'])
   })
 })
@@ -436,6 +499,33 @@ describe('runDmarcDnsChecks', () => {
 
   it('refuses a domain that is not monitored', async () => {
     await expect(runDmarcDnsChecks(H1.ctx, { now: T0, resolver: resolver(), domain: 'evil.example' })).rejects.toThrow(/not monitored/)
+  })
+
+  it('never resolves a domain known only from reports (reports are attacker-supplied)', async () => {
+    await seedReport(H1)
+    await seedReport(H1, { domain: 'attacker-controlled.example' })
+    const r = resolver()
+    const results = await runDmarcDnsChecks(H1.ctx, { now: T0, resolver: r, force: true })
+    expect(results.map((x) => x.domain)).toEqual(['example.com'])
+    expect(r.calls.some((c) => c.includes('attacker-controlled'))).toBe(false)
+  })
+
+  it('removes stored checks for domains no longer checked', async () => {
+    await seedReport(H1)
+    const stale = (await runDmarcDnsChecks(H1.ctx, { now: T0, resolver: resolver(), force: true }))[0]!
+    await H1.mailer.collections.dmarcDnsChecks.insertOne({ _id: 'old.example', result: { ...stale, domain: 'old.example', ok: false }, checkedAt: T0 })
+    await runDmarcDnsChecks(H1.ctx, { now: at(1), resolver: resolver(), force: true })
+    expect(await H1.mailer.collections.dmarcDnsChecks.findOne({ _id: 'old.example' })).toBeNull()
+  })
+
+  it('checks at most 10 domains per scheduled run, never-checked and oldest first', async () => {
+    await seedReport(H1)
+    await saveDmarcSettingsPatch(H1.ctx, { extraDomains: Array.from({ length: 12 }, (_, i) => `d${i}.example.org`) }, 'test')
+    const first = await runDmarcDnsChecks(H1.ctx, { now: T0, resolver: resolver() })
+    expect(first).toHaveLength(10)
+    const second = await runDmarcDnsChecks(H1.ctx, { now: at(0.1), resolver: resolver() })
+    expect(second).toHaveLength(3)
+    expect(new Set([...first, ...second].map((r) => r.domain)).size).toBe(13)
   })
 
   it('never checks ignored domains', async () => {

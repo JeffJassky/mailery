@@ -48,8 +48,13 @@ and a GUI walks an operator through setup.
 7. **No new npm dependencies.** `psl`, `fast-xml-parser`, `adm-zip`, `multer`,
    `node:dns/promises` cover everything.
 8. **Zero-config is untouched (0.21's upgrade rule).** The monitor does nothing — no
-   DNS, no alert reads — unless `config.dmarc` is set or at least one report has been
-   ingested. `test/upgrade/zero-config.test.ts` must stay green.
+   DNS, no alert reads, one `estimatedDocumentCount` — unless the host opted in
+   (`isDmarcMonitorConfigured`: any of `dmarc.alerts`, `reportAddress`, `extraDomains`,
+   `ignoredDomains`, `adminUrl`, or an `onDmarcAlert` hook) or at least one report has
+   been ingested. The 0.20 keys `dmarc.knownSources` / `retentionDays` alone do **not**
+   activate it. `test/upgrade/zero-config.test.ts` must stay green.
+10. **Report contents are untrusted.** Anyone can email the rua mailbox. Report strings
+   are sanitized at parse time and again when alert text is built (§6.3a).
 9. **Contract types live in `src/shared/dmarc-types.ts`** so the server and the SPA
    share one definition. The SPA uses `Wire<T>` (dates as ISO strings).
 
@@ -177,6 +182,21 @@ over in-window reports (raw, not adjusted); `alignmentRate` pass/total or null;
 
 Numbers in text use `toLocaleString('en-US')`; rates `(r*100).toFixed(1)`.
 
+`subjectKeys` holds at most 500 IPs (highest volume first), on candidates and on the
+stored union in the state doc. `reports_stopped` and
+`summary.lastReportAt` / `policy` / `pct` use `input.latestReports` (newest report per
+domain over all time), not the 35-day `reports`; a domain with no entry there never
+gets `reports_stopped`.
+
+### 6.3a Untrusted report strings
+
+`parseDmarcReport` skips a record (from `failures` only; totals still count it) whose
+`source_ip` fails `net.isIP`, and passes `org_name`, `email` and each `header_from`
+through `cleanReportText` (`src/server/runner/dmarc-text.ts`): remove `[\x00-\x1f\x7f<>]`, collapse whitespace, trim, cap at
+200 characters. `formatDmarcAlertText` applies the same cleaning to every interpolated
+source field (`ip`, `ptr`, `label`, `reporters`) and to issue `message`/`fix` values, so
+`alert.text` never gains a line or a Slack `<url|text>` link from report or DNS data.
+
 - **unknown_source_failing** — title `{n} unknown sender(s) failing DMARC for {domain}`;
   message `{total} message(s) claiming to be from {domain} failed DMARC in the last {windowDays} days, sent from {n} IP address(es) you have not identified. This is either a tool you forgot to set up (SPF/DKIM) or someone spoofing your domain.{note}`,
   note ` Your policy is p=none, so receivers delivered these messages anyway.` when
@@ -236,8 +256,10 @@ What to do: {recommendation}               ← line omitted when empty
    (`{ ran: false, reason: 'throttled' }`). `_resetDmarcMonitorThrottle` clears it.
 2. Load settings. `alerts.enabled` false → `{ ran: false, reason: 'disabled', fired: 0, open }`;
    touch nothing.
-3. Load reports (`rangeEnd` ≥ now − 35d), failures (`receivedAt` ≥ now − 30d), tags,
-   stored DNS checks, monitored domains (non-ignored); compute candidates.
+3. Load, for monitored non-ignored domains only (`domain: { $in }`), with projections:
+   reports (`rangeEnd` ≥ now − 35d); `latestReports` (one aggregation: newest
+   `rangeEnd`/`policyP`/`policyPct` per domain, all time); failures (`receivedAt` ≥ now −
+   30d), sorted by `count` desc, limit 20 000; tags; stored DNS checks. Compute candidates.
 4. For each candidate:
    - `insertOne` a state doc (`status 'open'`, `fireCount 1`, `firstDetectedAt =
      lastDetectedAt = lastFiredAt = now`, `resolvedAt null`, `lastDelivery null`,
@@ -250,11 +272,20 @@ What to do: {recommendation}               ← line omitted when empty
        lastFiredAt: existing.lastFiredAt }, $set subjectKeys = union, lastFiredAt =
        lastDetectedAt = now, severity, title; $inc fireCount)`. Modified → fire
        **updated**, `newSourceIps` = the new keys for the two source kinds, else `[]`.
+     - open and the candidate's severity ranks above `existing.severity`
+       (info < warning < critical) → same guarded update → **updated**, `newSourceIps`
+       = new keys (often `[]`).
+     - open, `existing.lastDelivery` is `null` or `failed`, and `existing.lastFiredAt ≤
+       now − 1h` → same guarded update → re-fire with `existing.lastAlert.event`
+       (a retry of the delivery that did not land).
      - open, `realertAfterHours > 0` and `existing.lastFiredAt ≤ now −
        realertAfterHours` → same guarded update → **reminder**.
+     Precedence: new keys, then severity rise, then retry, then reminder.
      - otherwise `$set lastDetectedAt, severity, title`. No fire.
 5. Every open doc not among the candidate ids and with kind ≠ `test` →
-   `updateOne({ _id, status: 'open' }, $set status 'resolved', resolvedAt now)`.
+   `updateOne({ _id, status: 'open', lastDetectedAt: { $lt: now } }, $set status
+   'resolved', resolvedAt now)`. (A doc another instance detected after this run's
+   snapshot is not this run's to resolve.)
    Modified → fire **resolved** unless the kind is `policy_ready`, the kind is in
    `disabledKinds`, or the domain is ignored or no longer monitored (then silent).
 6. Return `{ ran: true, fired, open }`: `fired` = hook deliveries attempted this run;
@@ -283,13 +314,17 @@ Every alert's `adminUrl` is `config.dmarc?.adminUrl ?? null`.
 
 ### 6.6 Runner
 
-`runDmarcMonitor(ctx, opts)`: active when `config.dmarc` is defined or
+`runDmarcMonitor(ctx, opts)`: active when `isDmarcMonitorConfigured(config)` or
 `dmarcReports.estimatedDocumentCount() > 0`; otherwise `{ ran: false, reason:
 'inactive' }` and nothing else. When active: `runDmarcDnsChecks` then
 `evaluateDmarcAlerts` (same opts); return `{ ran: true }`. Added to the parallel block
 in `runner/tick.ts` with the same `.catch(console.error)` shape as its neighbours.
 
-`runDmarcDnsChecks(ctx, opts)`: domains = monitored, non-ignored. With `opts.domain`:
+`runDmarcDnsChecks(ctx, opts)`: domains = monitored, non-ignored, **with origin
+`config` or `extra`** (a domain known only from reports is never resolved: reports are
+attacker-supplied). After a run, delete `dmarcDnsChecks` docs whose `_id` is not in that
+list. Without `force` or `domain`, check at most 10 domains per run, never-checked first
+then oldest `checkedAt`; checks run with concurrency 4. With `opts.domain`:
 must be one of them (else throw `Error('domain <d> is not monitored')`), always
 checked. Otherwise per domain skip when the stored `checkedAt > now −
 dnsCheckIntervalHours` unless `force`; `dnsCheckIntervalHours === 0` and not `force` →
@@ -298,6 +333,8 @@ where `orgDomainInSet` = the organizational domain differs and is in the domain 
 Upserts `{ _id: domain, result, checkedAt: now }`. Returns the results it produced.
 
 ## 7. DNS checks (`dmarc-dns.ts`)
+
+Only the first 10 `rua` addresses are checked (authorization and MX).
 
 `ENOTFOUND` / `ENODATA` = no records. Any other error code → one `lookup_failed`
 warning for that lookup and skip what depended on it. A failed lookup never produces

@@ -6,6 +6,7 @@
 import type { DmarcAlertStateDoc } from '../models/index.js'
 import type { DmarcAlert, DmarcAlertCandidate, DmarcAlertDelivery, DmarcAlertEvent, DmarcDnsCheckResult, DmarcDnsResolver } from '../../shared/dmarc-types.js'
 import type { RunnerContext } from './index.js'
+import type { MailerConfig } from '../config.js'
 import { checkDmarcDns, lookupPtr, organizationalDomain } from './dmarc-dns.js'
 import { resolveMonitoredDomains } from './dmarc-domains.js'
 import { loadDmarcSettings } from './dmarc-settings.js'
@@ -31,6 +32,16 @@ let hookTimeoutMs = 10_000
 async function monitoredDomains(ctx: RunnerContext, settings: Awaited<ReturnType<typeof loadDmarcSettings>>['settings']) {
   const reportDomains = (await ctx.collections.dmarcReports.distinct('domain')) as string[]
   return resolveMonitoredDomains(ctx.config, settings, reportDomains)
+}
+
+/**
+ * True when the host opted in to monitoring through config: any DMARC
+ * Monitoring key (`alerts`, `reportAddress`, `extraDomains`, `ignoredDomains`,
+ * `adminUrl`) or an `onDmarcAlert` hook. The 0.20 keys `knownSources` and
+ * `retentionDays` alone do not count (plans/18 §3.8).
+ */
+export function isDmarcMonitorConfigured(config: Pick<MailerConfig, 'dmarc' | 'onDmarcAlert'>): boolean {
+  throw new Error(`not implemented: plans/18 §6.6 (${String(config)})`)
 }
 
 /**

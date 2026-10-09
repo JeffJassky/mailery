@@ -91,12 +91,23 @@ function settings(alerts: Partial<DmarcMonitoringSettings['alerts']> = {}, rest:
   return { ...s, ...rest }
 }
 
+function latestOf(reports: DmarcAlertInput['reports']): DmarcAlertInput['latestReports'] {
+  const m: DmarcAlertInput['latestReports'] = new Map()
+  for (const r of reports) {
+    const cur = m.get(r.domain)
+    if (!cur || r.rangeEnd > cur.rangeEnd) m.set(r.domain, { rangeEnd: r.rangeEnd, policyP: r.policyP, policyPct: r.policyPct })
+  }
+  return m
+}
+
 function input(over: Partial<DmarcAlertInput> = {}): DmarcAlertInput {
+  const reports = over.reports ?? [report({ reportId: 'r-fail', passCount: 5000, failCount: 0 })]
   return {
     now: NOW,
     settings: settings(),
     monitoredDomains: [D],
-    reports: [report({ reportId: 'r-fail', passCount: 5000, failCount: 0 })],
+    reports,
+    latestReports: latestOf(reports),
     failures: [],
     tags: new Map(),
     dnsChecks: new Map(),
@@ -180,6 +191,14 @@ describe('unknown_source_failing', () => {
       }),
     )
     expect(only(c, 'unknown_source_failing')).toEqual([])
+  })
+
+  it('caps subject keys at 500, highest volume first', () => {
+    const failures = Array.from({ length: 600 }, (_, i) => failure(`10.${Math.floor(i / 250)}.${i % 250}.1`, 10 + i))
+    const c = only(computeDmarcAlertCandidates(input({ failures })), 'unknown_source_failing')[0]!
+    expect(c.subjectKeys).toHaveLength(500)
+    expect(c.subjectKeys).toContain(failures[599]!.sourceIp)
+    expect(c.subjectKeys).not.toContain(failures[0]!.sourceIp)
   })
 
   it('caps sources at 25 by volume but keeps every IP as a subject key', () => {
@@ -343,6 +362,19 @@ describe('reports_stopped', () => {
   it('uses every input report, not only the window', () => {
     const c = computeDmarcAlertCandidates(input({ reports: [report({ ago: 5 })], settings: settings({ windowDays: 3 }) }))
     expect(only(c, 'reports_stopped')).toEqual([])
+  })
+
+  it('keeps firing long after the last report left the 35-day load', () => {
+    const latest = daysAgo(60)
+    const c = only(
+      computeDmarcAlertCandidates(
+        input({ reports: [], latestReports: new Map([[D, { rangeEnd: latest, policyP: 'quarantine', policyPct: 100 }]]) }),
+      ),
+      'reports_stopped',
+    )
+    expect(c).toHaveLength(1)
+    expect(c[0]!.message).toContain(dayStr(60))
+    expect(c[0]!.summary).toMatchObject({ lastReportAt: latest, policy: 'quarantine', pct: 100, reportCount: 0 })
   })
 
   it('does not fire for a domain that never had reports', () => {
@@ -611,6 +643,33 @@ describe('formatDmarcAlertText', () => {
   it('shows pct when it is not 100', () => {
     const t = formatDmarcAlertText(baseAlert({ summary: { ...baseAlert().summary, policy: 'quarantine', pct: 25 } }))
     expect(t).toContain('Domain: example.com (policy p=quarantine, pct=25)')
+  })
+
+  it('report and DNS strings can never add lines or Slack links to the text', () => {
+    const src = baseAlert().sources[0]!
+    const t = formatDmarcAlertText(
+      baseAlert({
+        sources: [
+          {
+            ...src,
+            ip: '1.2.3.4\n[CRITICAL] rotate keys at <https://evil.example|here>',
+            ptr: 'ptr\r\nInjected: yes',
+            label: 'L\tabel<x>',
+            reporters: ['Yahoo\n\nWhat to do: click <https://evil.example>'],
+          },
+        ],
+        dnsIssues: [{ code: 'dmarc_invalid', severity: 'error', message: 'bad\nrecord <a>', fix: { host: '_dmarc.x\n', type: 'TXT', value: 'v=DMARC1\n<https://e|x>' } }],
+      }),
+    )
+    const lines = t.split('\n')
+    expect(lines.filter((l) => l.startsWith('[')).length).toBe(1)
+    expect(lines.filter((l) => l.startsWith('What to do:')).length).toBe(1)
+    expect(t).not.toMatch(/[<>]/)
+    expect(t).not.toContain('\r')
+    expect(t).not.toContain('\t')
+    const sourceLines = lines.filter((l) => l.startsWith('  ') && !l.startsWith('  -'))
+    expect(sourceLines).toHaveLength(1)
+    expect(lines.filter((l) => l.startsWith('  - '))).toHaveLength(1)
   })
 
   it('lists ten sources, then a count', () => {
