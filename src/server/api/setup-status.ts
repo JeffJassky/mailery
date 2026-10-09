@@ -10,6 +10,8 @@
 import type { Mailer } from '../mailer.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { resolveSourceTags } from '../runner/dmarc.js'
+import { loadDmarcSettings } from '../runner/dmarc-settings.js'
+import { resolveMonitoredDomains } from '../runner/dmarc-domains.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 
 export type CheckSeverity = 'ok' | 'warn' | 'error'
@@ -410,7 +412,13 @@ async function checkSnds(mailer: Mailer): Promise<SetupCheck> {
 }
 
 async function checkDmarc(mailer: Mailer): Promise<SetupCheck> {
-  const dnsDocs = await mailer.collections.dmarcDnsChecks.find({ 'result.ok': false }).toArray()
+  const runnerCtx = mailer.getRunnerContext()
+  const { settings } = await loadDmarcSettings(runnerCtx)
+  const reportDomains = (await mailer.collections.dmarcReports.distinct('domain')) as string[]
+  const dnsDomains = resolveMonitoredDomains(mailer.config, settings, reportDomains)
+    .filter((d) => !d.ignored && (d.origin.includes('config') || d.origin.includes('extra')))
+    .map((d) => d.domain)
+  const dnsDocs = await mailer.collections.dmarcDnsChecks.find({ _id: { $in: dnsDomains }, 'result.ok': false }).toArray()
   if (dnsDocs.length > 0) {
     const domains = dnsDocs.map((d) => d._id).sort()
     return {

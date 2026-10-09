@@ -359,12 +359,12 @@ export function finalizeDmarcAlert(
 
 export function formatDmarcAlertText(alert: Omit<DmarcAlert, 'text'>): string {
   const s = alert.summary
-  const blocks: string[] = [`[${alert.severity.toUpperCase()}] ${alert.title}\n${alert.message}`]
+  const blocks: string[] = [`[${alert.severity.toUpperCase()}] ${cleanReportText(alert.title)}\n${cleanReportText(alert.message)}`]
 
   const pctPart = s.pct !== null && s.pct !== 100 ? `, pct=${s.pct}` : ''
   blocks.push(
     [
-      `Domain: ${alert.domain} (policy p=${s.policy ?? 'unknown'}${pctPart})`,
+      `Domain: ${alert.domain} (policy p=${s.policy === null ? 'unknown' : cleanReportText(s.policy)}${pctPart})`,
       `Last ${s.windowDays}d: ${num(s.totalMessages)} messages, ${s.alignmentRate === null ? 'n/a' : `${pct1(s.alignmentRate)}%`} passing, ${num(s.reportCount)} reports`,
     ].join('\n'),
   )
@@ -376,7 +376,7 @@ export function formatDmarcAlertText(alert: Omit<DmarcAlert, 'text'>): string {
       const reporters = src.reporters.length > 0 ? src.reporters.map((r) => cleanReportText(r)).join(', ') : 'unknown'
       const ptr = src.ptr ? cleanReportText(src.ptr) : 'no reverse DNS'
       lines.push(
-        `  ${cleanReportText(src.ip, 64)} (${ptr})${label} — ${num(src.messages)} msgs, DKIM ${src.dkimResult}, SPF ${src.spfResult}, reported by ${reporters}`,
+        `  ${cleanReportText(src.ip, 64)} (${ptr})${label} — ${num(src.messages)} msgs, DKIM ${cleanReportText(src.dkimResult)}, SPF ${cleanReportText(src.spfResult)}, reported by ${reporters}`,
       )
     }
     if (alert.sources.length > 10) lines.push(`  …and ${alert.sources.length - 10} more`)
