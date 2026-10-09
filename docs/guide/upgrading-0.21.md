@@ -51,7 +51,7 @@ db.mailer_sends.createIndex(
 
 ## DMARC Monitoring
 
-DMARC Monitoring is off for hosts with no `dmarc` config and no ingested reports: no DNS lookups, no alert reads, nothing on the tick. Setting `dmarc`, or ingesting a report by upload, turns it on. Three collections are created automatically by index sync on init: `mailer_dmarc_alerts`, `mailer_dmarc_settings` and `mailer_dmarc_dns_checks`. Reports ingested earlier have no `via` field and show as unknown. There is nothing to migrate. Setup: [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
+DMARC Monitoring stays idle unless a 0.21 DMARC key (`dmarc.alerts`, `reportAddress`, `extraDomains`, `ignoredDomains` or `adminUrl`) or `onDmarcAlert` is set, or a report has been ingested. The 0.20 keys `knownSources` and `retentionDays` alone do not turn it on. An idle host does no DNS lookups and no alert reads, and one `estimatedDocumentCount` per tick. Setting one of those keys, or ingesting a report, turns it on. Three collections are created automatically by index sync on init: `mailer_dmarc_alerts`, `mailer_dmarc_settings` and `mailer_dmarc_dns_checks`. Reports ingested earlier have no `via` field and show as unknown. There is nothing to migrate. Setup: [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
 
 ## Rolling back to 0.20
 
