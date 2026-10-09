@@ -13,6 +13,7 @@ import { createTestMailer, type TestMailerHarness } from '../../src/testing/inde
 import { runTick } from '../../src/server/runner/index.js'
 import {
   _resetDmarcMonitorThrottle,
+  _setDmarcHookTimeoutMs,
   evaluateDmarcAlerts,
   runDmarcDnsChecks,
   runDmarcMonitor,
@@ -102,7 +103,7 @@ async function clearAll(H: TestMailerHarness) {
 
 let H1: TestMailerHarness
 const fired: DmarcAlert[] = []
-let hookMode: 'ok' | 'throw' | 'reject' | 'slow' = 'ok'
+let hookMode: 'ok' | 'throw' | 'reject' | 'slow' | 'hang' = 'ok'
 
 beforeAll(async () => {
   H1 = await createTestMailer({
@@ -111,6 +112,7 @@ beforeAll(async () => {
         if (hookMode === 'throw') throw new Error('slack is down')
         if (hookMode === 'reject') return Promise.reject(new Error('webhook 500'))
         if (hookMode === 'slow') await new Promise((r) => setTimeout(r, 50))
+        if (hookMode === 'hang') await new Promise(() => {})
         fired.push(a)
       },
     },
@@ -273,6 +275,21 @@ describe('alert lifecycle', () => {
     await evalAt(0)
     const state = (await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!
     expect(state.lastDelivery).toMatchObject({ outcome: 'failed', error: 'webhook 500' })
+  })
+
+  it('a hook that never settles times out as failed instead of stalling the run', async () => {
+    hookMode = 'hang'
+    _setDmarcHookTimeoutMs(50)
+    try {
+      await seedReport(H1)
+      await seedFailure(H1, '198.51.100.1', 50)
+      const res = await evalAt(0)
+      expect(res.ran).toBe(true)
+      const state = (await H1.mailer.collections.dmarcAlerts.findOne({ _id: ID_UNKNOWN }))!
+      expect(state.lastDelivery).toMatchObject({ outcome: 'failed', error: 'onDmarcAlert timed out after 50ms' })
+    } finally {
+      _setDmarcHookTimeoutMs(10_000)
+    }
   })
 
   it('an async hook is awaited before delivery is recorded', async () => {

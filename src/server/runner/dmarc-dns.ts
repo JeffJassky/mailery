@@ -2,7 +2,7 @@
  * DMARC DNS verification and reverse DNS. Spec: plans/18-dmarc-monitoring.md §7.
  */
 
-import { resolveMx, resolveTxt, reverse } from 'node:dns/promises'
+import { Resolver } from 'node:dns/promises'
 
 import psl from 'psl'
 
@@ -14,10 +14,13 @@ import type {
   ParsedDmarcRecord,
 } from '../../shared/dmarc-types.js'
 
+// Bounded so a dead resolver cannot hold up the runner tick that calls this.
+const systemResolver = new Resolver({ timeout: 3000, tries: 2 })
+
 export const defaultDmarcDnsResolver: DmarcDnsResolver = {
-  resolveTxt: (host) => resolveTxt(host),
-  resolveMx: (host) => resolveMx(host),
-  reverse: (ip) => reverse(ip),
+  resolveTxt: (host) => systemResolver.resolveTxt(host),
+  resolveMx: (host) => systemResolver.resolveMx(host),
+  reverse: (ip) => systemResolver.reverse(ip),
 }
 
 /** Registrable domain via `psl`: `news.example.co.uk` → `example.co.uk`. Lowercased. */

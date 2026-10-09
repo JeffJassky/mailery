@@ -25,6 +25,8 @@ const EVAL_INTERVAL_MS = HOUR
 const SOURCE_KINDS = new Set<string>(['unknown_source_failing', 'known_source_failing'])
 
 let _lastEvalAt = 0
+// The tick awaits the monitor, so a host hook that never settles must not stall sending.
+let hookTimeoutMs = 10_000
 
 async function monitoredDomains(ctx: RunnerContext, settings: Awaited<ReturnType<typeof loadDmarcSettings>>['settings']) {
   const reportDomains = (await ctx.collections.dmarcReports.distinct('domain')) as string[]
@@ -248,7 +250,15 @@ export async function fireDmarcAlert(ctx: RunnerContext, alert: DmarcAlert): Pro
     delivery = { outcome: 'no_handler', at: new Date() }
   } else {
     try {
-      await Promise.resolve().then(() => hook(alert))
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`onDmarcAlert timed out after ${hookTimeoutMs}ms`)), hookTimeoutMs)
+      })
+      try {
+        await Promise.race([Promise.resolve().then(() => hook(alert)), timeout])
+      } finally {
+        clearTimeout(timer)
+      }
       delivery = { outcome: 'delivered', at: new Date() }
     } catch (err) {
       delivery = { outcome: 'failed', at: new Date(), error: err instanceof Error ? err.message : String(err) }
@@ -287,6 +297,11 @@ export async function sendTestDmarcAlert(
   const alert = buildTestDmarcAlert(domain, now, ctx.config.dmarc?.adminUrl ?? null)
   const delivery = await fireDmarcAlert(ctx, alert)
   return { delivery, alert }
+}
+
+/** Tests only: shorten the hook timeout. */
+export function _setDmarcHookTimeoutMs(ms: number): void {
+  hookTimeoutMs = ms
 }
 
 /** Tests only: forget the process-local evaluation throttle. */
