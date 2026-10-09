@@ -4,6 +4,8 @@
 
 import psl from 'psl'
 
+import { DOMAIN_PATTERN } from './dmarc.js'
+
 import type { MailerConfig } from '../config.js'
 import type { DmarcMonitoredDomain, DmarcMonitoringSettings } from '../../shared/dmarc-types.js'
 
@@ -46,7 +48,8 @@ export function resolveMonitoredDomains(
   }
   for (const d of deriveSenderDomains(config)) add(d, 'config')
   for (const d of settings.extraDomains) add(d, 'extra')
-  for (const d of reportDomains) add(d, 'reports')
+  // Rows stored before 0.21 validated nothing; never let one become a monitored domain.
+  for (const d of reportDomains) if (DOMAIN_PATTERN.test(d.trim().toLowerCase())) add(d, 'reports')
 
   const ignored = new Set(settings.ignoredDomains.map((d) => d.trim().toLowerCase()))
   const order = ['config', 'extra', 'reports'] as const

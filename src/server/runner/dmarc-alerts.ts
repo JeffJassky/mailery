@@ -364,7 +364,7 @@ export function formatDmarcAlertText(alert: Omit<DmarcAlert, 'text'>): string {
   const pctPart = s.pct !== null && s.pct !== 100 ? `, pct=${s.pct}` : ''
   blocks.push(
     [
-      `Domain: ${alert.domain} (policy p=${s.policy === null ? 'unknown' : cleanReportText(s.policy)}${pctPart})`,
+      `Domain: ${cleanReportText(alert.domain)} (policy p=${s.policy === null ? 'unknown' : cleanReportText(s.policy)}${pctPart})`,
       `Last ${s.windowDays}d: ${num(s.totalMessages)} messages, ${s.alignmentRate === null ? 'n/a' : `${pct1(s.alignmentRate)}%`} passing, ${num(s.reportCount)} reports`,
     ].join('\n'),
   )

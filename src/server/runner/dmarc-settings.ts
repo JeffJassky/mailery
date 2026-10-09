@@ -11,6 +11,7 @@ import {
   type DmarcSettingsPatch,
 } from '../../shared/dmarc-types.js'
 import type { RunnerContext } from './index.js'
+import { DOMAIN_PATTERN } from './dmarc.js'
 
 export const DMARC_SETTINGS_DEFAULTS: DmarcMonitoringSettings = {
   alerts: {
@@ -34,7 +35,7 @@ const ALERT_KEYS = Object.keys(DMARC_SETTINGS_DEFAULTS.alerts) as Array<keyof Dm
 const TOP_KEYS = ['alerts', 'reportAddress', 'extraDomains', 'ignoredDomains']
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
-const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/
+const DOMAIN_RE = DOMAIN_PATTERN
 const ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_DOMAINS = 100
 

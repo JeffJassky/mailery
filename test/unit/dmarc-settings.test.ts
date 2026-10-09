@@ -93,6 +93,10 @@ describe('validateDmarcSettingsPatch', () => {
     expect(ok({ alerts: { alignmentMinRate: 1, windowDays: 1, realertAfterHours: 8760 } })).toBeTruthy()
   })
 
+  it('accepts punycode TLDs', () => {
+    expect(ok({ extraDomains: ['xn--80ak6aa92e.xn--p1ai'] })).toEqual({ extraDomains: ['xn--80ak6aa92e.xn--p1ai'] })
+  })
+
   it('lowercases domains on the way in', () => {
     expect(ok({ extraDomains: ['News.Example.COM'] })).toEqual({ extraDomains: ['news.example.com'] })
   })

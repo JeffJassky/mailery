@@ -60,6 +60,11 @@ describe('resolveMonitoredDomains', () => {
     expect(out).toEqual([{ domain: 'example.com', origin: ['config'], ignored: true }])
   })
 
+  it('drops report domains that are not valid domains (rows stored before 0.21 were unvalidated)', () => {
+    const out = resolveMonitoredDomains({}, settings(), ['ok.example', 'example.com\n[CRITICAL] <https://evil|x>', 'xn--80ak6aa92e.xn--p1ai'])
+    expect(out.map((d) => d.domain)).toEqual(['ok.example', 'xn--80ak6aa92e.xn--p1ai'])
+  })
+
   it('an ignored domain that appears nowhere else is not added', () => {
     expect(resolveMonitoredDomains({}, settings({ ignoredDomains: ['x.com'] }), [])).toEqual([])
   })

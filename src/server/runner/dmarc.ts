@@ -278,7 +278,7 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
   }
 }
 
-const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/
+export const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,}|xn--[a-z0-9-]{1,59})$/
 const AUTH_RESULTS = new Set<string>(['pass', 'fail', 'softfail', 'neutral', 'temperror', 'permerror', 'none', 'unknown'])
 
 function authResult(v: unknown): DmarcAuthResult {

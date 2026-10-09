@@ -156,17 +156,18 @@ export async function evaluateDmarcAlerts(
   }
   // Per-domain top rows keep one noisy domain from starving the others; ignored-IP rows
   // are loaded uncapped because the alignment_drop discount needs every one of them.
+  const loadDomain = (domain: string) =>
+    ctx.collections.dmarcFailures
+      .find({ domain, receivedAt: failureSince }, { projection: failureProjection })
+      .sort({ count: -1 })
+      .limit(5000)
+      .toArray()
   const loadFailures = async () => {
     const ignoredIps = Array.from(tags.values()).filter((t) => t.ignored).map((t) => t.ip)
-    const perDomain = await Promise.all(
-      monitored.map((domain) =>
-        ctx.collections.dmarcFailures
-          .find({ domain, receivedAt: failureSince }, { projection: failureProjection })
-          .sort({ count: -1 })
-          .limit(5000)
-          .toArray(),
-      ),
-    )
+    const perDomain: Array<Awaited<ReturnType<typeof loadDomain>>> = []
+    for (let i = 0; i < monitored.length; i += 8) {
+      perDomain.push(...(await Promise.all(monitored.slice(i, i + 8).map(loadDomain))))
+    }
     const ignoredRows =
       ignoredIps.length > 0
         ? await ctx.collections.dmarcFailures
