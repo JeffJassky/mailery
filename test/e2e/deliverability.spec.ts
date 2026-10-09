@@ -80,3 +80,30 @@ test('Health screen Resume button is hidden when no buckets are tripped', async 
   const resumeAll = page.getByRole('button', { name: /resume all/i })
   await expect(resumeAll).toHaveCount(0)
 })
+
+// plans/18-dmarc-monitoring.md PR 4. The e2e server mounts no inbound route and
+// sets no onDmarcAlert, so every setup step that depends on them shows its
+// "not yet" state.
+test('DMARC Monitoring screen: setup, alerts, settings, test alert', async ({ page }) => {
+  await page.goto('/admin/mailer/')
+  await page.locator('.sidebar-link', { hasText: /^Health$/ }).first().click()
+  await page.getByRole('button', { name: 'Open DMARC Monitoring' }).click()
+  await expect(page.getByRole('heading', { name: 'DMARC Monitoring' })).toBeVisible()
+
+  await expect(page.getByText('Setup', { exact: true })).toBeVisible()
+  await expect(page.getByText('Alerts', { exact: true })).toBeVisible()
+  await expect(page.getByText('Settings', { exact: true })).toBeVisible()
+  await expect(page.getByText(/dmarcInbound/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Upload report(s)' })).toBeVisible()
+  await expect(page.getByText('No open alerts.')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Send test alert' }).click()
+  await expect(page.getByText('No onDmarcAlert handler is configured')).toBeVisible()
+
+  await page.getByLabel('Lookback window (days)').fill('14')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page.getByRole('button', { name: 'Reset to defaults' })).toBeVisible()
+  await page.reload()
+  await page.locator('.sidebar-link', { hasText: /^DMARC Monitoring$/ }).first().click()
+  await expect(page.getByLabel('Lookback window (days)')).toHaveValue('14')
+})

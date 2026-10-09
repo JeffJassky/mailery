@@ -52,6 +52,29 @@ export type {
   InboundAttachment,
   InboundParser,
 } from './api/dmarc-inbound.js'
+export { DMARC_ALERT_KINDS } from '../shared/dmarc-types.js'
+export type {
+  DmarcAlert,
+  DmarcAlertCandidate,
+  DmarcAlertDelivery,
+  DmarcAlertDomainSummary,
+  DmarcAlertEvent,
+  DmarcAlertKind,
+  DmarcAlertSettings,
+  DmarcAlertSeverity,
+  DmarcAlertSource,
+  DmarcAlertStateView,
+  DmarcDnsCheckResult,
+  DmarcDnsIssue,
+  DmarcDnsIssueCode,
+  DmarcDnsResolver,
+  DmarcInboundState,
+  DmarcMonitoredDomain,
+  DmarcMonitoringPayload,
+  DmarcMonitoringSettings,
+  DmarcSettingsPatch,
+  ParsedDmarcRecord,
+} from '../shared/dmarc-types.js'
 export type { RouteLogger } from './api/wrap.js'
 
 // Templates (host apps may want compile + render directly for previews)

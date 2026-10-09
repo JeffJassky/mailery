@@ -9,6 +9,7 @@
 import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../shared/program-board.js'
 import { simulateProgram } from './runner/programs/simulate.js'
 import type { Db, ClientSession, MongoClient, ObjectId } from 'mongodb'
+import type { DmarcInboundState } from '../shared/dmarc-types.js'
 import { ObjectId as ObjectIdCtor } from 'mongodb'
 
 import type {
@@ -98,6 +99,8 @@ export class Mailer {
   readonly queues: Queues
   readonly config: ResolvedConfig
   readonly events: EventRegistry
+  /** Set by `createPublicRouter` when the inbound DMARC route mounts. Read by the admin UI. */
+  dmarcInboundState: DmarcInboundState | null = null
 
   private queueDriver: QueueDriver
   /** The client `Mailer.init` opened from `config.mongo`; closed by `stop()`. Null when the host gave `db`. */

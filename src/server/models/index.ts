@@ -29,6 +29,14 @@ import type {
   ProgramDecisionReason,
 } from '../../shared/enums.js'
 import type { FlowStep, SegmentDefinition, ProgramDefinition, Facts } from '../../shared/types.js'
+import type {
+  DmarcAlert,
+  DmarcAlertDelivery,
+  DmarcAlertKind,
+  DmarcAlertSeverity,
+  DmarcDnsCheckResult,
+  DmarcSettingsPatch,
+} from '../../shared/dmarc-types.js'
 
 // ---------------------------------------------------------------------------
 // Document interfaces (per collection)
@@ -626,8 +634,8 @@ export interface MailTesterScoreDoc {
   expiresAt: Date
 }
 
-export type DmarcPolicy = 'none' | 'quarantine' | 'reject'
-export type DmarcAuthResult = 'pass' | 'fail' | 'softfail' | 'neutral' | 'temperror' | 'permerror' | 'none' | 'unknown'
+export type { DmarcPolicy, DmarcAuthResult } from '../../shared/dmarc-types.js'
+import type { DmarcPolicy, DmarcAuthResult } from '../../shared/dmarc-types.js'
 
 /**
  * One DMARC RUA aggregate report. Receivers (Google, Yahoo, Microsoft, etc.)
@@ -655,6 +663,8 @@ export interface DmarcReportDoc {
   passCount: number
   failCount: number
   receivedAt: Date
+  /** How the report arrived. Absent on rows ingested before 0.21. */
+  via?: 'upload' | 'inbound'
 }
 
 /**
@@ -911,6 +921,44 @@ export interface ProgramDecisionDoc {
 // Collection factory
 // ---------------------------------------------------------------------------
 
+/**
+ * One DMARC Monitoring alert, keyed by `DmarcAlert.id`. An alert opens,
+ * may be re-fired as `updated` or `reminder`, and resolves when its
+ * condition is no longer detected. Fire decisions are guarded updates on
+ * `lastFiredAt`, so two instances ticking together fire once.
+ */
+export interface DmarcAlertStateDoc {
+  _id: string
+  kind: DmarcAlertKind
+  domain: string
+  status: 'open' | 'resolved'
+  severity: DmarcAlertSeverity
+  title: string
+  subjectKeys: string[]
+  firstDetectedAt: Date
+  lastDetectedAt: Date
+  lastFiredAt: Date
+  fireCount: number
+  resolvedAt: Date | null
+  lastAlert: DmarcAlert
+  lastDelivery: DmarcAlertDelivery | null
+}
+
+/** Settings saved from the admin UI. One document; layered over `MailerConfig.dmarc`. */
+export interface DmarcSettingsDoc {
+  _id: 'settings'
+  patch: DmarcSettingsPatch
+  updatedBy: string
+  updatedAt: Date
+}
+
+/** Latest DNS check per monitored domain. */
+export interface DmarcDnsCheckDoc {
+  _id: string
+  result: DmarcDnsCheckResult
+  checkedAt: Date
+}
+
 export interface Collections {
   subscriptions: Collection<SubscriptionDoc>
   leads: Collection<LeadDoc>
@@ -940,6 +988,9 @@ export interface Collections {
   programRuns: Collection<ProgramRunDoc>
   programDecisions: Collection<ProgramDecisionDoc>
   contactLocks: Collection<ContactLockDoc>
+  dmarcAlerts: Collection<DmarcAlertStateDoc>
+  dmarcSettings: Collection<DmarcSettingsDoc>
+  dmarcDnsChecks: Collection<DmarcDnsCheckDoc>
 }
 
 export function getCollections(db: Db, prefix = 'mailer_'): Collections {
@@ -972,6 +1023,9 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
     programRuns: db.collection<ProgramRunDoc>(`${prefix}program_runs`),
     programDecisions: db.collection<ProgramDecisionDoc>(`${prefix}program_decisions`),
     contactLocks: db.collection<ContactLockDoc>(`${prefix}contact_locks`),
+    dmarcAlerts: db.collection<DmarcAlertStateDoc>(`${prefix}dmarc_alerts`),
+    dmarcSettings: db.collection<DmarcSettingsDoc>(`${prefix}dmarc_settings`),
+    dmarcDnsChecks: db.collection<DmarcDnsCheckDoc>(`${prefix}dmarc_dns_checks`),
   }
 }
 
@@ -1148,6 +1202,10 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_', opts: EnsureInde
     ]),
     c.dmarcSourceTags.createIndexes([
       { key: { ip: 1 }, unique: true },
+    ]),
+    c.dmarcAlerts.createIndexes([
+      { key: { status: 1, lastDetectedAt: -1 } },
+      { key: { domain: 1 } },
     ]),
     c.mailTesterScores.createIndexes([
       { key: { contentKey: 1 }, unique: true },

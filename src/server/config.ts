@@ -15,6 +15,7 @@ import type {
 import type { QueueDriverConfig } from './queues/types.js'
 import type { SenderDomainRegistry } from './templates/sender-domain.js'
 import type { VarsAdapter } from './adapters/vars.js'
+import type { DmarcAlert, DmarcAlertSettings } from '../shared/dmarc-types.js'
 
 export type { SenderDomainConfig, SenderDomainRegistry } from './templates/sender-domain.js'
 
@@ -112,6 +113,20 @@ export interface DmarcConfig {
    * trimmed by the daily tick to keep the collection bounded.
    */
   retentionDays?: number
+  /**
+   * Alert thresholds. Baseline only: values saved in the admin UI
+   * (DMARC Monitoring → Settings) override these. Defaults in
+   * `DMARC_SETTINGS_DEFAULTS`.
+   */
+  alerts?: Partial<DmarcAlertSettings>
+  /** The rua= mailbox reports are sent to. Checked against each domain's DMARC record. */
+  reportAddress?: string
+  /** Domains to monitor in addition to `senderDomains` and the From defaults. */
+  extraDomains?: string[]
+  /** Domains to leave out of DNS checks and alerts. */
+  ignoredDomains?: string[]
+  /** Absolute URL of the admin UI's DMARC screen; copied into every alert. */
+  adminUrl?: string
 }
 
 export interface SndsConfig {
@@ -453,6 +468,15 @@ export interface MailerConfig {
     reason: { code: string; message: string; at: Date; details?: Record<string, unknown> }
     heldSends: number
   }) => Promise<void> | void
+  /**
+   * DMARC Monitoring alerts: unknown or known senders failing, pass rate
+   * dropping, reports stopping, a domain ready for a stricter policy, DNS
+   * problems. Fires on `opened`, `updated`, `reminder` and `resolved`; one
+   * call per domain and kind, never per IP. `alert.text` is ready to post
+   * to Slack or email as is. Failures are swallowed and recorded on the
+   * alert's `lastDelivery`.
+   */
+  onDmarcAlert?: (alert: DmarcAlert) => Promise<void> | void
   handlebarsHelpers?: Record<string, Handlebars.HelperDelegate>
 
   // ---- 0.21: categories, contact policy, programs ---------------------------

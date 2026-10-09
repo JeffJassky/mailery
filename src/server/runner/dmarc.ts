@@ -482,6 +482,8 @@ export interface ProgressionInput {
   ignoredSourceIps: Set<string>
   currentPolicy: 'none' | 'quarantine' | 'reject' | null
   currentPct: number | null
+  /** Evaluation time. Defaults to the clock; the alert rules pass their own. */
+  now?: Date
 }
 
 export function suggestPolicyProgression(input: ProgressionInput): DomainProgression['suggested'] {
@@ -489,7 +491,7 @@ export function suggestPolicyProgression(input: ProgressionInput): DomainProgres
 
   if (currentPolicy === 'reject') return null
 
-  const since30 = Date.now() - 30 * 86_400_000
+  const since30 = (input.now?.getTime() ?? Date.now()) - 30 * 86_400_000
   const recentReports = reports.filter((r) => r.rangeEnd.getTime() >= since30)
   const totalMsgs = recentReports.reduce((acc, r) => acc + r.passCount + r.failCount, 0)
   const totalPass = recentReports.reduce((acc, r) => acc + r.passCount, 0)

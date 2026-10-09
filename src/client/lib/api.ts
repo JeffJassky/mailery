@@ -1,6 +1,24 @@
 import type { FactDecl } from '../../shared/types.js'
 import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../../shared/program-board.js'
 export type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource }
+import type {
+  DmarcAlert as ServerDmarcAlert,
+  DmarcAlertDelivery as ServerDmarcAlertDelivery,
+  DmarcAlertKind,
+  DmarcAlertStateView as ServerDmarcAlertStateView,
+  DmarcDnsCheckResult as ServerDmarcDnsCheckResult,
+  DmarcDnsIssue,
+  DmarcMonitoringPayload as ServerDmarcMonitoringPayload,
+  DmarcMonitoringSettings,
+  DmarcSettingsPatch,
+  Wire,
+} from '../../shared/dmarc-types.js'
+export type { DmarcAlertKind, DmarcDnsIssue, DmarcMonitoringSettings, DmarcSettingsPatch }
+export type DmarcAlert = Wire<ServerDmarcAlert>
+export type DmarcAlertDelivery = Wire<ServerDmarcAlertDelivery>
+export type DmarcAlertStateView = Wire<ServerDmarcAlertStateView>
+export type DmarcDnsCheckResult = Wire<ServerDmarcDnsCheckResult>
+export type DmarcMonitoringPayload = Wire<ServerDmarcMonitoringPayload>
 /**
  * Typed fetch wrappers against /admin/mailer/api/*. Used by every screen that
  * needs live data. No mock fallback — screens render their own loading /
@@ -231,6 +249,27 @@ export const api = {
     json<{ ok: boolean; deleted: number }>(`/dmarc/sources/${encodeURIComponent(ip)}`, {
       method: 'DELETE',
     }),
+
+  // DMARC Monitoring
+  dmarcMonitoring: () => json<DmarcMonitoringPayload>('/dmarc/monitoring'),
+  saveDmarcSettings: (patch: DmarcSettingsPatch) =>
+    json<{ settings: DmarcMonitoringSettings }>('/dmarc/settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  resetDmarcSettings: () =>
+    json<{ settings: DmarcMonitoringSettings }>('/dmarc/settings', { method: 'DELETE' }),
+  checkDmarcDns: (domain?: string) =>
+    json<{ results: DmarcDnsCheckResult[] }>('/dmarc/dns/check', {
+      method: 'POST',
+      body: JSON.stringify(domain ? { domain } : {}),
+    }),
+  evaluateDmarcAlerts: () =>
+    json<{ ran: boolean; reason?: string; fired: number; open: number }>('/dmarc/alerts/evaluate', {
+      method: 'POST',
+    }),
+  sendTestDmarcAlert: () =>
+    json<{ delivery: DmarcAlertDelivery; alert: DmarcAlert }>('/dmarc/alerts/test', { method: 'POST' }),
 }
 
 export type CheckSeverity = 'ok' | 'warn' | 'error'
@@ -406,6 +445,8 @@ export interface DmarcSourceRow {
   label: string | null
   ignored: boolean
   tagSource: 'config' | 'db' | null
+  /** Reverse DNS name of `sourceIp`, or null when it has none or the lookup timed out. */
+  ptr: string | null
 }
 
 export interface DmarcReportRow {
@@ -421,6 +462,7 @@ export interface DmarcReportRow {
   passCount: number
   failCount: number
   receivedAt: string
+  via?: 'upload' | 'inbound'
 }
 
 export interface DmarcPayload {

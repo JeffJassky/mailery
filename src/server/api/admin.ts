@@ -42,6 +42,7 @@ import { runDnsblChecks } from '../runner/dnsbl.js'
 import { runPostmasterPull } from '../runner/postmaster.js'
 import { runSndsPull } from '../runner/snds.js'
 import { ingestDmarcAttachment, resolveSourceTags, suggestPolicyProgression } from '../runner/dmarc.js'
+import type { DmarcDnsResolver } from '../../shared/dmarc-types.js'
 import { computeListHygiene } from '../runner/hygiene.js'
 import {
   createMailTesterClient,
@@ -83,6 +84,8 @@ export interface AdminRouterOptions {
    * client is created from `mailer.config.mailTester`.
    */
   mailTesterClient?: MailTesterClient
+  /** Inject a DNS resolver for DMARC checks and reverse DNS (tests use a fake). */
+  dmarcDnsResolver?: DmarcDnsResolver
 }
 
 export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {

@@ -58,6 +58,16 @@ export interface SetupDmarcResult {
   recordHost: string
   /** Whether DNS was actually pushed (vs printed for manual publish). */
   cloudflarePushed: 'created' | 'updated' | 'noop' | 'skipped'
+  /**
+   * RFC 7489 §7.1 authorization records, one per rua mailbox whose
+   * organizational domain differs from `domain`. Empty when every mailbox is
+   * on the same organizational domain.
+   */
+  authRecords: Array<{
+    host: string
+    value: 'v=DMARC1'
+    cloudflarePushed: 'created' | 'updated' | 'noop' | 'skipped' | 'zone_not_found'
+  }>
 }
 
 export async function setupDmarc(opts: SetupDmarcOpts): Promise<SetupDmarcResult> {
@@ -143,7 +153,7 @@ export async function setupDmarc(opts: SetupDmarcOpts): Promise<SetupDmarcResult
     warn('yet fully aligned, mail will be quarantined or rejected starting immediately. Consider --pct 10 first.')
   }
 
-  return { domain: opts.domain, recordValue, recordHost, cloudflarePushed }
+  return { domain: opts.domain, recordValue, recordHost, cloudflarePushed, authRecords: [] }
 }
 
 // ---------------------------------------------------------------------------
