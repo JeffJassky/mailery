@@ -117,9 +117,9 @@ export async function setupDmarc(opts: SetupDmarcOpts): Promise<SetupDmarcResult
   info(`  ${recordHost} TXT "${recordValue}"`)
 
   let cloudflarePushed: SetupDmarcResult['cloudflarePushed'] = 'skipped'
+  const cf = opts.cloudflare ? cloudflareClient(env.CLOUDFLARE_API_TOKEN!, f) : null
 
-  if (opts.cloudflare) {
-    const cf = cloudflareClient(env.CLOUDFLARE_API_TOKEN!, f)
+  if (cf) {
     const zoneName = opts.cloudflareZone ?? inferZone(opts.domain)
     const zoneId = await cf.findZoneId(zoneName)
     if (!zoneId) {
@@ -139,11 +139,37 @@ export async function setupDmarc(opts: SetupDmarcOpts): Promise<SetupDmarcResult
     info(`    Value: ${recordValue}`)
   }
 
+  const authRecords: SetupDmarcResult['authRecords'] = []
+  const ownOrg = inferZone(opts.domain.toLowerCase())
+  const mailboxDomains = [...new Set(ruaMailboxes.map((m) => m.slice(m.lastIndexOf('@') + 1).toLowerCase()))]
+  for (const mailboxDomain of mailboxDomains) {
+    if (inferZone(mailboxDomain) === ownOrg) continue
+    const host = `${opts.domain}._report._dmarc.${mailboxDomain}`
+    info('')
+    info('External report authorization record:')
+    info(`    Host: ${host}`)
+    info(`    Type: TXT`)
+    info(`    Value: v=DMARC1`)
+    info('Receivers only send reports to a mailbox on another domain if that domain publishes this record.')
+    let pushed: SetupDmarcResult['authRecords'][number]['cloudflarePushed'] = 'skipped'
+    if (cf) {
+      const zoneId = await cf.findZoneId(inferZone(mailboxDomain))
+      if (zoneId) {
+        pushed = await cf.upsertRecord(zoneId, { type: 'TXT', host, data: 'v=DMARC1' })
+        info(`Cloudflare ${pushed}: ${host} TXT`)
+      } else {
+        pushed = 'zone_not_found'
+        warn(`Zone for ${mailboxDomain} is not on Cloudflare; publish ${host} TXT "v=DMARC1" at that domain's DNS provider.`)
+      }
+    }
+    authRecords.push({ host, value: 'v=DMARC1', cloudflarePushed: pushed })
+  }
+
   if ((opts.policy ?? 'none') === 'none') {
     info('')
     info('Recommended next steps:')
     info('  1. Wait 1-2 weeks while RUA reports arrive at ' + opts.ruaMailbox)
-    info('  2. Upload reports to mailery (Health → DMARC RUA reports → Upload)')
+    info('  2. Reports arrive on their own once the inbound webhook is set up (DMARC Monitoring → Setup in the admin UI); until then, upload them there.')
     info('  3. Tag known sources in the admin UI so untagged senders surface')
     info('  4. Once all your legitimate sources align, tighten to p=quarantine pct=10, then ramp pct, then p=reject')
   }
@@ -153,7 +179,7 @@ export async function setupDmarc(opts: SetupDmarcOpts): Promise<SetupDmarcResult
     warn('yet fully aligned, mail will be quarantined or rejected starting immediately. Consider --pct 10 first.')
   }
 
-  return { domain: opts.domain, recordValue, recordHost, cloudflarePushed, authRecords: [] }
+  return { domain: opts.domain, recordValue, recordHost, cloudflarePushed, authRecords }
 }
 
 // ---------------------------------------------------------------------------

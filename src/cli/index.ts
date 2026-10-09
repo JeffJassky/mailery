@@ -222,6 +222,10 @@ Options:
   --cloudflare             Publish TXT record via Cloudflare API
   --cloudflare-zone <z>    Override inferred zone
 
+If a --rua-mailbox is on a different organizational domain than --domain, an
+external report authorization record (<domain>._report._dmarc.<mailbox-domain>,
+RFC 7489 §7.1) is printed, and published too with --cloudflare.
+
 Env:
   CLOUDFLARE_API_TOKEN     Required when --cloudflare is set.
 
