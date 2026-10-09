@@ -137,13 +137,27 @@ const evalAt = (hours: number, r = resolver()) =>
 const evalRace = (hours: number) => Promise.all([0, 1, 2].map((ms) => evaluateDmarcAlerts(H1.ctx, { now: new Date(at(hours).getTime() + ms), resolver: resolver(), force: true })))
 
 describe('activation gate', () => {
-  it('with no dmarc config and no reports, the monitor does nothing at all', async () => {
+  // H0: a 0.20-style host — only the 0.20 `dmarc` keys, no hook, no reports.
+  let H0: TestMailerHarness
+  beforeAll(async () => {
+    H0 = await createTestMailer({ config: { dmarc: { retentionDays: 30, knownSources: [{ ip: '149.72.1.1', label: 'SendGrid' }] } } })
+  }, 120_000)
+  afterAll(async () => {
+    if (H0) await H0.stop()
+  })
+
+  it('a host with only 0.20 dmarc keys and no reports does nothing at all', async () => {
     const r = resolver()
-    const out = await runDmarcMonitor(H1.ctx, { now: T0, resolver: r, force: true })
+    const out = await runDmarcMonitor(H0.ctx, { now: T0, resolver: r, force: true })
     expect(out).toEqual({ ran: false, reason: 'inactive' })
     expect(r.calls).toEqual([])
-    expect(await H1.mailer.collections.dmarcDnsChecks.countDocuments()).toBe(0)
-    expect(await H1.mailer.collections.dmarcAlerts.countDocuments()).toBe(0)
+    expect(await H0.mailer.collections.dmarcDnsChecks.countDocuments()).toBe(0)
+    expect(await H0.mailer.collections.dmarcAlerts.countDocuments()).toBe(0)
+  })
+
+  it('an onDmarcAlert hook alone opts in', async () => {
+    const out = await runDmarcMonitor(H1.ctx, { now: T0, resolver: resolver(), force: true })
+    expect(out.ran).toBe(true)
   })
 
   it('one ingested report activates it: DNS checks run and alerts evaluate', async () => {
@@ -323,7 +337,7 @@ describe('alert lifecycle', () => {
     await seedReport(H1, { daysAgo: 10 })
     await evalAt(0)
     await evalAt(24 * 40)
-    expect(fired.map((a) => `${a.kind}:${a.event}`)).toEqual(['reports_stopped:opened'])
+    expect(fired.map((a) => `${a.kind}:${a.event}`)).toEqual(['reports_stopped:opened', 'reports_stopped:reminder'])
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'reports_stopped|example.com|' }))!.status).toBe('open')
   })
 
@@ -356,7 +370,7 @@ describe('alert lifecycle', () => {
   it('an alert detected after this run started is not resolved by it', async () => {
     await seedReport(H1)
     await seedOpenState(H1, 'alignment_drop|example.com|', 'alignment_drop')
-    await evalAt(-1)
+    await evalAt(-2)
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'alignment_drop|example.com|' }))!.status).toBe('open')
   })
 
@@ -439,7 +453,7 @@ async function seedOpenState(H: TestMailerHarness, id: string, kind: DmarcAlertS
   } as DmarcAlert
   await H.mailer.collections.dmarcAlerts.insertOne({
     _id: id, kind, domain: 'example.com', status: 'open', severity: 'info', title: 't', subjectKeys: [],
-    firstDetectedAt: T0, lastDetectedAt: T0, lastFiredAt: T0, fireCount: 1, resolvedAt: null, lastAlert, lastDelivery: null,
+    firstDetectedAt: at(-1), lastDetectedAt: at(-1), lastFiredAt: at(-1), fireCount: 1, resolvedAt: null, lastAlert, lastDelivery: null,
   })
 }
 
