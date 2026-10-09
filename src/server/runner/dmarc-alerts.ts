@@ -60,6 +60,7 @@ export function dmarcAlertId(kind: DmarcAlertKind, domain: string, subject: stri
 
 const DAY = 86_400_000
 const MAX_SOURCES = 25
+const MAX_SUBJECT_KEYS = 500
 
 function num(n: number): string {
   return n.toLocaleString('en-US')
@@ -157,8 +158,7 @@ export function computeDmarcAlertCandidates(input: DmarcAlertInput): DmarcAlertC
     const winRows = input.failures.filter((f) => f.domain === domain && f.day >= windowStartDay)
     const dns = input.dnsChecks.get(domain)
 
-    let newest: (typeof allReports)[number] | undefined
-    for (const r of allReports) if (!newest || r.rangeEnd.getTime() > newest.rangeEnd.getTime()) newest = r
+    const newest = input.latestReports.get(domain)
 
     const pass = winReports.reduce((n, r) => n + r.passCount, 0)
     const fail = winReports.reduce((n, r) => n + r.failCount, 0)
@@ -227,7 +227,7 @@ export function computeDmarcAlertCandidates(input: DmarcAlertInput): DmarcAlertC
             recommendation:
               "Open DMARC Monitoring and look at each IP's reverse DNS. If it is yours, fix its SPF/DKIM and tag it. If it is not, tag it as ignored and keep moving toward p=reject.",
             sources: hits.slice(0, MAX_SOURCES),
-            subjectKeys: hits.map((s) => s.ip),
+            subjectKeys: hits.slice(0, MAX_SUBJECT_KEYS).map((s) => s.ip),
             threshold: { name: 'unknownSourceMinMessages', limit, actual: sum },
           }),
         )
@@ -249,7 +249,7 @@ export function computeDmarcAlertCandidates(input: DmarcAlertInput): DmarcAlertC
             recommendation:
               'Check that the DKIM key for this sender is still published and that its sending IPs are in your SPF record. A recent DNS or provider change is the usual cause.',
             sources: hits.slice(0, MAX_SOURCES),
-            subjectKeys: hits.map((s) => s.ip),
+            subjectKeys: hits.slice(0, MAX_SUBJECT_KEYS).map((s) => s.ip),
             threshold: { name: 'knownSourceMinMessages', limit, actual: sum },
           }),
         )
