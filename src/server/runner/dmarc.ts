@@ -315,6 +315,8 @@ export interface IngestOptions {
    * than "arbitrary rows in your DMARC dashboard".
    */
   allowDomain?: (domain: string) => boolean
+  /** Provenance written on first insert. */
+  via?: 'upload' | 'inbound'
 }
 
 /**
@@ -340,7 +342,7 @@ export async function ingestDmarcAttachment(
       if (opts.allowDomain && !opts.allowDomain(parsed.report.domain)) {
         throw new Error(`DMARC report is for domain "${parsed.report.domain}", which this deployment does not send from`)
       }
-      results.push(await ingestParsedDmarcReport(ctx, parsed))
+      results.push(await ingestParsedDmarcReport(ctx, parsed, opts.via))
     } catch (err) {
       if (!firstError) firstError = err
       // Continue ingesting siblings — one malformed report in a multi-file
@@ -356,6 +358,7 @@ export async function ingestDmarcAttachment(
 export async function ingestParsedDmarcReport(
   ctx: RunnerContext,
   parsed: ParsedDmarcReport,
+  via?: 'upload' | 'inbound',
 ): Promise<IngestResult> {
   const now = new Date()
   const { report, failures } = parsed
@@ -366,7 +369,7 @@ export async function ingestParsedDmarcReport(
   // succeed.
   let duplicate = false
   try {
-    await ctx.collections.dmarcReports.insertOne({ ...report, receivedAt: now })
+    await ctx.collections.dmarcReports.insertOne({ ...report, receivedAt: now, ...(via ? { via } : {}) })
   } catch (err: any) {
     if (err?.code === 11000) {
       duplicate = true

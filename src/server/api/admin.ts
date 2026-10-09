@@ -786,7 +786,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (!file) return res.status(400).json({ error: 'no_file', message: 'expected a "file" field' })
 
       try {
-        const result = await ingestDmarcAttachment(mailer.getRunnerContext(), file.buffer, file.originalname)
+        const result = await ingestDmarcAttachment(mailer.getRunnerContext(), file.buffer, file.originalname, { via: 'upload' })
         await mailer.audit({
           actor: (req as any).actor,
           action: 'dmarc.ingest',
