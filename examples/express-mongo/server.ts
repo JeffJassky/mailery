@@ -65,6 +65,8 @@ async function main() {
     // The web process runs the routers; a separate `worker.ts` calls
     // `mailer.startWorkers()` in production.
     workerless: true,
+    // DMARC Monitoring alerts. Forward alert.text to Slack or email in a real app.
+    onDmarcAlert: (alert) => console.log(alert.text),
   })
 
   // Register the events the host will fire.
@@ -88,7 +90,14 @@ async function main() {
   app.use('/admin/mailer', requireAdmin, createAdminRouter(mailer))
 
   // Tracking + unsubscribe + webhook endpoints (reachable by recipients + provider).
-  app.use('/m', createPublicRouter(mailer))
+  // The DMARC inbound route exists only when MAILERY_DMARC_SECRET is set.
+  app.use(
+    '/m',
+    createPublicRouter(
+      mailer,
+      process.env.MAILERY_DMARC_SECRET ? { dmarcInbound: { secret: process.env.MAILERY_DMARC_SECRET } } : {},
+    ),
+  )
 
   // ---------------------------------------------------------------------------
   // Sample host routes

@@ -87,7 +87,7 @@ Goal: production-quality across all the small things.
 - Daily webhook reconciliation against provider Activity APIs.
 - GDPR forget + export endpoints.
 - Double opt-in flow.
-- Deliverability panel: `verifyDomainAuth` per provider, SPF/DKIM/DMARC status surfaced in admin UI, startup warnings on unauthenticated domains (`08-compliance.md` § Deliverability setup).
+- Deliverability panel: `verifyDomainAuth` per provider, SPF/DKIM/DMARC status surfaced in admin UI. **DMARC part done in 0.21** (DNS checks, alerts, admin screen): see [18-dmarc-monitoring.md](./18-dmarc-monitoring.md); per-provider checks for SPF/DKIM remain, startup warnings on unauthenticated domains (`08-compliance.md` § Deliverability setup).
 - Soft → hard bounce promotion job + config.
 - Per-provider send-rate limiting via BullMQ limiter.
 - Send-time IP / User-Agent logging (opt-in).

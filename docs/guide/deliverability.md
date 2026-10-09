@@ -370,16 +370,217 @@ The admin **Health → Microsoft SNDS** card shows per-IP filter result (GREEN /
 
 ## DMARC RUA report ingestion
 
-DMARC RUA aggregate reports are the only place you can see **who is sending mail claiming to be from your domain** — legitimate sources, forgotten SaaS tools, and active spoofers. Most operators publish `rua=mailto:...` and never read the reports because the raw XML is unreadable. Mailery parses the reports, extracts non-aligned source IPs, and surfaces them in the admin UI.
+### Why this matters
 
-### Set up the DMARC TXT record
+Every email says who it is from, and anyone can type any address in that field. Three DNS-based mechanisms let a receiving server (Gmail, Yahoo, Outlook) check:
 
-If you ran `setup-sendgrid`, you have working SPF + DKIM but no DMARC by default. Publish a DMARC record with the CLI:
+- **SPF** lists the servers allowed to send mail for your domain. A receiver compares the sending server's IP to that list.
+- **DKIM** puts a cryptographic signature on each message. A receiver checks it against a public key you publish in DNS.
+- **DMARC** ties the two together. It says the visible From domain must match (be *aligned* with) the domain that passed SPF or DKIM, and it tells receivers what to do with mail that fails: a **policy** of `p=none` (deliver it anyway, just report), `p=quarantine` (send it to spam) or `p=reject` (refuse it).
+
+**Alignment** is the part that trips people up. A message can pass SPF for `mail.vendor.com` and still fail DMARC for you, because `vendor.com` is not your domain. Most "my mail goes to spam" mysteries are an alignment failure nobody saw.
+
+DMARC also asks receivers to send you a daily **aggregate report** (the `rua=` address in your DMARC record). It is an XML file listing every IP address that sent mail claiming to be from your domain, how many messages, and whether they passed. It is the only place you can see:
+
+1. **Silent breakage.** A rotated DKIM key, an SPF edit, or a new tool sending as your domain makes your own mail fail. Nothing errors; it goes to spam.
+2. **Spoofing.** Until your policy is `p=reject`, anyone can send as your domain and receivers will deliver it.
+
+The goal for each sending domain is `p=none`, then `p=quarantine`, then `p=reject`, without blocking your own mail. Reports are the evidence that tightening is safe, and the early warning when something breaks later. Gmail, Yahoo and Microsoft now require DMARC from bulk senders.
+
+Raw reports are unreadable XML that nobody opens. DMARC Monitoring has mailery receive them, parse them, check your DNS, and call your code (`onDmarcAlert`) when something needs attention.
+
+### 15-minute setup {#dmarc-inbound}
+
+You need a mailbox that can receive the reports and turn each email into an HTTP request. The documented path is SendGrid [Inbound Parse](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/setting-up-the-inbound-parse-webhook).
+
+1. **Pick an inbound host**, a subdomain used only for this, such as `dmarc-in.example.com`. Reports will be addressed to `reports@dmarc-in.example.com`.
+2. **Point its MX at SendGrid.** Add `dmarc-in.example.com  MX  10  mx.sendgrid.net`.
+3. **Add the Inbound Parse destination** in SendGrid (Settings → Inbound Parse): host `dmarc-in.example.com`, URL with the shared secret as the basic-auth password:
+
+   ```
+   https://mailery:<secret>@your-app/m/inbound/dmarc
+   ```
+
+   Generate the secret yourself (`openssl rand -hex 32`). The username is ignored.
+4. **Mount the route** with the same secret. Without a secret the route does not exist.
+
+   ```ts
+   app.use(
+     '/m',
+     createPublicRouter(mailer, {
+       dmarcInbound: { secret: process.env.MAILERY_DMARC_SECRET }, // absent → route not mounted
+     }),
+   )
+   ```
+
+5. **Tell mailery the mailbox** so it can check your DNS against it:
+
+   ```ts
+   await Mailer.init({
+     // ...
+     dmarc: {
+       reportAddress: 'reports@dmarc-in.example.com',
+       adminUrl: 'https://your-app/admin/mailer', // optional; copied into every alert
+     },
+   })
+   ```
+
+6. **Publish `rua=` for each sending domain:**
+
+   ```bash
+   npx mailery setup-dmarc \
+     --domain example.com \
+     --rua-mailbox reports@dmarc-in.example.com \
+     --policy none \
+     --cloudflare
+   ```
+
+   See [Publishing the DMARC record](#publish-dmarc) for the flags. Start at `p=none`.
+7. **Publish the external authorization record** when the report mailbox is on a different organizational domain from the domain being reported on (for example, `example.com` reports go to `reports@dmarc-in.other.com`). Receivers refuse to send reports to another domain unless that domain says it agrees. Publish at the mailbox's domain:
+
+   ```
+   example.com._report._dmarc.dmarc-in.other.com.   TXT   "v=DMARC1"
+   ```
+
+   The general form is `<reported domain>._report._dmarc.<inbound host>`. One wildcard record, `*._report._dmarc.<inbound host>  TXT  "v=DMARC1"`, authorizes every domain at once. If the mailbox is on the same organizational domain as the domain being reported on (`reports@dmarc-in.example.com` for `example.com`), you do not need this record. `setup-dmarc` prints, and with `--cloudflare` publishes, the records you need.
+8. **Verify in the admin UI.** Open **DMARC Monitoring → Setup**. Each domain shows the DNS check result with the exact record to publish for anything wrong. Then press **Send test alert**: your `onDmarcAlert` should receive an alert of kind `test`.
+
+Reports start arriving within a day or two, one per receiver per day. Until the first one lands, the screen says so; that is normal.
+
+### What triggers an alert
+
+Alerts are grouped per domain and kind, never per IP, so one noisy week is one alert, not fifty. Thresholds are defaults; every one is editable in **DMARC Monitoring → Settings** or via `dmarc.alerts`. "Window" is the last 7 days of report data (by the period the report covers, not when it arrived, so uploading a backlog does not alert).
+
+| Kind | When it fires | Default threshold | Severity |
+|---|---|---|---|
+| `unknown_source_failing` | An IP you have not labeled sent mail as your domain and failed DMARC. Either a tool you forgot to set up, or someone spoofing you. | 10 or more failing messages from untagged IPs in the window | `warning`; `critical` if one IP sent 10 times the threshold |
+| `known_source_failing` | An IP you labeled as yours is failing. Your own mail is at risk. | 5 or more failing messages from tagged IPs | `critical` |
+| `alignment_drop` | The share of messages passing DMARC fell below your bar. Failures from IPs you tagged as ignored do not count against it. | Pass rate under 98%, with at least 100 messages in the window | `warning`; `critical` under 90% |
+| `reports_stopped` | A domain that used to get reports has had none for a while: it stopped sending, `rua=` changed, or the inbound webhook is failing. | No report ending in the last 7 days | `warning` |
+| `policy_ready` | The data supports moving to a stricter policy (the [progression gates](#policy-progression-suggestion) pass). | Same gates as the progression suggestion | `info` |
+| `dns_misconfigured` | The DNS check found an error: no DMARC record, two DMARC records, a malformed one, no `rua=`, a missing external authorization record, or a `rua` domain with no MX. | Any error-level issue | `warning`; `critical` if the DMARC record is missing |
+
+An alert fires as `opened` the first time, `updated` when a new source IP joins an open alert, `reminder` if it is still open after `realertAfterHours` (default 168, one week; 0 turns reminders off), and `resolved` when the condition clears. `policy_ready` never sends `resolved`. A `test` event comes from the **Send test alert** button.
+
+### Delivering alerts
+
+Mailery never sends Slack messages or emails itself. It calls `onDmarcAlert` and you forward. `alert.text` is a finished plain-text message (title, summary, sources with reverse DNS, DNS fixes, what to do, link to the admin screen), so forwarding it as is works.
+
+Slack, using an incoming-webhook URL:
+
+```ts
+onDmarcAlert: async (alert) => {
+  const res = await fetch(process.env.SLACK_DMARC_WEBHOOK_URL!, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: alert.text }),
+  })
+  if (!res.ok) throw new Error(`slack ${res.status}`)
+},
+```
+
+Email, using any transport you already have:
+
+```ts
+onDmarcAlert: async (alert) => {
+  if (alert.severity === 'info') return // skip policy_ready if you only want problems
+  await transporter.sendMail({
+    from: 'alerts@example.com',
+    to: 'ops@example.com',
+    subject: `[${alert.severity}] ${alert.title}`,
+    text: alert.text,
+  })
+},
+```
+
+If the hook throws, mailery swallows the error and records it on the alert (`lastDelivery`, visible in the Alerts tab). It does not retry; the next `reminder` or `updated` event tries again. With no hook configured, alerts still appear in the admin UI and the Setup tab says so.
+
+### `DmarcAlert` fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Stable key `kind\|domain\|subject`. The same id means the same ongoing problem. |
+| `kind` | string | One of the six kinds above, or `test`. |
+| `event` | string | `opened`, `updated`, `reminder`, `resolved` or `test`. |
+| `severity` | string | `info`, `warning` or `critical`. |
+| `domain` | string | The domain the alert is about. |
+| `title`, `message`, `recommendation` | string | Short headline, what happened, and what to do. `recommendation` is empty on `resolved` and `test`. |
+| `text` | string | All of the above plus sources and DNS issues, as plain text ready to post. |
+| `detectedAt` | Date | When this event was produced. |
+| `firstDetectedAt` | Date | When this problem was first seen. |
+| `window` | `{ start, end }` | The period of report data the alert covers. |
+| `summary` | object | `domain`, `policy`, `pct`, `windowDays`, `reportCount`, `totalMessages`, `passCount`, `failCount`, `alignmentRate` (0 to 1, or null), `lastReportAt`. |
+| `sources` | array | Up to 25 sending IPs by message count, each with `ip`, `ptr` (reverse DNS, or null), `label`, `messages`, `daysSeen`, `firstSeenDay`, `lastSeenDay`, `headerFrom`, `dkimResult`, `spfResult`, `disposition`, `reporters`. Empty except for the two source kinds. |
+| `newSourceIps` | string[] | On `updated`: the IPs that were not in the alert before. Otherwise empty. |
+| `threshold` | object or null | `{ name, limit, actual }` for the rule that fired. |
+| `suggestedPolicy` | object or null | `{ policy, pct, reason }`, set only for `policy_ready`. |
+| `dnsIssues` | array | For `dns_misconfigured`: each issue's `code`, `severity`, `message` and the `fix` record to publish. |
+| `adminUrl` | string or null | `dmarc.adminUrl`, if set. |
+
+### What the screen edits and what stays in config
+
+| Setting | Edit in the GUI | Config |
+|---|---|---|
+| Alert thresholds, window, disabled kinds, reminder interval, DNS check interval | Yes (Settings) | `dmarc.alerts` is the baseline |
+| `reportAddress`, `extraDomains`, `ignoredDomains` | Yes (Settings) | `dmarc.*` is the baseline |
+| Source tags | Yes (report tables) | `dmarc.knownSources` is the baseline |
+| `dmarcInbound.secret` and path | No | `createPublicRouter` options |
+| `onDmarcAlert` hook | No | `MailerConfig.onDmarcAlert` |
+| `adminUrl` | No | `dmarc.adminUrl` |
+| DNS records | No (the screen shows what to publish) | `npx mailery setup-dmarc` |
+
+Config is the baseline; one saved document overrides it key by key; resetting to config deletes the document. Secrets and the hook are config-only, so nothing sensitive is stored in the database or editable through the admin UI.
+
+### Securing the inbound endpoint
+
+::: danger Read this before you enable it
+**SendGrid Inbound Parse does not sign its payloads.** The SendGrid *Event Webhook* does, and mailery verifies that signature (plus a replay window) on `/m/webhooks/sendgrid`. Inbound Parse is a different product with no signature, no HMAC and no verifiable identity, so there is nothing to verify.
+
+This endpoint is authenticated by a shared secret and nothing else. It is **off unless you set that secret**, it is never mounted by default, and it will not appear on an upgrade.
+:::
+
+- **Use basic auth in the destination URL**, as in step 3. The secret travels in an `Authorization` header. `Authorization: Bearer <secret>` also works. A secret in the URL path works too, but paths are written to every access, proxy and load-balancer log.
+- The secret is compared in constant time **before** any of the body is read, so an anonymous caller cannot make the process buffer an upload.
+- Size and count limits apply, only `.zip`, `.gz` and `.xml` attachments are taken, and a message with none (an auto-reply, a human) is a `200` with `ingested: 0`.
+- Reports go through the same parser as the admin upload: decompression caps, declared-versus-actual size checks, a compression-ratio check, a zip-slip guard.
+- **A report whose `policy_published.domain` is not a domain you send from is rejected.** If the secret leaks, the worst case is bogus report rows about your own domains: no mail is sent, no contact data is read, nothing is deleted. Rotate by changing the config value and the Inbound Parse URL.
+- Do not use a source-IP allowlist as the only control. SendGrid publishes no stable Inbound Parse egress range, and behind a proxy `req.ip` is the proxy's address. It is a fine second layer in your ingress.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `secret` | none | Shared secret. **Absent or empty means the route does not exist.** |
+| `path` | `/inbound/dmarc` | Sub-path on the public router. |
+| `maxFileSizeBytes` | `10 * 1024 * 1024` | Per-attachment cap, matching the admin upload. |
+| `maxFiles` | `10` | Attachments accepted per message. |
+| `allowedDomains` | derived | Domains whose reports are accepted. Defaults to `senderDomains` plus the From defaults and each one's organizational domain. |
+| `parseInbound` | SendGrid shape | Seam for other inbound parsers. Only the SendGrid shape is implemented. |
+
+Responses: `200` ingested (or nothing to ingest), `400` nothing usable in the message, `401` bad or missing secret, `413` over the size or count limit.
+
+::: warning Not the admin upload route
+Do **not** point Inbound Parse at `/admin/mailer/api/dmarc/upload`. Versions before 0.15 recommended that and it never worked: the route sits behind your `requireAdmin` guard, which Inbound Parse cannot satisfy.
+:::
+
+### Not supported
+
+- Forensic (`ruf`) reports.
+- TLS-RPT reports.
+- BIMI.
+- DKIM selector checks (the DNS check covers DMARC, SPF, the report address and its MX, not individual DKIM keys).
+- CIDR source tags (tag one IP at a time).
+- Mailbox polling (IMAP or the Gmail API).
+- Mailgun and Postmark inbound parsers.
+- Editing DNS from the admin UI.
+- Built-in Slack or email delivery (use `onDmarcAlert`).
+
+### Publishing the DMARC record {#publish-dmarc}
+
+If you ran `setup-sendgrid`, you have working SPF and DKIM but no DMARC by default. Publish a DMARC record with the CLI:
 
 ```bash
 npx mailery setup-dmarc \
   --domain news.example.com \
-  --rua-mailbox dmarc-reports@example.com \
+  --rua-mailbox reports@dmarc-in.example.com \
   --policy none \
   --cloudflare
 ```
@@ -395,75 +596,18 @@ npx mailery setup-dmarc \
 | `--adkim` | `r` | DKIM alignment mode (`r` / `s`). |
 | `--cloudflare` | off | Publish via the Cloudflare API. |
 
-Without `--cloudflare` the command prints the TXT record for manual publish. Use `--policy quarantine --pct 10` after a few weeks of `p=none` data to start enforcement — see the [policy progression suggestion](#policy-progression-suggestion) below.
+Without `--cloudflare` the command prints the TXT record for manual publish. When the report mailbox is on a different organizational domain, it also prints (or publishes) the external authorization record from step 7. Use `--policy quarantine --pct 10` after a few weeks of `p=none` data to start enforcement; the [policy progression suggestion](#policy-progression-suggestion) tells you when.
 
-### Upload received reports
+### Fallback: upload reports by hand
 
-Receivers (Google, Yahoo, Microsoft, etc.) email one report per day per domain, attached as `.zip` or `.gz`. Open the admin **Health → DMARC RUA reports** card and use the "Upload report(s)" button. Multi-file upload supported.
+If you cannot receive email at a domain you control, receivers' daily reports can be uploaded instead. They arrive as `.zip` or `.gz` attachments to whatever `rua=` mailbox you used. Open the admin **DMARC Monitoring** screen (or **Health → DMARC RUA reports**) and use "Upload report(s)". Multi-file upload is supported. Alerts, DNS checks and the report tables work the same; only the arrival path differs, and each report records whether it came by `inbound` or `upload`.
 
 Mailery decompresses, parses (RFC 7489), and persists:
 
-- One `DmarcReportDoc` per received report — total messages, pass / fail counts, policy + pct in effect, reporting window.
+- One `DmarcReportDoc` per received report: total messages, pass / fail counts, policy and pct in effect, reporting window, and how it arrived (`via`).
 - One `DmarcFailureDoc` per non-aligned source IP per report. These are the actionable rows.
 
 Re-uploading the same report is idempotent (keyed on `reportId × orgName`).
-
-### Receive reports automatically {#dmarc-inbound}
-
-Uploading a file a day gets old. Point the RUA mailbox at an inbound-email webhook — SendGrid [Inbound Parse](https://www.twilio.com/docs/sendgrid/for-developers/parsing-email/setting-up-the-inbound-parse-webhook), Mailgun Routes, Postmark inbound — and mailery ingests each report as it arrives.
-
-::: danger Read this before you enable it
-**SendGrid Inbound Parse does not sign its payloads.** The SendGrid *Event Webhook* does, and mailery verifies that signature (plus a replay window) on `/m/webhooks/sendgrid`. Inbound Parse is a different product with no signature, no HMAC and no verifiable identity — there is nothing to verify.
-
-So this endpoint is authenticated by a shared secret and nothing else. It is **off unless you set that secret**, it is never mounted by default, and it will not appear on an upgrade.
-:::
-
-```ts
-app.use(
-  '/m',
-  createPublicRouter(mailer, {
-    dmarcInbound: {
-      secret: process.env.MAILERY_DMARC_INBOUND_SECRET, // absent → route not mounted
-      path: '/inbound/dmarc',                           // default
-    },
-  }),
-)
-```
-
-Then set the Inbound Parse destination URL with the secret as the basic-auth password:
-
-```
-https://mailery:$MAILERY_DMARC_INBOUND_SECRET@example.com/m/inbound/dmarc
-```
-
-The username is ignored; only the password is compared, in constant time. `Authorization: Bearer <secret>` works too, for anything forwarding to this route that isn't SendGrid.
-
-**Use basic auth rather than putting the secret in the path.** Both work — nothing stops you making `path` itself unguessable — but a URL path is written to every access log, proxy log and load-balancer log between the sender and you, and an `Authorization` header is not.
-
-| Option | Default | Purpose |
-|---|---|---|
-| `secret` | — | Shared secret. **Absent or empty → the route does not exist.** |
-| `path` | `/inbound/dmarc` | Sub-path on the public router. |
-| `maxFileSizeBytes` | `10 * 1024 * 1024` | Per-attachment cap, matching the admin upload. |
-| `maxFiles` | `10` | Attachments accepted per message. |
-| `allowedDomains` | derived | Domains whose reports are accepted. Defaults to `senderDomains` + the From defaults, plus each one's parent domain. |
-| `parseInbound` | SendGrid shape | Seam for other inbound-email providers. |
-
-What the endpoint does with a request:
-
-1. Checks the secret **before** reading a byte of the body, so an anonymous caller cannot make the process buffer an upload.
-2. Enforces the size and count limits above.
-3. Takes only attachments ending `.zip`, `.gz` or `.xml`; a message with none (an auto-reply, a human) is a 200 with `ingested: 0`, not a retry-inducing error.
-4. Runs them through the same parser the admin upload uses — decompression caps, declared-vs-actual size checks, compression-ratio check, zip-slip guard.
-5. **Rejects any report whose `policy_published.domain` is not a domain you send from.** If the secret ever leaks, that bounds the damage to "rows about your own domains".
-
-Responses: `200` ingested (or nothing to ingest), `400` nothing usable in the message, `401` bad or missing secret, `413` over the size or count limit.
-
-A leaked secret buys an attacker exactly one capability: inserting DMARC report rows for domains you already send from. No mail is sent, no contact data is read or written, nothing is deleted. Rotate it by changing the config value and the Inbound Parse destination URL.
-
-::: warning Not the admin upload route
-Do **not** point Inbound Parse at `/admin/mailer/api/dmarc/upload`. mailery's own docs recommended that before v0.15 and it never worked: that route sits behind your `requireAdmin` guard, which Inbound Parse cannot satisfy. If it *did* work for you, check whether the guard is actually applied to your admin router.
-:::
 
 ### Tag known sources
 
