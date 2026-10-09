@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.21.0 — Categories, contact policy and Programs
+## 0.21.0 — Categories, contact policy, Programs and DMARC Monitoring
 
 Additive. No forced data migration: every new field is optional, every new collection is created by index sync on init, and every new config key defaults to off.
 
@@ -54,6 +54,7 @@ Disable Programs; cancel or re-queue `deferred` sends; cancel queued Program sen
 2. **Declare categories and backfill.** Add `categories` to the config, then `npx mailery backfill-categories --map welcome-1=lifecycle.onboarding,... --dry-run`, and again without `--dry-run`. The preference page goes live for categorised mail. Run `doctor --categories` to confirm.
 3. **Set `contactPolicy`.** Watch the deferred counts in the admin for a week before tightening.
 4. **Only if you use Programs:** add a `factsAdapter`; seed the Program disabled (`saveProgramDraft`, `publishProgram`); preview with `enterProgram` on a test account and Force tick (admin or `POST /programs/:slug/runs/:subjectId/tick`); then enable with `holdoutPct` set. Enabling does not replay earlier entry events: backfill existing accounts with `enterProgram`.
+5. **Only if you receive DMARC reports:** add `onDmarcAlert` (and `dmarc.reportAddress` / `extraDomains` as needed), open *DMARC Monitoring* in the admin, fix any DNS rows it flags, and send a test alert.
 
 ## 0.20.0 — Own Mongo connection, subjects as written
 
