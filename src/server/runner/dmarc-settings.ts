@@ -178,32 +178,27 @@ export async function saveDmarcSettingsPatch(
   patch: DmarcSettingsPatch,
   actor: string,
 ): Promise<DmarcMonitoringSettings> {
-  const existing = await ctx.collections.dmarcSettings.findOne({ _id: 'settings' })
-  const merged: DmarcSettingsPatch = {}
-  const stored = (existing?.patch ?? {}) as Record<string, unknown>
+  // Dotted paths so two concurrent saves of different keys both persist.
+  const set: Record<string, unknown> = {}
   const incoming = patch as Record<string, unknown>
-  const target = merged as Record<string, unknown>
-  for (const src of [stored, incoming]) {
-    for (const key of Object.keys(src)) {
-      if (UNSAFE_KEYS.has(key) || src[key] === undefined) continue
-      if (key === 'alerts' && isPlainObject(src.alerts)) {
-        const alerts = (target.alerts ?? {}) as Record<string, unknown>
-        for (const k of Object.keys(src.alerts)) {
-          if (UNSAFE_KEYS.has(k) || src.alerts[k] === undefined) continue
-          alerts[k] = src.alerts[k]
-        }
-        target.alerts = alerts
-      } else {
-        target[key] = src[key]
+  for (const key of Object.keys(incoming)) {
+    if (UNSAFE_KEYS.has(key) || incoming[key] === undefined) continue
+    const value = incoming[key]
+    if (key === 'alerts' && isPlainObject(value)) {
+      for (const k of Object.keys(value)) {
+        if (UNSAFE_KEYS.has(k) || value[k] === undefined) continue
+        set[`patch.alerts.${k}`] = value[k]
       }
+    } else {
+      set[`patch.${key}`] = value
     }
   }
   await ctx.collections.dmarcSettings.updateOne(
     { _id: 'settings' },
-    { $set: { patch: merged, updatedBy: actor, updatedAt: new Date() } },
+    { $set: { ...set, updatedBy: actor, updatedAt: new Date() } },
     { upsert: true },
   )
-  return mergeDmarcSettings(ctx.config.dmarc, merged)
+  return (await loadDmarcSettings(ctx)).settings
 }
 
 export async function clearDmarcSettingsPatch(ctx: RunnerContext): Promise<DmarcMonitoringSettings> {

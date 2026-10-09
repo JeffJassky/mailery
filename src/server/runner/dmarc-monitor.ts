@@ -59,7 +59,7 @@ export function isDmarcMonitorConfigured(config: Pick<MailerConfig, 'dmarc' | 'o
 
 /**
  * Tick entry point. Does nothing — no DNS, no reads beyond one count — unless
- * `config.dmarc` is set or at least one report has been ingested.
+ * `isDmarcMonitorConfigured(config)` or at least one report has been ingested.
  */
 export async function runDmarcMonitor(
   ctx: RunnerContext,
@@ -82,6 +82,7 @@ export async function runDmarcDnsChecks(
   const domains = (await monitoredDomains(ctx, settings))
     .filter((d) => !d.ignored && (d.origin.includes('config') || d.origin.includes('extra')))
     .map((d) => d.domain)
+  await ctx.collections.dmarcDnsChecks.deleteMany({ _id: { $nin: domains } })
 
   let targets: string[]
   if (opts.domain !== undefined) {
@@ -126,7 +127,6 @@ export async function runDmarcDnsChecks(
     }
   }
   await Promise.all(Array.from({ length: Math.min(DNS_CONCURRENCY, targets.length) }, worker))
-  await ctx.collections.dmarcDnsChecks.deleteMany({ _id: { $nin: domains } })
   return results
 }
 
@@ -148,7 +148,36 @@ export async function evaluateDmarcAlerts(
   const alerts = ctx.collections.dmarcAlerts
   const monitored = (await monitoredDomains(ctx, settings)).filter((d) => !d.ignored).map((d) => d.domain)
   const inList = { $in: monitored }
-  const [reports, failures, tags, checks, latest] = await Promise.all([
+  const tags = await resolveSourceTags(ctx)
+  const failureSince = { $gte: new Date(now.getTime() - 30 * DAY) }
+  const failureProjection = {
+    reportId: 1, domain: 1, sourceIp: 1, count: 1, headerFrom: 1, dkimResult: 1,
+    spfResult: 1, dispositionApplied: 1, day: 1, receivedAt: 1,
+  }
+  // Per-domain top rows keep one noisy domain from starving the others; ignored-IP rows
+  // are loaded uncapped because the alignment_drop discount needs every one of them.
+  const loadFailures = async () => {
+    const ignoredIps = Array.from(tags.values()).filter((t) => t.ignored).map((t) => t.ip)
+    const perDomain = await Promise.all(
+      monitored.map((domain) =>
+        ctx.collections.dmarcFailures
+          .find({ domain, receivedAt: failureSince }, { projection: failureProjection })
+          .sort({ count: -1 })
+          .limit(5000)
+          .toArray(),
+      ),
+    )
+    const ignoredRows =
+      ignoredIps.length > 0
+        ? await ctx.collections.dmarcFailures
+            .find({ domain: inList, receivedAt: failureSince, sourceIp: { $in: ignoredIps } }, { projection: failureProjection })
+            .toArray()
+        : []
+    const byId = new Map<string, (typeof ignoredRows)[number]>()
+    for (const row of [...perDomain.flat(), ...ignoredRows]) byId.set(String(row._id), row)
+    return Array.from(byId.values())
+  }
+  const [reports, failures, checks, latest] = await Promise.all([
     ctx.collections.dmarcReports
       .find(
         { domain: inList, rangeEnd: { $gte: new Date(now.getTime() - 35 * DAY) } },
@@ -160,20 +189,7 @@ export async function evaluateDmarcAlerts(
         },
       )
       .toArray(),
-    ctx.collections.dmarcFailures
-      .find(
-        { domain: inList, receivedAt: { $gte: new Date(now.getTime() - 30 * DAY) } },
-        {
-          projection: {
-            reportId: 1, domain: 1, sourceIp: 1, count: 1, headerFrom: 1, dkimResult: 1,
-            spfResult: 1, dispositionApplied: 1, day: 1, receivedAt: 1,
-          },
-        },
-      )
-      .sort({ count: -1 })
-      .limit(20_000)
-      .toArray(),
-    resolveSourceTags(ctx),
+    loadFailures(),
     ctx.collections.dmarcDnsChecks.find({ _id: inList }).toArray(),
     ctx.collections.dmarcReports
       .aggregate<{ _id: string; rangeEnd: Date; policyP: DmarcReportDoc['policyP']; policyPct: number }>([
@@ -259,6 +275,8 @@ export async function evaluateDmarcAlerts(
             subjectKeys: c.subjectKeys,
             severity: c.severity,
             title: c.title,
+            lastDelivery: null,
+            lastAlert: state.lastAlert,
           },
         },
       )
@@ -266,7 +284,8 @@ export async function evaluateDmarcAlerts(
       continue
     }
 
-    const newKeys = c.subjectKeys.filter((k) => !existing.subjectKeys.includes(k))
+    const newKeys =
+      existing.subjectKeys.length >= MAX_SUBJECT_KEYS ? [] : c.subjectKeys.filter((k) => !existing.subjectKeys.includes(k))
     const severityRise = SEVERITY_RANK[c.severity] > SEVERITY_RANK[existing.severity]
     const retry =
       (existing.lastDelivery === null || existing.lastDelivery.outcome === 'failed') &&
@@ -291,8 +310,7 @@ export async function evaluateDmarcAlerts(
       if (r.modifiedCount > 0) {
         const event: DmarcAlertEvent =
           newKeys.length > 0 || severityRise ? 'updated' : retry ? existing.lastAlert.event : 'reminder'
-        const ips = newKeys.length > 0 || severityRise ? newKeys : []
-        await fire(c, event, existing.firstDetectedAt, SOURCE_KINDS.has(c.kind) || severityRise ? ips : [])
+        await fire(c, event, existing.firstDetectedAt, SOURCE_KINDS.has(c.kind) ? newKeys : [])
       }
       continue
     }

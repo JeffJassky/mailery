@@ -201,13 +201,15 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
   const orgName = cleanReportText(meta.org_name)
   const email = cleanReportText(meta.email)
   const domain = String(policy.domain ?? '').trim().toLowerCase()
-  const policyP = (policy.p ?? 'none') as DmarcPolicy
+  const rawP = String(policy.p ?? '').trim().toLowerCase()
+  const policyP: DmarcPolicy = rawP === 'quarantine' || rawP === 'reject' ? rawP : 'none'
   const rawPct = Number(policy.pct ?? 100)
   // Use isFinite so pct=0 (legit "monitor only" config) survives.
   const policyPct = Number.isFinite(rawPct) ? Math.max(0, Math.min(100, rawPct)) : 100
 
   if (!reportId) throw new Error('DMARC XML missing report_id')
   if (!domain) throw new Error('DMARC XML missing policy_published.domain')
+  if (!DOMAIN_PATTERN.test(domain)) throw new Error('DMARC XML has an invalid policy_published.domain')
 
   const range = meta.date_range ?? {}
   const begin = secondsToDate(range.begin)
@@ -230,8 +232,8 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     totalMessages += count
 
     const evald = row.policy_evaluated ?? {}
-    const dkim = (evald.dkim ?? 'none') as DmarcAuthResult
-    const spf = (evald.spf ?? 'none') as DmarcAuthResult
+    const dkim = authResult(evald.dkim)
+    const spf = authResult(evald.spf)
     const aligned = dkim === 'pass' || spf === 'pass'
 
     if (aligned) {
@@ -274,6 +276,14 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     },
     failures,
   }
+}
+
+const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/
+const AUTH_RESULTS = new Set<string>(['pass', 'fail', 'softfail', 'neutral', 'temperror', 'permerror', 'none', 'unknown'])
+
+function authResult(v: unknown): DmarcAuthResult {
+  const s = String(v ?? 'none').trim()
+  return AUTH_RESULTS.has(s) ? (s as DmarcAuthResult) : 'unknown'
 }
 
 function secondsToDate(v: unknown): Date | null {
