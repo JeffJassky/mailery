@@ -44,9 +44,6 @@
  *   allowlist that silently matches the wrong address either locks out the
  *   real sender or admits everyone. Put an allowlist in your ingress if you
  *   want one; it is a good second layer and a bad only layer.
- * - **Secret in the path.** Works, and is the fallback, but a URL path is
- *   logged by every proxy, load balancer and access log between SendGrid and
- *   you. Supported implicitly: nothing stops you making `path` unguessable.
  * - **Secret in the `Authorization` header.** The default and the
  *   recommendation. Inbound Parse cannot set custom headers, but its
  *   destination URL accepts embedded basic-auth credentials

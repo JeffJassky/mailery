@@ -26,6 +26,7 @@
 // for the bundle as a whole) for a package that is a hard, non-optional
 // dependency and is therefore always installed anyway.
 import type AdmZipType from 'adm-zip'
+import { isIP } from 'node:net'
 import { XMLParser } from 'fast-xml-parser'
 
 import type {
@@ -35,6 +36,7 @@ import type {
   DmarcReportDoc,
 } from '../models/index.js'
 import type { RunnerContext } from './index.js'
+import { cleanReportText } from './dmarc-text.js'
 
 /**
  * Hard cap on decompressed bytes. A real RUA aggregate report is well under
@@ -196,8 +198,8 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
   const policy = fb.policy_published ?? {}
 
   const reportId = String(meta.report_id ?? '').trim()
-  const orgName = String(meta.org_name ?? '').trim()
-  const email = String(meta.email ?? '').trim()
+  const orgName = cleanReportText(meta.org_name)
+  const email = cleanReportText(meta.email)
   const domain = String(policy.domain ?? '').trim().toLowerCase()
   const policyP = (policy.p ?? 'none') as DmarcPolicy
   const rawPct = Number(policy.pct ?? 100)
@@ -239,8 +241,8 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     failCount += count
 
     const sourceIp = String(row.source_ip ?? '').trim()
-    if (!sourceIp) continue
-    const headerFrom = String(rec?.identifiers?.header_from ?? '').toLowerCase()
+    if (!isIP(sourceIp)) continue
+    const headerFrom = cleanReportText(rec?.identifiers?.header_from).toLowerCase()
     const dispositionApplied = String(evald.disposition ?? 'none')
 
     failures.push({

@@ -5,6 +5,7 @@
 
 import type { DmarcFailureDoc, DmarcReportDoc } from '../models/index.js'
 import type { DmarcAlertStateDoc } from '../models/index.js'
+import { cleanReportText } from './dmarc-text.js'
 import {
   DMARC_ALERT_KINDS,
   type DmarcAlert,
@@ -371,10 +372,11 @@ export function formatDmarcAlertText(alert: Omit<DmarcAlert, 'text'>): string {
   if (alert.sources.length > 0) {
     const lines = ['Sources:']
     for (const src of alert.sources.slice(0, 10)) {
-      const label = src.label ? ` [${src.label}]` : ''
-      const reporters = src.reporters.length > 0 ? src.reporters.join(', ') : 'unknown'
+      const label = src.label ? ` [${cleanReportText(src.label)}]` : ''
+      const reporters = src.reporters.length > 0 ? src.reporters.map((r) => cleanReportText(r)).join(', ') : 'unknown'
+      const ptr = src.ptr ? cleanReportText(src.ptr) : 'no reverse DNS'
       lines.push(
-        `  ${src.ip} (${src.ptr ?? 'no reverse DNS'})${label} — ${num(src.messages)} msgs, DKIM ${src.dkimResult}, SPF ${src.spfResult}, reported by ${reporters}`,
+        `  ${cleanReportText(src.ip, 64)} (${ptr})${label} — ${num(src.messages)} msgs, DKIM ${src.dkimResult}, SPF ${src.spfResult}, reported by ${reporters}`,
       )
     }
     if (alert.sources.length > 10) lines.push(`  …and ${alert.sources.length - 10} more`)
@@ -384,8 +386,10 @@ export function formatDmarcAlertText(alert: Omit<DmarcAlert, 'text'>): string {
   if (alert.dnsIssues.length > 0) {
     const lines = ['DNS issues:']
     for (const i of alert.dnsIssues) {
-      const fix = i.fix ? ` → publish ${i.fix.host} ${i.fix.type} "${i.fix.value}"` : ''
-      lines.push(`  - ${i.message}${fix}`)
+      const fix = i.fix
+        ? ` → publish ${cleanReportText(i.fix.host)} ${i.fix.type} "${cleanReportText(i.fix.value, 255)}"`
+        : ''
+      lines.push(`  - ${cleanReportText(i.message)}${fix}`)
     }
     blocks.push(lines.join('\n'))
   }

@@ -466,6 +466,8 @@ An alert fires as `opened` the first time, `updated` when a new source IP joins 
 
 Mailery never sends Slack messages or emails itself. It calls `onDmarcAlert` and you forward. `alert.text` is a finished plain-text message (title, summary, sources with reverse DNS, DNS fixes, what to do, link to the admin screen), so forwarding it as is works.
 
+Report contents are attacker-supplied: anyone can email your report mailbox. Mailery strips control characters and angle brackets from report-derived text in `alert.text` (IPs, reverse DNS, reporter names, labels and DNS messages), so hosts can post it as plain text.
+
 Slack, using an incoming-webhook URL:
 
 ```ts
