@@ -54,6 +54,7 @@ export function Sidebar({
         <nav className="sidebar-nav">
           <Item icon={Icons.Home} label="Dashboard" screen="dashboard" />
           <Item icon={Icons.Health} label="Health" screen="health" />
+          <Item icon={Icons.Health} label="DMARC Monitoring" screen="dmarc" />
         </nav>
       </div>
 
