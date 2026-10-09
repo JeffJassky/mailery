@@ -493,7 +493,7 @@ onDmarcAlert: async (alert) => {
 },
 ```
 
-If the hook throws, mailery swallows the error and records it on the alert (`lastDelivery`, visible in the Alerts tab). It does not retry; the next `reminder` or `updated` event tries again. With no hook configured, alerts still appear in the admin UI and the Setup tab says so.
+If the hook throws, mailery swallows the error and records it on the alert (`lastDelivery`, visible in the Alerts card). It does not retry; the next `reminder` or `updated` event tries again. With no hook configured, alerts still appear in the admin UI and the Setup card says so.
 
 ### `DmarcAlert` fields
 
