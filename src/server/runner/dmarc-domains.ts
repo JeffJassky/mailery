@@ -1,7 +1,8 @@
 /**
  * Which domains DMARC Monitoring watches. Spec: plans/18-dmarc-monitoring.md §6.2.
- * CONTRACT STUB — PR 1C replaces every body. Signatures are fixed.
  */
+
+import psl from 'psl'
 
 import type { MailerConfig } from '../config.js'
 import type { DmarcMonitoredDomain, DmarcMonitoringSettings } from '../../shared/dmarc-types.js'
@@ -16,7 +17,18 @@ export type SenderDomainConfig = Pick<
  * (via `psl`). Lowercased, deduplicated, sorted.
  */
 export function deriveSenderDomains(config: SenderDomainConfig): string[] {
-  throw new Error(`not implemented: plans/18 §6.2 (${Object.keys(config).length})`)
+  const out = new Set<string>()
+  const add = (raw: string | undefined) => {
+    const domain = raw?.trim().toLowerCase().replace(/^\.+/, '')
+    if (!domain) return
+    out.add(domain)
+    out.add(orgDomain(domain))
+  }
+  for (const domain of Object.keys(config.senderDomains ?? {})) add(domain)
+  add(emailDomain(config.fromDefaults?.email))
+  add(emailDomain(config.transactionalFromDefaults?.email))
+  // senderAddress is a postal address (CAN-SPAM footer), never a domain.
+  return [...out].sort()
 }
 
 export function resolveMonitoredDomains(
@@ -24,5 +36,33 @@ export function resolveMonitoredDomains(
   settings: DmarcMonitoringSettings,
   reportDomains: string[],
 ): DmarcMonitoredDomain[] {
-  throw new Error(`not implemented: plans/18 §6.2 (${Object.keys(config).length}, ${settings.extraDomains.length}, ${reportDomains.length})`)
+  const origins = new Map<string, Set<DmarcMonitoredDomain['origin'][number]>>()
+  const add = (raw: string, origin: DmarcMonitoredDomain['origin'][number]) => {
+    const domain = raw.trim().toLowerCase()
+    if (!domain) return
+    let set = origins.get(domain)
+    if (!set) origins.set(domain, (set = new Set()))
+    set.add(origin)
+  }
+  for (const d of deriveSenderDomains(config)) add(d, 'config')
+  for (const d of settings.extraDomains) add(d, 'extra')
+  for (const d of reportDomains) add(d, 'reports')
+
+  const ignored = new Set(settings.ignoredDomains.map((d) => d.trim().toLowerCase()))
+  const order = ['config', 'extra', 'reports'] as const
+  return [...origins.keys()].sort().map((domain) => ({
+    domain,
+    origin: order.filter((o) => origins.get(domain)!.has(o)),
+    ignored: ignored.has(domain),
+  }))
+}
+
+function orgDomain(domain: string): string {
+  return psl.get(domain) ?? domain
+}
+
+function emailDomain(email: string | undefined): string | undefined {
+  if (typeof email !== 'string') return undefined
+  const at = email.lastIndexOf('@')
+  return at === -1 ? undefined : email.slice(at + 1)
 }
