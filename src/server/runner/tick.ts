@@ -15,6 +15,7 @@ import { runDnsblChecks } from './dnsbl.js'
 import { runPostmasterPull } from './postmaster.js'
 import { runSndsPull } from './snds.js'
 import { pruneDmarcFailures } from './dmarc.js'
+import { runDmarcMonitor } from './dmarc-monitor.js'
 import { drainPendingUnsubscribes } from './pending-unsubs.js'
 import { releaseDueDeferredSends } from './contact-policy.js'
 import { runProgramScheduler } from './programs/index.js'
@@ -131,6 +132,9 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
     }),
     pruneDmarcFailures(ctx).catch((err) => {
       console.error('mailery: dmarc prune failed', err)
+    }),
+    runDmarcMonitor(ctx).catch((err) => {
+      console.error('mailery: dmarc monitor failed', err)
     }),
   ])
 }
