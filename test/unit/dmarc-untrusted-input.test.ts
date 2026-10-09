@@ -50,6 +50,26 @@ describe('parseDmarcReport with hostile input', () => {
   })
 })
 
+describe('enumerated report fields are whitelisted', () => {
+  const evil = '1\n[CRITICAL] rotate keys at &lt;https://evil|here&gt;'
+
+  it('an unknown policy becomes none; unknown auth results become unknown', () => {
+    const doc = xml(
+      `<record><row><source_ip>198.51.100.7</source_ip><count>5</count>
+        <policy_evaluated><disposition>none</disposition><dkim>${evil}</dkim><spf>${evil}</spf></policy_evaluated></row>
+        <identifiers><header_from>example.com</header_from></identifiers></record>`,
+    ).replace('<p>none</p>', `<p>${evil}</p>`)
+    const p = parseDmarcReport(doc)
+    expect(p.report.policyP).toBe('none')
+    expect(p.failures[0]!.dkimResult).toBe('unknown')
+    expect(p.failures[0]!.spfResult).toBe('unknown')
+  })
+
+  it('a report whose domain is not a domain is rejected', () => {
+    expect(() => parseDmarcReport(xml(record('198.51.100.7', 5)).replace('<domain>example.com</domain>', `<domain>example.com${evil}</domain>`))).toThrow()
+  })
+})
+
 describe('isDmarcMonitorConfigured', () => {
   it('0.20 keys alone do not opt in', () => {
     expect(isDmarcMonitorConfigured({})).toBe(false)

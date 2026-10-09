@@ -374,6 +374,60 @@ describe('alert lifecycle', () => {
     expect((await H1.mailer.collections.dmarcAlerts.findOne({ _id: 'alignment_drop|example.com|' }))!.status).toBe('open')
   })
 
+  it('a DNS alert that turns critical reports no newSourceIps', async () => {
+    await seedReport(H1)
+    const base = (await runDmarcDnsChecks(H1.ctx, { now: T0, resolver: resolver(), force: true }))[0]!
+    const issue = (code: 'external_auth_missing' | 'dmarc_missing') => ({ code, severity: 'error' as const, message: code, fix: null })
+    await H1.mailer.collections.dmarcDnsChecks.updateOne({ _id: 'example.com' }, { $set: { 'result.issues': [issue('external_auth_missing')], 'result.ok': false } })
+    await evalAt(0)
+    await H1.mailer.collections.dmarcDnsChecks.updateOne({ _id: 'example.com' }, { $set: { 'result.issues': [issue('external_auth_missing'), issue('dmarc_missing')] } })
+    await evalAt(1)
+    const dns = fired.filter((a) => a.kind === 'dns_misconfigured')
+    expect(dns.map((a) => `${a.event}:${a.severity}`)).toEqual(['opened:warning', 'updated:critical'])
+    expect(dns[1]!.newSourceIps).toEqual([])
+    expect(base.domain).toBe('example.com')
+  })
+
+  it('one busy domain cannot starve another domain of its failure rows', async () => {
+    await saveDmarcSettingsPatch(H1.ctx, { extraDomains: ['busy.example'] }, 'test')
+    await seedReport(H1)
+    await seedReport(H1, { domain: 'busy.example' })
+    await H1.mailer.collections.dmarcFailures.insertMany(
+      Array.from({ length: 20_001 }, (_, i) => ({
+        reportId: `busy-${i}`, domain: 'busy.example', sourceIp: `10.${Math.floor(i / 250)}.${i % 250}.9`, count: 1000,
+        headerFrom: 'busy.example', dkimResult: 'fail' as const, spfResult: 'fail' as const, dispositionApplied: 'none',
+        day: dayStr(1), receivedAt: T0,
+      })),
+    )
+    await seedFailure(H1, '198.51.100.1', 50)
+    await evalAt(0)
+    expect(fired.map((a) => a.id)).toContain(ID_UNKNOWN)
+  })
+
+  it('the ignored-source discount sees every ignored row even past the per-domain cap', async () => {
+    await saveDmarcSettingsPatch(H1.ctx, { alerts: { unknownSourceMinMessages: 1_000_000 } }, 'test')
+    await H1.mailer.collections.dmarcSourceTags.insertOne({ ip: '203.0.113.9', label: 'Forwarder', ignored: true, setBy: 't', setAt: T0 })
+    await seedReport(H1, { pass: 970, fail: 5030 })
+    await H1.mailer.collections.dmarcFailures.insertMany(
+      Array.from({ length: 20_000 }, (_, i) => ({
+        reportId: `big-${i}`, domain: 'example.com', sourceIp: `10.${Math.floor(i / 250)}.${i % 250}.7`, count: 2,
+        headerFrom: 'example.com', dkimResult: 'fail' as const, spfResult: 'fail' as const, dispositionApplied: 'none',
+        day: dayStr(1), receivedAt: T0,
+      })),
+    )
+    // 30 one-message rows from the ignored forwarder: the lowest counts, so any plain
+    // top-N load (global 20 000 or per-domain 5 000) would drop every one of them.
+    await H1.mailer.collections.dmarcFailures.insertMany(
+      Array.from({ length: 30 }, (_, i) => ({
+        reportId: `fwd-${i}`, domain: 'example.com', sourceIp: '203.0.113.9', count: 1, headerFrom: 'example.com',
+        dkimResult: 'fail' as const, spfResult: 'pass' as const, dispositionApplied: 'none', day: dayStr(1), receivedAt: T0,
+      })),
+    )
+    await evalAt(0)
+    const drop = fired.find((a) => a.kind === 'alignment_drop')
+    expect(drop?.message).toContain('970 of 5,970')
+  })
+
   it('stored subject keys never exceed 500', async () => {
     await seedReport(H1)
     await H1.mailer.collections.dmarcFailures.insertMany(

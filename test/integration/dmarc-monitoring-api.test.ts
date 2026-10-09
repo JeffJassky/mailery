@@ -265,6 +265,16 @@ describe('settings', () => {
     expect(await H.mailer.collections.dmarcSettings.countDocuments()).toBe(0)
   })
 
+  it('concurrent saves of different keys both persist', async () => {
+    await Promise.all([
+      api('PUT', '/dmarc/settings', { alerts: { windowDays: 14 } }),
+      api('PUT', '/dmarc/settings', { extraDomains: ['side.io'] }),
+      api('PUT', '/dmarc/settings', { alerts: { reportsStoppedDays: 3 } }),
+    ])
+    const stored = await H.mailer.collections.dmarcSettings.findOne({ _id: 'settings' })
+    expect(stored?.patch).toEqual({ alerts: { windowDays: 14, reportsStoppedDays: 3 }, extraDomains: ['side.io'] })
+  })
+
   it('DELETE resets to config + defaults and audits', async () => {
     await api('PUT', '/dmarc/settings', { alerts: { windowDays: 14 } })
     const r = await api('DELETE', '/dmarc/settings')
@@ -297,6 +307,19 @@ describe('DNS checks', () => {
     const r = await api('POST', '/dmarc/dns/check', { domain: 'evil.example' })
     expect(r.status).toBe(400)
     expect(r.body.error).toBe('validation_failed')
+  })
+
+  it('setup status ignores stored checks for domains no longer checked', async () => {
+    const result = (domain: string) => ({
+      domain, checkedAt: new Date(), inheritedFrom: null,
+      dmarc: { host: `_dmarc.${domain}`, found: false, raw: [], policy: null, subdomainPolicy: null, pct: null, rua: [], ruf: [], adkim: null, aspf: null },
+      externalAuth: [], ruaMx: [], spf: { found: false, raw: [], all: null },
+      issues: [{ code: 'dmarc_missing' as const, severity: 'error' as const, message: 'No DMARC record.', fix: null }],
+      ok: false,
+    })
+    await H.mailer.collections.dmarcDnsChecks.insertOne({ _id: 'old.example', checkedAt: new Date(), result: result('old.example') })
+    const status = await runSetupChecks(H.mailer)
+    expect(status.checks.find((c) => c.name === 'dmarc')!.message).not.toContain('old.example')
   })
 
   it('setup status warns about stored DNS problems', async () => {

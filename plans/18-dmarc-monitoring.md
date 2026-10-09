@@ -126,7 +126,9 @@ Every message names the offending field.
 `loadDmarcSettings(ctx)` reads `dmarcSettings` `_id: 'settings'`.
 `saveDmarcSettingsPatch(ctx, patch, actor)` deep-merges `patch` into the stored patch
 (`alerts` merged key by key, other keys replaced), upserts, returns merged settings.
-`clearDmarcSettingsPatch(ctx)` deletes the document.
+`clearDmarcSettingsPatch(ctx)` deletes the document. Saves write dotted paths
+(`patch.alerts.windowDays`, `patch.extraDomains`) with one `updateOne` so two
+concurrent saves of different keys both persist.
 
 ### 6.2 Domains
 
@@ -190,11 +192,17 @@ gets `reports_stopped`.
 
 ### 6.3a Untrusted report strings
 
-`parseDmarcReport` skips a record (from `failures` only; totals still count it) whose
+`parseDmarcReport` whitelists enumerated fields: `policy_published.p` outside
+none/quarantine/reject becomes `none`; a `policy_evaluated.dkim`/`spf` value outside the
+`DmarcAuthResult` union becomes `unknown`; a `policy_published.domain` that does not
+match the settings domain pattern makes the whole report invalid (throws). It skips a
+record (from `failures` only; totals still count it) whose
 `source_ip` fails `net.isIP`, and passes `org_name`, `email` and each `header_from`
 through `cleanReportText` (`src/server/runner/dmarc-text.ts`): remove `[\x00-\x1f\x7f<>]`, collapse whitespace, trim, cap at
 200 characters. `formatDmarcAlertText` applies the same cleaning to every interpolated
-source field (`ip`, `ptr`, `label`, `reporters`) and to issue `message`/`fix` values, so
+source field (`ip`, `ptr`, `label`, `reporters`, `dkimResult`, `spfResult`), to
+`title`, `message`, `summary.policy`, and to issue `message`/`fix` values (not to
+`recommendation`, which is ours and contains `<your rua mailbox>`), so
 `alert.text` never gains a line or a Slack `<url|text>` link from report or DNS data.
 
 - **unknown_source_failing** — title `{n} unknown sender(s) failing DMARC for {domain}`;
@@ -259,7 +267,10 @@ What to do: {recommendation}               ← line omitted when empty
 3. Load, for monitored non-ignored domains only (`domain: { $in }`), with projections:
    reports (`rangeEnd` ≥ now − 35d); `latestReports` (one aggregation: newest
    `rangeEnd`/`policyP`/`policyPct` per domain, all time); failures (`receivedAt` ≥ now −
-   30d), sorted by `count` desc, limit 20 000; tags; stored DNS checks. Compute candidates.
+   30d) **per domain**, sorted by `count` desc, limit 5 000 each, plus every row from
+   an ignored-tag IP (uncapped; the `alignment_drop` discount needs them all); tags;
+   stored DNS checks. Index `{ domain: 1, count: -1, receivedAt: 1 }` serves the
+   per-domain query. Compute candidates.
 4. For each candidate:
    - `insertOne` a state doc (`status 'open'`, `fireCount 1`, `firstDetectedAt =
      lastDetectedAt = lastFiredAt = now`, `resolvedAt null`, `lastDelivery null`,
@@ -274,10 +285,15 @@ What to do: {recommendation}               ← line omitted when empty
        **updated**, `newSourceIps` = the new keys for the two source kinds, else `[]`.
      - open and the candidate's severity ranks above `existing.severity`
        (info < warning < critical) → same guarded update → **updated**, `newSourceIps`
-       = new keys (often `[]`).
+       = new keys for the two source kinds only, otherwise `[]`.
+     A key is not "new" when `existing.subjectKeys` is already at the 500 cap (an IP
+     moving in and out of the top 500 is not news).
      - open, `existing.lastDelivery` is `null` or `failed`, and `existing.lastFiredAt ≤
        now − 1h` → same guarded update → re-fire with `existing.lastAlert.event`
-       (a retry of the delivery that did not land).
+       (a retry of the delivery that did not land). Retries continue hourly while the
+       hook keeps failing; the failure is visible on the alert and in the docs.
+     The reopen update also sets `lastDelivery: null` and `lastAlert` to the finalized
+     `opened` alert, so a crash before the hook runs is retried as `opened`.
      - open, `realertAfterHours > 0` and `existing.lastFiredAt ≤ now −
        realertAfterHours` → same guarded update → **reminder**.
      Precedence: new keys, then severity rise, then retry, then reminder.
@@ -322,8 +338,9 @@ in `runner/tick.ts` with the same `.catch(console.error)` shape as its neighbour
 
 `runDmarcDnsChecks(ctx, opts)`: domains = monitored, non-ignored, **with origin
 `config` or `extra`** (a domain known only from reports is never resolved: reports are
-attacker-supplied). After a run, delete `dmarcDnsChecks` docs whose `_id` is not in that
-list. Without `force` or `domain`, check at most 10 domains per run, never-checked first
+attacker-supplied). At the start of every call (before any early return), delete
+`dmarcDnsChecks` docs whose `_id` is not in that list. `checkDmarc` in setup-status
+only considers stored checks for domains in that list. Without `force` or `domain`, check at most 10 domains per run, never-checked first
 then oldest `checkedAt`; checks run with concurrency 4. With `opts.domain`:
 must be one of them (else throw `Error('domain <d> is not monitored')`), always
 checked. Otherwise per domain skip when the stored `checkedAt > now −

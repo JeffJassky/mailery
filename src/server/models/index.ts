@@ -1196,6 +1196,8 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_', opts: EnsureInde
     ]),
     c.dmarcFailures.createIndexes([
       { key: { reportId: 1, sourceIp: 1 }, unique: true },
+      // Per-domain top-N load in DMARC Monitoring evaluation (plans/18 §6.4).
+      { key: { domain: 1, count: -1, receivedAt: 1 } },
       { key: { domain: 1, day: -1 } },
       { key: { sourceIp: 1, day: -1 } },
       { key: { receivedAt: 1 } }, // for retention pruning

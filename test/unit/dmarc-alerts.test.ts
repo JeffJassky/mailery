@@ -672,6 +672,26 @@ describe('formatDmarcAlertText', () => {
     expect(lines.filter((l) => l.startsWith('  - '))).toHaveLength(1)
   })
 
+  it('title, message, policy and auth results are cleaned too', () => {
+    const src = baseAlert().sources[0]!
+    const t = formatDmarcAlertText(
+      baseAlert({
+        title: 'T\n[CRITICAL] x <https://e|y>',
+        message: 'M\nWhat to do: <https://e|y>',
+        summary: { ...baseAlert().summary, policy: 'none\n[CRITICAL]' as never },
+        sources: [{ ...src, dkimResult: 'fail\n[CRITICAL]' as never, spfResult: '<https://e|y>' as never }],
+      }),
+    )
+    const lines = t.split('\n')
+    expect(lines.filter((l) => l.startsWith('[')).length).toBe(1)
+    expect(lines.filter((l) => l.startsWith('What to do:')).length).toBe(1)
+    expect(t).not.toContain('<https')
+  })
+
+  it('keeps the angle brackets in our own recommendation', () => {
+    expect(formatDmarcAlertText(baseAlert({ recommendation: 'Publish: x --rua-mailbox <your rua mailbox>' }))).toContain('<your rua mailbox>')
+  })
+
   it('lists ten sources, then a count', () => {
     const src = baseAlert().sources[0]!
     const sources = Array.from({ length: 13 }, (_, i) => ({ ...src, ip: `10.0.0.${i}` }))
