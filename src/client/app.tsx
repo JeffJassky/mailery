@@ -7,6 +7,10 @@ import { Dashboard } from './screens/dashboard'
 import { Flows } from './screens/flows'
 import { FlowDetail } from './screens/flow-detail'
 import { Templates } from './screens/templates'
+import { Categories } from './screens/categories'
+import { Programs } from './screens/programs'
+import { ProgramDetail } from './screens/program-detail'
+import { ProgramRun } from './screens/program-run'
 // Maily editor is heavy (~1MB before split). Lazy-load it so the rest of the
 // SPA stays fast — the Maily chunk only loads when a user opens a template.
 const TemplateEditor = React.lazy(() =>
@@ -21,6 +25,7 @@ import { SendDetail } from './screens/send-detail'
 import { Suppressions } from './screens/suppressions'
 import { Audit } from './screens/audit'
 import { Health } from './screens/health'
+import { Dmarc } from './screens/dmarc'
 import { ListHygiene } from './screens/hygiene'
 
 type Route = { screen: string; slug?: string; id?: string }
@@ -39,6 +44,10 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
     ),
     crumbs: (r) => ['Mailery', 'Templates', r.slug ?? ''],
   },
+  programs:          { Comp: (_r, setRoute) => <Programs setRoute={setRoute} />,                        crumbs: () => ['Mailery', 'Programs'] },
+  'program-detail':  { Comp: (r, setRoute) => <ProgramDetail slug={r.slug!} setRoute={setRoute} />,     crumbs: (r) => ['Mailery', 'Programs', r.slug ?? ''] },
+  'program-run':     { Comp: (r, setRoute) => <ProgramRun slug={r.slug!} subjectId={r.id!} setRoute={setRoute} />, crumbs: (r) => ['Mailery', 'Programs', r.slug ?? '', r.id ?? ''] },
+  categories:        { Comp: (_r, setRoute) => <Categories setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Categories'] },
   broadcasts:        { Comp: (_r, setRoute) => <Broadcasts setRoute={setRoute} />,                      crumbs: () => ['Mailery', 'Broadcasts'] },
   'broadcast-new':   { Comp: (r, setRoute) => <BroadcastNew setRoute={setRoute} slug={r.slug} />,       crumbs: (r) => ['Mailery', 'Broadcasts', r.slug ?? 'New'] },
   contacts:          { Comp: (_r, setRoute) => <Contacts setRoute={setRoute} />,                        crumbs: () => ['Mailery', 'Contacts'] },
@@ -48,6 +57,7 @@ const SCREENS: Record<string, { Comp: (r: Route, setRoute: SetRoute) => React.Re
   suppressions:      { Comp: (_r, setRoute) => <Suppressions setRoute={setRoute} />,                    crumbs: () => ['Mailery', 'Suppressions'] },
   audit:             { Comp: (_r, setRoute) => <Audit setRoute={setRoute} />,                           crumbs: () => ['Mailery', 'Audit log'] },
   health:            { Comp: (_r, setRoute) => <Health setRoute={setRoute} />,                          crumbs: () => ['Mailery', 'Health'] },
+  dmarc:             { Comp: (_r, setRoute) => <Dmarc setRoute={setRoute} />,                           crumbs: () => ['Mailery', 'DMARC Monitoring'] },
   hygiene:           { Comp: (_r, _setRoute) => <ListHygiene />,                                        crumbs: () => ['Mailery', 'List hygiene'] },
 }
 

@@ -4,6 +4,7 @@ import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState, EmptyRow } from '../lib/load-state'
+import { sendStatusNote } from '../lib/send-status'
 
 export function ContactDetail({ id }: any) {
   const { data, loading, error, refetch } = useLive(() => api.contact(id), [id])
@@ -94,7 +95,10 @@ function ContactBody({ data }: { data: any }) {
                   sends.slice(0, 10).map((s: any, i: number) => (
                     <tr key={String(s._id ?? i)}>
                       <td className="mono text-xs">{s.templateSlug}</td>
-                      <td><StatusPill status={s.status} /></td>
+                      <td>
+                        <StatusPill status={s.status} />
+                        {sendStatusNote(s) && <div className="text-xs subtle">{sendStatusNote(s)}</div>}
+                      </td>
                       <td className="tabular">{s.openCount ?? 0}</td>
                       <td className="tabular">{s.clickCount ?? 0}</td>
                       <td className="text-xs subtle">{s.queuedAt ? formatRel(s.queuedAt) : ''}</td>
@@ -124,6 +128,29 @@ function ContactBody({ data }: { data: any }) {
               <div className="hstack"><span className="text-sm subtle">Email at subscribe</span><span className="grow" /><span className="mono text-xs">{sub.emailAtSubscribe ?? email}</span></div>
             </div>
           </div>
+
+          {data.preferences && (
+            <div className="card">
+              <div className="card-head"><span className="card-title">Email preferences</span><span className="card-sub">Category opt-ins</span></div>
+              <div className="card-body" style={{ display: 'grid', gap: 8 }}>
+                <div className="hstack">
+                  <span className="text-sm subtle">All marketing</span>
+                  <span className="grow" />
+                  <span className={'pill ' + (data.preferences.marketing ? 'green' : 'red')}>{data.preferences.marketing ? 'opted in' : 'opted out'}</span>
+                  {data.preferences.pausedUntil && (
+                    <span className="pill amber" style={{ marginLeft: 6 }}>Paused until {new Date(data.preferences.pausedUntil).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</span>
+                  )}
+                </div>
+                {Object.entries(data.preferences.categories as Record<string, boolean>).map(([id, on]) => (
+                  <div className="hstack" key={id}>
+                    <span className="mono text-xs">{id}</span>
+                    <span className="grow" />
+                    <span className={'pill ' + (on ? 'green' : 'red')}>{on ? 'opted in' : 'opted out'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="card">
             <div className="card-head"><span className="card-title">Adapter fields</span><span className="card-sub">From host users.find</span></div>

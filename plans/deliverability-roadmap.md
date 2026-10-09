@@ -101,6 +101,8 @@ Similar shape to PR4. No OAuth — SNDS uses access keys per IP.
 
 ### PR6. DMARC report ingestion
 
+**Done.** Ingestion since 0.15; inbound automation, DNS checks and alerting shipped in 0.21 as DMARC Monitoring: see [18-dmarc-monitoring.md](./18-dmarc-monitoring.md). IMAP pull is not planned.
+
 Highest-scope item in Phase 2.
 
 - Inbound path: SendGrid Inbound Parse webhook → `/admin/mailer/api/dmarc/inbound`. Alternative IMAP-pull mode for operators not using Inbound Parse — feature-flagged.

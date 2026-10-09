@@ -26,6 +26,7 @@
 // for the bundle as a whole) for a package that is a hard, non-optional
 // dependency and is therefore always installed anyway.
 import type AdmZipType from 'adm-zip'
+import { isIP } from 'node:net'
 import { XMLParser } from 'fast-xml-parser'
 
 import type {
@@ -35,6 +36,7 @@ import type {
   DmarcReportDoc,
 } from '../models/index.js'
 import type { RunnerContext } from './index.js'
+import { cleanReportText } from './dmarc-text.js'
 
 /**
  * Hard cap on decompressed bytes. A real RUA aggregate report is well under
@@ -196,16 +198,18 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
   const policy = fb.policy_published ?? {}
 
   const reportId = String(meta.report_id ?? '').trim()
-  const orgName = String(meta.org_name ?? '').trim()
-  const email = String(meta.email ?? '').trim()
+  const orgName = cleanReportText(meta.org_name)
+  const email = cleanReportText(meta.email)
   const domain = String(policy.domain ?? '').trim().toLowerCase()
-  const policyP = (policy.p ?? 'none') as DmarcPolicy
+  const rawP = String(policy.p ?? '').trim().toLowerCase()
+  const policyP: DmarcPolicy = rawP === 'quarantine' || rawP === 'reject' ? rawP : 'none'
   const rawPct = Number(policy.pct ?? 100)
   // Use isFinite so pct=0 (legit "monitor only" config) survives.
   const policyPct = Number.isFinite(rawPct) ? Math.max(0, Math.min(100, rawPct)) : 100
 
   if (!reportId) throw new Error('DMARC XML missing report_id')
   if (!domain) throw new Error('DMARC XML missing policy_published.domain')
+  if (!DOMAIN_PATTERN.test(domain)) throw new Error('DMARC XML has an invalid policy_published.domain')
 
   const range = meta.date_range ?? {}
   const begin = secondsToDate(range.begin)
@@ -228,8 +232,8 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     totalMessages += count
 
     const evald = row.policy_evaluated ?? {}
-    const dkim = (evald.dkim ?? 'none') as DmarcAuthResult
-    const spf = (evald.spf ?? 'none') as DmarcAuthResult
+    const dkim = authResult(evald.dkim)
+    const spf = authResult(evald.spf)
     const aligned = dkim === 'pass' || spf === 'pass'
 
     if (aligned) {
@@ -239,8 +243,8 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     failCount += count
 
     const sourceIp = String(row.source_ip ?? '').trim()
-    if (!sourceIp) continue
-    const headerFrom = String(rec?.identifiers?.header_from ?? '').toLowerCase()
+    if (!isIP(sourceIp)) continue
+    const headerFrom = cleanReportText(rec?.identifiers?.header_from).toLowerCase()
     const dispositionApplied = String(evald.disposition ?? 'none')
 
     failures.push({
@@ -272,6 +276,14 @@ export function parseDmarcReport(xml: string): ParsedDmarcReport {
     },
     failures,
   }
+}
+
+export const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,}|xn--[a-z0-9-]{1,59})$/
+const AUTH_RESULTS = new Set<string>(['pass', 'fail', 'softfail', 'neutral', 'temperror', 'permerror', 'none', 'unknown'])
+
+function authResult(v: unknown): DmarcAuthResult {
+  const s = String(v ?? 'none').trim().toLowerCase()
+  return AUTH_RESULTS.has(s) ? (s as DmarcAuthResult) : 'unknown'
 }
 
 function secondsToDate(v: unknown): Date | null {
@@ -315,6 +327,8 @@ export interface IngestOptions {
    * than "arbitrary rows in your DMARC dashboard".
    */
   allowDomain?: (domain: string) => boolean
+  /** Provenance written on first insert. */
+  via?: 'upload' | 'inbound'
 }
 
 /**
@@ -340,7 +354,7 @@ export async function ingestDmarcAttachment(
       if (opts.allowDomain && !opts.allowDomain(parsed.report.domain)) {
         throw new Error(`DMARC report is for domain "${parsed.report.domain}", which this deployment does not send from`)
       }
-      results.push(await ingestParsedDmarcReport(ctx, parsed))
+      results.push(await ingestParsedDmarcReport(ctx, parsed, opts.via))
     } catch (err) {
       if (!firstError) firstError = err
       // Continue ingesting siblings — one malformed report in a multi-file
@@ -356,6 +370,7 @@ export async function ingestDmarcAttachment(
 export async function ingestParsedDmarcReport(
   ctx: RunnerContext,
   parsed: ParsedDmarcReport,
+  via?: 'upload' | 'inbound',
 ): Promise<IngestResult> {
   const now = new Date()
   const { report, failures } = parsed
@@ -366,7 +381,7 @@ export async function ingestParsedDmarcReport(
   // succeed.
   let duplicate = false
   try {
-    await ctx.collections.dmarcReports.insertOne({ ...report, receivedAt: now })
+    await ctx.collections.dmarcReports.insertOne({ ...report, receivedAt: now, ...(via ? { via } : {}) })
   } catch (err: any) {
     if (err?.code === 11000) {
       duplicate = true
@@ -482,6 +497,8 @@ export interface ProgressionInput {
   ignoredSourceIps: Set<string>
   currentPolicy: 'none' | 'quarantine' | 'reject' | null
   currentPct: number | null
+  /** Evaluation time. Defaults to the clock; the alert rules pass their own. */
+  now?: Date
 }
 
 export function suggestPolicyProgression(input: ProgressionInput): DomainProgression['suggested'] {
@@ -489,7 +506,7 @@ export function suggestPolicyProgression(input: ProgressionInput): DomainProgres
 
   if (currentPolicy === 'reject') return null
 
-  const since30 = Date.now() - 30 * 86_400_000
+  const since30 = (input.now?.getTime() ?? Date.now()) - 30 * 86_400_000
   const recentReports = reports.filter((r) => r.rangeEnd.getTime() >= since30)
   const totalMsgs = recentReports.reduce((acc, r) => acc + r.passCount + r.failCount, 0)
   const totalPass = recentReports.reduce((acc, r) => acc + r.passCount, 0)

@@ -22,8 +22,21 @@ import type {
   BroadcastStatus,
   HealthStatus,
   FlowGoal,
+  SendExitReason,
+  ProgramRunStatus,
+  ProgramActionStatus,
+  ProgramArm,
+  ProgramDecisionReason,
 } from '../../shared/enums.js'
-import type { FlowStep, SegmentDefinition } from '../../shared/types.js'
+import type { FlowStep, SegmentDefinition, ProgramDefinition, Facts } from '../../shared/types.js'
+import type {
+  DmarcAlert,
+  DmarcAlertDelivery,
+  DmarcAlertKind,
+  DmarcAlertSeverity,
+  DmarcDnsCheckResult,
+  DmarcSettingsPatch,
+} from '../../shared/dmarc-types.js'
 
 // ---------------------------------------------------------------------------
 // Document interfaces (per collection)
@@ -224,6 +237,13 @@ export interface TemplateDoc {
   tags: string[]
   /** Wire format for the body. Absent on documents written before 0.11. */
   bodyFormat?: TemplateBodyFormat
+  /**
+   * Marketing category (0.21) — a declared `MailerConfig.categories` id.
+   * Changes what the unsubscribe link and one-click POST opt out of: this
+   * category instead of all marketing. Rejected on transactional templates.
+   * Absent/null: uncategorised marketing, exactly as before 0.21.
+   */
+  category?: string | null
   trackOpens: boolean
   trackClicks: boolean
   stats: {
@@ -309,6 +329,66 @@ export interface SendDoc {
    * remains until then.
    */
   notBefore?: Date | null
+  /**
+   * Template category at enqueue (0.21). Informational — dispatch re-reads the
+   * template, so a category change between enqueue and dispatch applies.
+   */
+  category?: string | null
+  /** Why a never-sent row stopped (0.21). Set with `status: 'cancelled'`. */
+  exitReason?: SendExitReason | null
+  /**
+   * Contact-policy state (0.21), set when the policy deferred this send.
+   * `firstDeferredAt` never moves; `count` increments per deferral.
+   */
+  policyDeferral?: {
+    reason: ContactPolicyReason
+    firstDeferredAt: Date
+    count: number
+    /**
+     * When the most recent blackout deferral ended. Deferral expiry
+     * (`deferral.maxHours`) is measured from max(queuedAt, this), so a
+     * blackout can never use up the budget and cause a drop after release.
+     */
+    blackoutEndedAt?: Date
+  } | null
+  /** IANA zone the contact policy falls back to when the contact has none (Programs: the `timezone` fact). */
+  timezoneHint?: string | null
+  /** Present on Program sends (0.21). See plans/15-programs.md §5.3. */
+  program?: SendProgramInfo | null
+}
+
+/**
+ * Short-lived per-recipient mutex for the contact policy stage (0.21).
+ * `_id` is the lower-cased address, so at most one holder exists; `expiresAt`
+ * bounds a crashed holder and a TTL index clears abandoned rows.
+ */
+export interface ContactLockDoc {
+  _id: string
+  owner: string
+  expiresAt: Date
+}
+
+export type ContactPolicyReason = 'min_gap' | 'rolling_cap' | 'quiet_hours' | 'priority' | 'blackout'
+
+export interface SendProgramInfo {
+  slug: string
+  subjectId: string
+  runId: ObjectId
+  /** `$sunset-ask` for the sunset ask email. */
+  actionId: string
+  actionVersion: number
+  /** 1-based position on the ladder. */
+  attempt: number
+  /** Ladder number for this action; increments when a cooldown re-opens it. */
+  ladder: number
+  /** Reserved; always 'default' in 0.21. */
+  variantId: 'default'
+  decisionId: ObjectId
+  /** Template `publishedAt` at decision time, as epoch ms. Null when never published. */
+  templateVersion: number | null
+  holdout: boolean
+  /** Set once the run's attempt counter has been advanced for this send's decision. */
+  counted?: boolean
 }
 
 export interface SuppressionDoc {
@@ -554,8 +634,8 @@ export interface MailTesterScoreDoc {
   expiresAt: Date
 }
 
-export type DmarcPolicy = 'none' | 'quarantine' | 'reject'
-export type DmarcAuthResult = 'pass' | 'fail' | 'softfail' | 'neutral' | 'temperror' | 'permerror' | 'none' | 'unknown'
+export type { DmarcPolicy, DmarcAuthResult } from '../../shared/dmarc-types.js'
+import type { DmarcPolicy, DmarcAuthResult } from '../../shared/dmarc-types.js'
 
 /**
  * One DMARC RUA aggregate report. Receivers (Google, Yahoo, Microsoft, etc.)
@@ -583,6 +663,8 @@ export interface DmarcReportDoc {
   passCount: number
   failCount: number
   receivedAt: Date
+  /** How the report arrived. Absent on rows ingested before 0.21. */
+  via?: 'upload' | 'inbound'
 }
 
 /**
@@ -678,8 +760,204 @@ export interface ContactTagDoc {
 }
 
 // ---------------------------------------------------------------------------
+// Programs (0.21) — plans/15-programs.md §5.3
+// ---------------------------------------------------------------------------
+
+export interface ProgramDraft {
+  definition: ProgramDefinition
+  notes: string
+  lastModifiedBy: string
+  lastModifiedAt: Date
+}
+
+/**
+ * `mailer_programs`. The published definition lives in `definition`; edits go
+ * to `draft` until `publishProgram`. A program that was never published has
+ * `version: 0` and `definition: null` and never ticks.
+ */
+export interface ProgramDoc {
+  _id?: ObjectId
+  slug: string
+  /** Published definition; null until first publish. */
+  definition: ProgramDefinition | null
+  version: number
+  enabled: boolean
+  draft: ProgramDraft | null
+  /** Entry-scan watermark: events with `occurredAt` after this are considered. */
+  lastEntryScanAt: Date | null
+  /** Facts-Changed scan watermark. */
+  lastFactsScanAt: Date | null
+  publishedAt: Date | null
+  publishedBy: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+/** `mailer_program_versions`: immutable snapshot per publish. */
+export interface ProgramVersionDoc {
+  _id?: ObjectId
+  programId: ObjectId
+  slug: string
+  version: number
+  definition: ProgramDefinition
+  publishedAt: Date
+  publishedBy: string
+}
+
+export interface ProgramRunActionState {
+  status: ProgramActionStatus
+  /** Accepted sends on the current ladder (holdout: simulated acceptances). */
+  attempts: number
+  /** Starts at 1; increments when a cooldown re-opens the ladder. */
+  ladder: number
+  lastSentAt: Date | null
+  /** First time `satisfied` held. Never cleared. INVARIANT 21. */
+  completedAt: Date | null
+  exhaustedAt: Date | null
+  cooldownUntil: Date | null
+  /** Action version seen at the last tick. */
+  version: number
+}
+
+/** `mailer_program_runs`: one per (programSlug, subjectId). */
+export interface ProgramRunDoc {
+  _id?: ObjectId
+  programSlug: string
+  /** Program version at the last tick (runs always use the latest published definition). */
+  programVersion: number
+  subjectId: string
+  status: ProgramRunStatus
+  arm: ProgramArm
+  /** Keyed by action id. Actions added after entry appear on first evaluation. */
+  actions: Record<string, ProgramRunActionState>
+  /** Accepted sends since `lastEngagementAt`. Drives sunset. */
+  unansweredAttempts: number
+  lastEngagementAt: Date | null
+  sunsetStage: 0 | 1 | 2
+  /** True once the sunset ask send was accepted (or simulated in holdout). */
+  sunsetAskSent: boolean
+  /** Last accepted Program send to this subject (any action). Gap origin. */
+  lastSentAt: Date | null
+  /**
+   * The decision whose sends have not all reached a terminal status. While
+   * set, ticks are silent (`in-flight`).
+   */
+  inFlight: {
+    decisionId: ObjectId
+    actionId: string
+    attempt: number
+    sendIds: ObjectId[]
+    at: Date
+  } | null
+  /** Idempotency for the attempt counter: the last decision that advanced it. */
+  lastCountedDecisionId: ObjectId | null
+  nextTickAt: Date
+  /** Latest Facts Changed event that woke this run (0.21 PR4); a tick that sees it move re-ticks soon. */
+  wakeRequestedAt?: Date | null
+  lease: { until: Date; worker: string } | null
+  enteredAt: Date
+  /** `occurredAt` of the event that entered the run. Exit events must be later. */
+  entryEventAt: Date
+  completedAt: Date | null
+  exitedAt: Date | null
+  exitReason: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export type ProgramBlockedBy =
+  | null
+  | 'satisfied'
+  | 'ineligible'
+  | `requires:${string}`
+  | 'exhausted'
+  | 'cooldown'
+  | 'hold'
+
+export interface ProgramDecisionCandidate {
+  actionId: string
+  actionVersion: number
+  priority: number
+  eligible: boolean
+  satisfied: boolean
+  blockedBy: ProgramBlockedBy
+  /** 1-based rank among unblocked candidates. Absent when blocked. */
+  rank?: number
+}
+
+/** `mailer_program_decisions`: one per tick, silent ticks included. INVARIANT 23. */
+export interface ProgramDecisionDoc {
+  _id?: ObjectId
+  runId: ObjectId
+  programSlug: string
+  programVersion: number
+  subjectId: string
+  arm: ProgramArm
+  at: Date
+  /** sha256 of the stable-JSON facts snapshot. */
+  factsHash: string
+  /** Inline when the stable JSON is under 4 KB. */
+  facts: Facts | null
+  candidates: ProgramDecisionCandidate[]
+  chosen: string | null
+  attempt: number | null
+  reason: ProgramDecisionReason
+  ranker: { name: 'priority'; version: 1 }
+  selectionProb: 1
+  explore: false
+  sendIds: ObjectId[]
+  /** Filled by the dispatch hook as the decision's sends resolve. */
+  outcome: {
+    status: 'sent' | 'deferred' | 'cancelled' | 'suppressed' | 'failed' | 'holdout'
+    at: Date
+    exitReason?: SendExitReason | null
+    notBefore?: Date | null
+  } | null
+  /** What triggered the tick. */
+  trigger: 'schedule' | 'entry' | 'facts_changed' | 'forced'
+}
+
+// ---------------------------------------------------------------------------
 // Collection factory
 // ---------------------------------------------------------------------------
+
+/**
+ * One DMARC Monitoring alert, keyed by `DmarcAlert.id`. An alert opens,
+ * may be re-fired as `updated` or `reminder`, and resolves when its
+ * condition is no longer detected. Fire decisions are guarded updates on
+ * `lastFiredAt`, so two instances ticking together fire once.
+ */
+export interface DmarcAlertStateDoc {
+  _id: string
+  kind: DmarcAlertKind
+  domain: string
+  status: 'open' | 'resolved'
+  severity: DmarcAlertSeverity
+  title: string
+  subjectKeys: string[]
+  firstDetectedAt: Date
+  lastDetectedAt: Date
+  lastFiredAt: Date
+  fireCount: number
+  resolvedAt: Date | null
+  lastAlert: DmarcAlert
+  lastDelivery: DmarcAlertDelivery | null
+}
+
+/** Settings saved from the admin UI. One document; layered over `MailerConfig.dmarc`. */
+export interface DmarcSettingsDoc {
+  _id: 'settings'
+  patch: DmarcSettingsPatch
+  updatedBy: string
+  updatedAt: Date
+}
+
+/** Latest DNS check per monitored domain. */
+export interface DmarcDnsCheckDoc {
+  _id: string
+  result: DmarcDnsCheckResult
+  checkedAt: Date
+}
 
 export interface Collections {
   subscriptions: Collection<SubscriptionDoc>
@@ -705,6 +983,14 @@ export interface Collections {
   dmarcFailures: Collection<DmarcFailureDoc>
   dmarcSourceTags: Collection<DmarcSourceTagDoc>
   mailTesterScores: Collection<MailTesterScoreDoc>
+  programs: Collection<ProgramDoc>
+  programVersions: Collection<ProgramVersionDoc>
+  programRuns: Collection<ProgramRunDoc>
+  programDecisions: Collection<ProgramDecisionDoc>
+  contactLocks: Collection<ContactLockDoc>
+  dmarcAlerts: Collection<DmarcAlertStateDoc>
+  dmarcSettings: Collection<DmarcSettingsDoc>
+  dmarcDnsChecks: Collection<DmarcDnsCheckDoc>
 }
 
 export function getCollections(db: Db, prefix = 'mailer_'): Collections {
@@ -732,6 +1018,14 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
     dmarcFailures: db.collection<DmarcFailureDoc>(`${prefix}dmarc_failures`),
     dmarcSourceTags: db.collection<DmarcSourceTagDoc>(`${prefix}dmarc_source_tags`),
     mailTesterScores: db.collection<MailTesterScoreDoc>(`${prefix}mail_tester_scores`),
+    programs: db.collection<ProgramDoc>(`${prefix}programs`),
+    programVersions: db.collection<ProgramVersionDoc>(`${prefix}program_versions`),
+    programRuns: db.collection<ProgramRunDoc>(`${prefix}program_runs`),
+    programDecisions: db.collection<ProgramDecisionDoc>(`${prefix}program_decisions`),
+    contactLocks: db.collection<ContactLockDoc>(`${prefix}contact_locks`),
+    dmarcAlerts: db.collection<DmarcAlertStateDoc>(`${prefix}dmarc_alerts`),
+    dmarcSettings: db.collection<DmarcSettingsDoc>(`${prefix}dmarc_settings`),
+    dmarcDnsChecks: db.collection<DmarcDnsCheckDoc>(`${prefix}dmarc_dns_checks`),
   }
 }
 
@@ -739,8 +1033,59 @@ export function getCollections(db: Db, prefix = 'mailer_'): Collections {
 // Index ensurer
 // ---------------------------------------------------------------------------
 
-export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
+/**
+ * The 0.21 indexes on `mailer_sends`. On a large collection each build takes
+ * a while, so `Mailer.init` builds them in the background (`ensureIndexes`
+ * option `backgroundSends`), and `mailery doctor` tells hosts how to pre-build
+ * them. `program: true` marks the ones only Programs need.
+ */
+export const SENDS_0_21_INDEXES: Array<{
+  key: Record<string, 1 | -1>
+  partialFilterExpression?: Record<string, unknown>
+  why: string
+  program: boolean
+}> = [
+  { key: { emailAtSend: 1, kind: 1, sentAt: -1 }, why: 'contact-policy history lookup', program: false },
+  {
+    key: { status: 1, notBefore: 1 },
+    partialFilterExpression: { status: 'deferred' },
+    why: 'deferred-send release',
+    program: false,
+  },
+  {
+    key: { 'program.runId': 1 },
+    partialFilterExpression: { 'program.runId': { $exists: true } },
+    why: 'sends of a Program run',
+    program: true,
+  },
+  {
+    key: { 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 },
+    partialFilterExpression: { 'program.slug': { $exists: true } },
+    why: 'per-program stats',
+    program: true,
+  },
+]
+
+export interface EnsureIndexesOptions {
+  /**
+   * Build the 0.21 `mailer_sends` indexes without awaiting them (a failure is
+   * logged once). Everything else is awaited as before. Default false.
+   */
+  backgroundSends?: boolean
+}
+
+export async function ensureIndexes(db: Db, prefix = 'mailer_', opts: EnsureIndexesOptions = {}): Promise<void> {
   const c = getCollections(db, prefix)
+  const toSpec = (x: (typeof SENDS_0_21_INDEXES)[number]) => ({
+    key: x.key,
+    ...(x.partialFilterExpression ? { partialFilterExpression: x.partialFilterExpression } : {}),
+  })
+  const sends21 = () => c.sends.createIndexes(SENDS_0_21_INDEXES.map(toSpec))
+  if (opts.backgroundSends) {
+    sends21().catch((err: any) => {
+      console.warn(`mailery: building the 0.21 indexes on ${prefix}sends failed (will retry on next init): ${err?.message ?? err}`)
+    })
+  }
 
   await Promise.all([
     c.subscriptions.createIndexes([
@@ -789,6 +1134,7 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
       { key: { status: 1, queuedAt: 1 } },
       { key: { status: 1, updatedAt: 1 } },
     ]),
+    opts.backgroundSends ? Promise.resolve() : sends21(),
     c.suppressions.createIndexes([
       { key: { email: 1, scope: 1 }, unique: true, partialFilterExpression: { email: { $type: 'string' } } },
       { key: { emailHash: 1 } },
@@ -850,6 +1196,8 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
     ]),
     c.dmarcFailures.createIndexes([
       { key: { reportId: 1, sourceIp: 1 }, unique: true },
+      // Per-domain top-N load in DMARC Monitoring evaluation (plans/18 §6.4).
+      { key: { domain: 1, count: -1, receivedAt: 1 } },
       { key: { domain: 1, day: -1 } },
       { key: { sourceIp: 1, day: -1 } },
       { key: { receivedAt: 1 } }, // for retention pruning
@@ -857,12 +1205,31 @@ export async function ensureIndexes(db: Db, prefix = 'mailer_'): Promise<void> {
     c.dmarcSourceTags.createIndexes([
       { key: { ip: 1 }, unique: true },
     ]),
+    c.dmarcAlerts.createIndexes([
+      { key: { status: 1, lastDetectedAt: -1 } },
+      { key: { domain: 1 } },
+    ]),
     c.mailTesterScores.createIndexes([
       { key: { contentKey: 1 }, unique: true },
       { key: { templateSlug: 1, fetchedAt: -1 } },
       // TTL — Mongo auto-deletes expired scores so we never serve stale data.
       { key: { expiresAt: 1 }, expireAfterSeconds: 0 },
     ]),
+    c.programs.createIndexes([{ key: { slug: 1 }, unique: true }]),
+    c.programVersions.createIndexes([{ key: { programId: 1, version: 1 }, unique: true }]),
+    c.programRuns.createIndexes([
+      { key: { programSlug: 1, subjectId: 1 }, unique: true },
+      { key: { status: 1, nextTickAt: 1 } },
+      { key: { programSlug: 1, status: 1 } },
+      // Runs list (newest first); status / arm filters are served by the index above plus a bounded scan.
+      { key: { programSlug: 1, enteredAt: -1 } },
+    ]),
+    c.programDecisions.createIndexes([
+      { key: { runId: 1, at: -1 } },
+      { key: { programSlug: 1, at: -1 } },
+    ]),
+    // 0.21 contact-policy mutex: abandoned locks clear themselves.
+    c.contactLocks.createIndexes([{ key: { expiresAt: 1 }, expireAfterSeconds: 0 }]),
   ])
 
   // One-shot migrations — run after indexes are in place so any DELETE

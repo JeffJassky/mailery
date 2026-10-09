@@ -5,12 +5,17 @@
 import type { Db, MongoClientOptions } from 'mongodb'
 import type Handlebars from 'handlebars'
 import type {
+  CategoryDef,
   ContactAdapter,
+  ContactPolicy,
+  FactsAdapter,
+  PreferencesConfig,
   MailProvider,
 } from '../shared/types.js'
 import type { QueueDriverConfig } from './queues/types.js'
 import type { SenderDomainRegistry } from './templates/sender-domain.js'
 import type { VarsAdapter } from './adapters/vars.js'
+import type { DmarcAlert, DmarcAlertSettings } from '../shared/dmarc-types.js'
 
 export type { SenderDomainConfig, SenderDomainRegistry } from './templates/sender-domain.js'
 
@@ -108,6 +113,20 @@ export interface DmarcConfig {
    * trimmed by the daily tick to keep the collection bounded.
    */
   retentionDays?: number
+  /**
+   * Alert thresholds. Baseline only: values saved in the admin UI
+   * (DMARC Monitoring → Settings) override these. Defaults in
+   * `DMARC_SETTINGS_DEFAULTS`.
+   */
+  alerts?: Partial<DmarcAlertSettings>
+  /** The rua= mailbox reports are sent to. Checked against each domain's DMARC record. */
+  reportAddress?: string
+  /** Domains to monitor in addition to `senderDomains` and the From defaults. */
+  extraDomains?: string[]
+  /** Domains to leave out of DNS checks and alerts. */
+  ignoredDomains?: string[]
+  /** Absolute URL of the admin UI's DMARC screen; copied into every alert. */
+  adminUrl?: string
 }
 
 export interface SndsConfig {
@@ -449,7 +468,187 @@ export interface MailerConfig {
     reason: { code: string; message: string; at: Date; details?: Record<string, unknown> }
     heldSends: number
   }) => Promise<void> | void
+  /**
+   * DMARC Monitoring alerts: unknown or known senders failing, pass rate
+   * dropping, reports stopping, a domain ready for a stricter policy, DNS
+   * problems. Fires on `opened`, `updated`, `reminder` and `resolved`; one
+   * call per domain and kind, never per IP. `alert.text` is ready to post
+   * to Slack or email as is. Failures are swallowed and recorded on the
+   * alert's `lastDelivery`.
+   */
+  onDmarcAlert?: (alert: DmarcAlert) => Promise<void> | void
   handlebarsHelpers?: Record<string, Handlebars.HelperDelegate>
+
+  // ---- 0.21: categories, contact policy, programs ---------------------------
+  // Every key below is optional and off by default. With none of them set,
+  // 0.21 behaves exactly as 0.20 (test/upgrade/zero-config.test.ts).
+
+  /**
+   * Marketing categories a recipient can opt out of independently. Declaring
+   * at least one turns `GET /unsub/:token` into the preference page.
+   * Validated at init: ids unique, match `CATEGORY_ID_RE`, `defaultOptIn` not
+   * false.
+   */
+  categories?: CategoryDef[]
+  /** Cross-system send rules. Unset → no-op. See `ContactPolicy`. */
+  contactPolicy?: ContactPolicy
+  /** Host facts + recipients for Programs. Required before a program can be enabled. */
+  factsAdapter?: FactsAdapter
+  programs?: ProgramsConfig
+  /** Preference-page options (plans/17 F3). Unset → defaults; `pauseDays: []` hides the pause control. */
+  preferences?: PreferencesConfig
+}
+
+export interface ProgramsConfig {
+  /** Max runs ticked per mailer tick. Default 200. */
+  batchSize?: number
+  /** Lease length for one run's tick. Default 60_000. A crashed worker's lease expires after this. */
+  leaseMs?: number
+  /** Delete decision rows older than this. Default null (keep forever). */
+  decisionRetentionDays?: number | null
+}
+
+/** Category ids: lowercase dotted/kebab slug, 1–64 chars, e.g. `lifecycle.onboarding`. */
+export const CATEGORY_ID_RE = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*$/
+
+/**
+ * Init-time checks for the 0.21 config keys. Throw with every problem listed;
+ * no-ops when the keys are unset. Called from `Mailer.init` before storage
+ * opens, beside the provider checks.
+ */
+export function assertValidCategories(categories: CategoryDef[] | undefined): void {
+  if (!categories) return
+  const problems: string[] = []
+  const seen = new Set<string>()
+  for (const [i, c] of categories.entries()) {
+    if (!c || typeof c.id !== 'string' || c.id.length > 64 || !CATEGORY_ID_RE.test(c.id)) {
+      problems.push(`categories[${i}].id ${JSON.stringify(c?.id)} must be a lowercase dotted slug (≤ 64 chars)`)
+    } else if (seen.has(c.id)) {
+      problems.push(`categories[${i}].id "${c.id}" is declared twice`)
+    } else {
+      seen.add(c.id)
+    }
+    if (!c?.label || typeof c.label !== 'string') problems.push(`categories[${i}].label is required`)
+    if ((c as { defaultOptIn?: unknown })?.defaultOptIn === false) {
+      problems.push(`categories[${i}].defaultOptIn: false is not supported in 0.21 (opt-out categories only)`)
+    }
+  }
+  if (problems.length) throw new Error(`MailerConfig.categories is invalid:\n  - ${problems.join('\n  - ')}`)
+}
+
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+
+/** 'YYYY-MM-DD' that is a real calendar date. */
+function isCalendarDate(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
+  const [y, mo, d] = v.split('-').map(Number) as [number, number, number]
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d
+}
+
+export function assertValidContactPolicy(policy: ContactPolicy | undefined): void {
+  if (!policy) return
+  const problems: string[] = []
+  const m = policy.marketing
+  const positive = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0
+  if (m) {
+    if (m.minGapHours !== undefined && !positive(m.minGapHours)) problems.push('marketing.minGapHours must be > 0')
+    if (m.maxPerRollingDays !== undefined) {
+      if (!positive(m.maxPerRollingDays.days)) problems.push('marketing.maxPerRollingDays.days must be > 0')
+      if (!Number.isInteger(m.maxPerRollingDays.count) || m.maxPerRollingDays.count < 1) {
+        problems.push('marketing.maxPerRollingDays.count must be an integer ≥ 1')
+      }
+    }
+    if (m.quietHours !== undefined) {
+      if (!HHMM_RE.test(m.quietHours.start) || !HHMM_RE.test(m.quietHours.end)) {
+        problems.push('marketing.quietHours start/end must be HH:mm')
+      } else if (m.quietHours.start === m.quietHours.end) {
+        problems.push('marketing.quietHours start and end must differ')
+      }
+    }
+    if (m.defaultTimezone !== undefined && !isValidTimeZone(m.defaultTimezone)) {
+      problems.push(`marketing.defaultTimezone "${m.defaultTimezone}" is not an IANA zone`)
+    }
+    if (m.deferral !== undefined && !positive(m.deferral.maxHours)) problems.push('marketing.deferral.maxHours must be > 0')
+    if (m.blackoutDates !== undefined) {
+      const dates: unknown = m.blackoutDates
+      if (!Array.isArray(dates)) {
+        problems.push('marketing.blackoutDates must be an array')
+      } else {
+        if (dates.length > 50) problems.push('marketing.blackoutDates has at most 50 entries')
+        dates.forEach((r: any, i: number) => {
+          const at = `marketing.blackoutDates[${i}]`
+          if (!r || typeof r !== 'object') {
+            problems.push(`${at} must be an object with from and to`)
+            return
+          }
+          const fromOk = isCalendarDate(r.from)
+          const toOk = isCalendarDate(r.to)
+          if (!fromOk) problems.push(`${at}.from must be YYYY-MM-DD`)
+          if (!toOk) problems.push(`${at}.to must be YYYY-MM-DD`)
+          if (fromOk && toOk && r.from > r.to) problems.push(`${at}: from must not be after to`)
+          if (r.label !== undefined && (typeof r.label !== 'string' || r.label.length > 64)) {
+            problems.push(`${at}.label must be at most 64 characters`)
+          }
+        })
+      }
+    }
+  }
+  if (policy.sourcePriority !== undefined) {
+    const allowed = new Set(['transactional', 'flow', 'broadcast', 'program', 'oneoff'])
+    const bad = policy.sourcePriority.filter((x) => !allowed.has(x))
+    if (bad.length) problems.push(`sourcePriority has unknown origins: ${bad.join(', ')}`)
+    if (new Set(policy.sourcePriority).size !== policy.sourcePriority.length) problems.push('sourcePriority has duplicates')
+  }
+  if (problems.length) throw new Error(`MailerConfig.contactPolicy is invalid:\n  - ${problems.join('\n  - ')}`)
+}
+
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const PROGRAMS_DEFAULTS = {
+  batchSize: 200,
+  leaseMs: 60_000,
+  decisionRetentionDays: null as number | null,
+}
+
+export const PREFERENCES_DEFAULTS = {
+  pauseDays: [7, 14, 30] as readonly number[],
+}
+
+/**
+ * Init-time check for `MailerConfig.preferences` (plans/17 F3): every
+ * `pauseDays` entry an integer 1–365, no duplicates. Throws listing every problem.
+ */
+export function assertValidPreferences(prefs: PreferencesConfig | undefined): void {
+  if (!prefs || prefs.pauseDays === undefined) return
+  const problems: string[] = []
+  if (!Array.isArray(prefs.pauseDays)) {
+    problems.push('pauseDays must be an array')
+  } else {
+    const seen = new Set<number>()
+    prefs.pauseDays.forEach((d, i) => {
+      if (!Number.isInteger(d) || d < 1 || d > 365) {
+        problems.push(`pauseDays[${i}] must be an integer from 1 to 365 (got ${JSON.stringify(d)})`)
+      } else if (seen.has(d)) {
+        problems.push(`pauseDays[${i}] (${d}) is listed twice`)
+      } else {
+        seen.add(d)
+      }
+    })
+  }
+  if (problems.length) throw new Error(`MailerConfig.preferences is invalid:\n  - ${problems.join('\n  - ')}`)
+}
+
+export const CONTACT_POLICY_DEFAULTS = {
+  deferralMaxHours: 72,
+  sourcePriority: ['transactional', 'flow', 'oneoff', 'broadcast', 'program'] as const,
 }
 
 export type ResolvedConfig = Required<

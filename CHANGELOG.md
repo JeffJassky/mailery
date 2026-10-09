@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.21.0 — Categories, contact policy, Programs and DMARC Monitoring
+
+Additive. No forced data migration: every new field is optional, every new collection is created by index sync on init, and every new config key defaults to off.
+
+### Added
+
+- **Categories and the preference page.** `MailerConfig.categories`; a `category` on marketing templates; `category:<id>` suppression scopes; a hosted preference page; `mailer.getPreferences` / `mailer.setPreferences`; `List-ID` on categorised mail.
+- **Pause.** A "Take a break" section on the preference page (`MailerConfig.preferences.pauseDays`, default 1 week, 2 weeks, 1 month) and `mailer.pauseMarketing` / `mailer.resumeMarketing`: a self-expiring `marketing_pause` suppression that blocks all marketing, never transactional, and is not an unsubscribe. `getPreferences` and the contact detail report `pausedUntil`; a Program with no unpaused recipient wakes when the pause ends.
+- **Contact policy** (`MailerConfig.contactPolicy`): minimum gap, rolling cap, quiet hours and source priority across flows, broadcasts, one-offs and Programs. Contention defers a send; expiry cancels it with `exitReason: 'policy_expired'`.
+- **Programs.** Definitions with prioritised actions, attempt ladders, `requires`, cooldowns, sunset and holdout; `factsAdapter`; the tick, scheduler and decision log; `mailer.saveProgramDraft`, `publishProgram`, `setProgramEnabled`, `enterProgram`, `tickProgram`, `abortProgram`, `getProgramState`. Guide: `docs/guide/programs.md`.
+- **Programs surface.** Admin and agent routes (`/programs`: list, save draft, publish with 422 issues, enable, disable, detail, runs, run with decisions, state, stats by arm, force tick, abort, enter); admin screens (list, detail with JSON editor and funnel, run view with decision timeline).
+- **Relative-time conditions.** `minAgeDays` / `maxAgeDays` on date facts and a program-only `sinceEntry: { minDays?, maxDays? }` leaf ("signed up at least 3 days ago", "in the first 7 days of the program"); a run with nothing to send wakes when the condition flips instead of waiting out `minGapDays`; the board and simulator understand both.
+- **Send at the subject's usual hour.** `policy.delivery.useSessionHour` and `sessionHourOffsetMinutes` take the send time from the reserved `usual_session_hour_utc` fact, with `timeOfDay` as the fallback.
+- **Momentum.** `policy.progressGapDays` shortens the gap after progress (an action completed or a human click); a human click also wakes the run.
+- **Blackout dates.** `contactPolicy.marketing.blackoutDates`: calendar ranges with no marketing sends; sends defer (reason `blackout`), never drop; programs show the true next send.
+- **DMARC Monitoring.** Reports arrive through the inbound webhook and mailery now watches them: `MailerConfig.onDmarcAlert(alert)` fires for unknown or known senders failing, a pass-rate drop, reports stopping, a domain ready for a stricter policy, and DNS problems (one alert per domain and kind, with a ready-to-post `alert.text`); a DNS checker for DMARC, SPF, the `rua=` address, its external authorization record and its MX; a "DMARC Monitoring" admin screen (alerts, setup with a test alert, report tables, settings); and `dmarc.alerts`, `reportAddress`, `extraDomains`, `ignoredDomains` and `adminUrl`. Off for hosts with no `dmarc` config and no ingested reports. Guide: [Deliverability](docs/guide/deliverability.md#dmarc-rua-report-ingestion).
+- **`setup-dmarc` external authorization records.** When the report mailbox is on another organizational domain, `setup-dmarc` prints, and with `--cloudflare` publishes, the `<domain>._report._dmarc.<host>` TXT record receivers require (`authRecords` in the result).
+- **Reverse DNS on failing sources**, in the DMARC tables and in alerts, and a `via` field (`inbound` or `upload`) on each DMARC report.
+- **`mailery doctor`** (read-only upgrade check, non-zero on anything that would make a Program tick fail) and **`mailery backfill-categories --map slug=category[,...] [--dry-run]`**.
+
+### Changed — new statuses
+
+- `SendStatus` gains `deferred` and `holdout`. `SendDoc.exitReason` gains `policy_expired`, `satisfied_before_send`, `ineligible_before_send` and `run_inactive`. Code that switches on `status` or `exitReason` must tolerate the new values.
+
+### Pre-build indexes on large hosts
+
+`Mailer.init` builds the four 0.21 `mailer_sends` indexes in the background and does not wait for them. On a large collection, pre-build them before deploying:
+
+```js
+db.mailer_sends.createIndex({ emailAtSend: 1, kind: 1, sentAt: -1 })
+db.mailer_sends.createIndex({ status: 1, notBefore: 1 }, { partialFilterExpression: { status: 'deferred' } })
+db.mailer_sends.createIndex({ 'program.runId': 1 }, { partialFilterExpression: { 'program.runId': { $exists: true } } })
+db.mailer_sends.createIndex({ 'program.slug': 1, 'program.holdout': 1, 'program.actionId': 1, status: 1 }, { partialFilterExpression: { 'program.slug': { $exists: true } } })
+```
+
+`mailery doctor` lists the missing ones with a count and the command.
+
+### Rolling back to 0.20
+
+Disable Programs; cancel or re-queue `deferred` sends; cancel queued Program sends (0.20 would send them without the re-check); do not roll back once categorised templates have sent, or first convert `category:*` suppressions to `marketing` ones (0.20 ignores them). Commands are in [Upgrading to 0.21](docs/guide/upgrading-0.21.md#rolling-back-to-0-20).
+
+### Changed — check before upgrading
+
+- **One semantic shift, and only when you opt in.** Giving a marketing template a `category` changes that template's unsubscribe link from "all marketing" to "this category". Templates without a category are unchanged. The one-click token still carries a signed `marketing` scope, so a rollback to 0.20 opts the person out of marketing rather than failing.
+- **`setProgramEnabled(slug, true)` ignores earlier entry events.** It moves the entry and Facts Changed watermarks to now. Accounts that should already be in the Program must be entered deliberately with `mailer.enterProgram(slug, subjectId)`, or the admin *Enter* box, or `POST /programs/:slug/enter`.
+- `defaultOptIn: false` categories are rejected at init (opt-out categories only).
+- A Program's templates must be marketing and carry the program's own `category`, otherwise publish fails.
+
+### Per-host checklist
+
+1. **Bump and run `doctor`.** `yarn add mailery@0.21.0`, then `npx mailery doctor` (with `MAILER_MONGODB_URI` and `MAILER_MONGODB_DB`; add `--categories a,b` once you have declared some, and `--prefix` if your collections are not `mailer_*`; see [Upgrading to 0.21](docs/guide/upgrading-0.21.md)). Deploy. Behaviour is unchanged.
+2. **Declare categories and backfill.** Add `categories` to the config, then `npx mailery backfill-categories --map welcome-1=lifecycle.onboarding,... --dry-run`, and again without `--dry-run`. The preference page goes live for categorised mail. Run `doctor --categories` to confirm.
+3. **Set `contactPolicy`.** Watch the deferred counts in the admin for a week before tightening.
+4. **Only if you use Programs:** add a `factsAdapter`; seed the Program disabled (`saveProgramDraft`, `publishProgram`); preview with `enterProgram` on a test account and Force tick (admin or `POST /programs/:slug/runs/:subjectId/tick`); then enable with `holdoutPct` set. Enabling does not replay earlier entry events: backfill existing accounts with `enterProgram`.
+5. **Only if you receive DMARC reports:** add `onDmarcAlert` (and `dmarc.reportAddress` / `extraDomains` as needed), open *DMARC Monitoring* in the admin, fix any DNS rows it flags, and send a test alert.
+
 ## 0.20.0 — Own Mongo connection, subjects as written
 
 ### Added

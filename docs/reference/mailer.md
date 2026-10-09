@@ -111,14 +111,14 @@ Creates / updates the `mailer_subscriptions` row for a contact. If `requireDoubl
 resubscribe(input: {
   externalId: string
   source: string
-  scope?: 'marketing' | 'all'   // default 'marketing'
+  scope?: 'marketing' | 'all' | `category:${string}`   // default 'marketing'
   consentTimestamp?: Date
   consentIp?: string
   consentUserAgent?: string
 }): Promise<{ removedSuppressions: number }>
 ```
 
-An explicit opt-in from a contact who unsubscribed before. Deletes the `reason: 'unsubscribed'` suppression rows for the contact's address (`marketing` clears the `marketing` and `all` scopes; `all` clears every scope), then calls `upsertSubscription`. Bounce, complaint, manual, list-cleaning and GDPR rows are left alone — a re-subscribed address that hard-bounced still gets nothing. Audit-logged as `contact.resubscribe` when it removed something.
+An explicit opt-in from a contact who unsubscribed before. Deletes the `reason: 'unsubscribed'` suppression rows for the contact's address (`marketing` clears the `marketing` and `all` scopes; `all` clears every scope; `category:<id>` clears that category only), then calls `upsertSubscription`. Bounce, complaint, manual, list-cleaning and GDPR rows are left alone — a re-subscribed address that hard-bounced still gets nothing. Audit-logged as `contact.resubscribe` when it removed something.
 
 Use this, not `upsertSubscription`, wherever a person clicks "subscribe" again: `upsertSubscription` flips the status but the suppression check runs at enqueue time regardless, so on its own it produces a contact that reads *subscribed* while every send comes back `suppressed`. It is a separate method on purpose — a backfill that re-upserts every account must not resurrect addresses that opted out.
 
@@ -126,14 +126,43 @@ Use this, not `upsertSubscription`, wherever a person clicks "subscribe" again: 
 
 ```ts
 unsubscribe(email: string, opts: {
-  scope: 'all' | 'marketing' | 'transactional'
+  scope: 'all' | 'marketing' | 'transactional' | `category:${string}`
   reason?: 'user_request' | 'hard_bounce' | 'complaint' | 'manual' | 'gdpr_forget' | 'list_cleaning'
   source?: string
   notes?: string
 }): Promise<void>
 ```
 
-Records an unsubscribe + adds a suppression row. Same path as the public `/m/unsub/:token` endpoint.
+Records an unsubscribe + adds a suppression row. Same path as the public `/m/unsub/:token` endpoint. A `category:<id>` scope writes the suppression row only and leaves the subscription status alone; it is accepted even for an id no longer declared, because an opt-out is never refused.
+
+### `getPreferences(email)`
+
+```ts
+getPreferences(email: string): Promise<{ marketing: boolean; categories: Record<string, boolean>; pausedUntil: Date | null }>
+```
+
+The address's current opt-in state across the categories declared in config (case-insensitive, hashed GDPR rows count). `marketing` is false when an `all` or `marketing` suppression is live, and then every category reads false. Transactional is never listed. `pausedUntil` is the expiry of a live `marketing_pause` row, else null; a pause never makes `marketing` false.
+
+### `pauseMarketing(email, opts)` · `resumeMarketing(email, opts?)`
+
+```ts
+pauseMarketing(email: string, opts: { days: number; source?: string }): Promise<{ pausedUntil: Date }>
+resumeMarketing(email: string, opts?: { source?: string }): Promise<{ resumed: boolean }>
+```
+
+Pause all marketing email to an address for `days` days (an integer 1–365, else it throws), or lift the pause early. A pause is one `marketing_pause` suppression row (reason `paused`, `expiresAt` set); pausing again replaces it, and an unsubscribe row is never touched. Transactional mail is not paused. Source defaults to `'api'`. Audit-logged as `contact.pause` and `contact.resume`. The preference page's lengths come from `MailerConfig.preferences.pauseDays` (default `[7, 14, 30]`; `[]` hides the control).
+
+### `setPreferences(email, update, opts?)`
+
+```ts
+setPreferences(
+  email: string,
+  update: { marketing?: boolean; categories?: Record<string, boolean> },
+  opts?: { source?: string },   // default 'api'
+): Promise<{ optedOut: string[]; optedIn: string[] }>
+```
+
+The preference page's save, for a host settings screen. `marketing: false` writes a `marketing` opt-out and ignores `categories`. `marketing: true` clears `marketing`/`all` opt-outs written by unsubscribes. Per category, `false` writes `category:<id>` and `true` deletes it. Only `reason: 'unsubscribed'` rows are ever deleted. Undeclared ids throw before any write. Audit-logged as `contact.preferences`.
 
 ## Suppression
 
@@ -174,7 +203,7 @@ abortFlow(
 ): Promise<{ abortedRuns: number; cancelledSends: number }>
 ```
 
-Aborts every active run of the flow for that contact, immediately. Exits the runs (`exitReason: 'aborted_by_host:<reason>'`) — including runs parked in a `wait`, whose delayed wake-up then no-ops — and cancels any of the flow's emails still sitting undispatched in the send queue (`queued`, or `failed` awaiting retry → `cancelled`). Writes an audit row (`flow.abort`).
+Aborts every active run of the flow for that contact, immediately. Exits the runs (`exitReason: 'aborted_by_host:<reason>'`) — including runs parked in a `wait`, whose delayed wake-up then no-ops — and cancels any of the flow's emails still sitting undispatched in the send queue (`queued`, `failed` awaiting retry, or `deferred` by the [contact policy](../guide/contact-policy) → `cancelled`; a deferred send is cancelled even when its run has already completed and is counted in `cancelledSends`). Writes an audit row (`flow.abort`).
 
 Call it from the same handler that processes the business event:
 
@@ -197,6 +226,78 @@ abortAllFlows(
 
 Same semantics with no flow filter — exits every active run for the contact across all flows (audit action `flow.abort_all`). For "stop everything" events: account deleted, churned.
 
+## Programs
+
+See the [Programs guide](../guide/programs) for the model. These need `factsAdapter` in the config.
+
+### `saveProgramDraft(definition, opts)`
+
+```ts
+saveProgramDraft(
+  definition: ProgramDefinition,
+  opts: { actor: string; notes?: string },
+): Promise<ProgramDoc>
+```
+
+Saves `definition` as the draft, creating the program (disabled, `version: 0`, never ticks) when the slug is new. Throws a `ZodError` on a structurally invalid definition; semantic checks run at publish. Audit action `program.save_draft`.
+
+### `publishProgram(slug, opts)`
+
+```ts
+publishProgram(
+  slug: string,
+  opts: { actor: string },
+): Promise<{ ok: true; version: number } | { ok: false; issues: Array<{ path: string; message: string }> }>
+```
+
+Validates the draft (categories, declared facts, templates, `requires` cycles) and publishes it: `version + 1`, snapshot in `mailer_program_versions`, draft cleared. Returns every issue instead of throwing. Throws on an unknown slug. Audit action `program.publish`.
+
+### `setProgramEnabled(slug, enabled, opts)`
+
+```ts
+setProgramEnabled(slug: string, enabled: boolean, opts: { actor: string }): Promise<void>
+```
+
+Throws for an unknown or never-published program, and when enabling without a `factsAdapter`. Enabling moves the entry and Facts Changed watermarks to now. Audit actions `program.enable` / `program.disable`.
+
+### `enterProgram(slug, subjectId)`
+
+```ts
+enterProgram(slug: string, subjectId: string): Promise<{ created: boolean }>
+```
+
+Creates the subject's run now, without an entry event (backfills, previews). `created: false` when the subject already has a run, whatever its status.
+
+### `tickProgram(slug, subjectId)`
+
+```ts
+tickProgram(slug: string, subjectId: string): Promise<ProgramTickResult>
+```
+
+Ticks the subject's run now with `trigger: 'forced'`. Every rule a scheduled tick has still applies. Throws when the subject has no run. Returns `{ status: 'skipped', skipped }` or `{ status: 'ticked', decisionId, reason, chosen, attempt, sendIds }`.
+
+### `abortProgram(slug, subjectId, opts?)`
+
+```ts
+abortProgram(
+  slug: string,
+  subjectId: string,
+  opts?: { reason?: string; actor?: string },
+): Promise<{ aborted: boolean; cancelledSends: number }>
+```
+
+`actor` is recorded on the audit row (default `host`; the admin and agent routes pass the request's actor).
+
+Like `abortFlow`: ends an active run immediately (`exitReason: 'aborted_by_host: <reason>'`) and cancels its queued, deferred and held sends. No-op when there is no active run. Audit action `program.abort` when it aborted something.
+
+### `getProgramState(slug, subjectId)`
+
+```ts
+getProgramState(slug: string, subjectId: string): Promise<ProgramChecklistItem[] | null>
+```
+
+The checklist for your in-app UI: `[{ actionId, title, cta, status, isNext, attempts, completedAt }]` in priority order, or `null` when the subject has no run.
+
 ## GDPR
 
 ### `forget(externalId)`
@@ -206,6 +307,14 @@ forget(externalId: string): Promise<void>
 ```
 
 Hard-deletes all PII for the contact across mailer collections, then inserts a `mailer_suppressions` row with `email: null` + `emailHash` retained. Future sends to the same email are blocked at the hash level — INVARIANT 9.
+
+### `forgetSubject(subjectId)`
+
+```ts
+forgetSubject(subjectId: string): Promise<{ runs: number; decisions: number }>
+```
+
+Deletes a Program subject's runs and decision rows across all programs (decisions hold the facts snapshot). Audited as `gdpr.forget_subject`. Call it when you erase an account, together with `forget(externalId)` for each of the account's contacts.
 
 ### `exportContactData(externalId)`
 

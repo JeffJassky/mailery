@@ -3,6 +3,7 @@ import { PageHead, StatusPill } from '../components/shell'
 import { api } from '../lib/api'
 import { useLive } from '../lib/use-live'
 import { LoadState } from '../lib/load-state'
+import { sendStatusNote } from '../lib/send-status'
 
 export function SendDetail({ id }: any) {
   const { data, loading, error, refetch } = useLive(() => api.send(id), [id])
@@ -59,6 +60,8 @@ function Body({ data }: { data: any }) {
             <div className="card-body" style={{ display: 'grid', gap: 8, fontSize: 13 }}>
               {([
                 ['Template', <span className="mono">{s.templateSlug ?? '—'}</span>],
+                ...(sendStatusNote(s) ? [['Policy', <span>{sendStatusNote(s)}</span>] as [string, any]] : []),
+                ...(s.errorMessage ? [['Detail', <span className="text-xs">{s.errorMessage}</span>] as [string, any]] : []),
                 ['Kind', <span className="pill neutral">{s.kind ?? '—'}</span>],
                 ['Provider', <span className="mono">{s.provider ?? '—'}</span>],
                 ['Provider message ID', <span className="mono text-xs">{s.providerMessageId ?? '—'}</span>],
@@ -105,6 +108,10 @@ function buildTimeline(s: any): Array<{ at: string; t: string; desc: string }> {
   const fmt = (d: any) => d ? new Date(d).toLocaleTimeString() : ''
   const out: Array<{ at: string; t: string; desc: string }> = []
   if (s.queuedAt) out.push({ at: fmt(s.queuedAt), t: 'queued', desc: 'Enqueued for dispatch' })
+  if (s.policyDeferral?.firstDeferredAt) {
+    out.push({ at: fmt(s.policyDeferral.firstDeferredAt), t: 'deferred', desc: sendStatusNote({ ...s, status: 'deferred' }) })
+  }
+  if (s.status === 'cancelled') out.push({ at: fmt(s.updatedAt), t: 'cancelled', desc: s.errorMessage ?? sendStatusNote(s) })
   if (s.sentAt) out.push({ at: fmt(s.sentAt), t: 'sent', desc: `Provider ${s.provider ?? ''}` })
   if (s.deliveredAt) out.push({ at: fmt(s.deliveredAt), t: 'delivered', desc: 'Webhook · delivered' })
   if (s.openedAt) out.push({ at: fmt(s.openedAt), t: 'opened', desc: `Open${(s.openCount ?? 0) > 1 ? ` (×${s.openCount})` : ''}` })

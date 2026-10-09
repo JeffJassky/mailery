@@ -15,7 +15,10 @@ import { runDnsblChecks } from './dnsbl.js'
 import { runPostmasterPull } from './postmaster.js'
 import { runSndsPull } from './snds.js'
 import { pruneDmarcFailures } from './dmarc.js'
+import { runDmarcMonitor } from './dmarc-monitor.js'
 import { drainPendingUnsubscribes } from './pending-unsubs.js'
+import { releaseDueDeferredSends } from './contact-policy.js'
+import { runProgramScheduler } from './programs/index.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 
@@ -75,6 +78,10 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   await sweepStrandedSends(ctx).catch((err) => {
     console.error('mailery: stranded-send sweep failed', err)
   })
+  // 0.21: a deferred send whose delayed job was lost still goes out.
+  await releaseDueDeferredSends(ctx).catch((err) => {
+    console.error('mailery: deferred-send release failed', err)
+  })
   await drainOutbox(ctx).catch((err) => {
     console.error('mailery: outbox drain failed', err)
   })
@@ -85,6 +92,11 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
   // mailing someone who already opted out.
   await drainPendingUnsubscribes(ctx).catch((err) => {
     console.error('mailery: pending-unsubscribe drain failed', err)
+  })
+  // 0.21: Programs — entry + Facts Changed scans and due runs. Returns at the
+  // first indexed read when no program is enabled.
+  await runProgramScheduler(ctx).catch((err) => {
+    console.error('mailery: program scheduler failed', err)
   })
   await processScheduledBroadcasts(ctx).catch((err) => {
     console.error('mailery: broadcast dispatch failed', err)
@@ -120,6 +132,9 @@ export async function runTick(ctx: RunnerContext): Promise<void> {
     }),
     pruneDmarcFailures(ctx).catch((err) => {
       console.error('mailery: dmarc prune failed', err)
+    }),
+    runDmarcMonitor(ctx).catch((err) => {
+      console.error('mailery: dmarc monitor failed', err)
     }),
   ])
 }

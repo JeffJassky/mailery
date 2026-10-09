@@ -10,6 +10,8 @@
 import type { Mailer } from '../mailer.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
 import { resolveSourceTags } from '../runner/dmarc.js'
+import { loadDmarcSettings } from '../runner/dmarc-settings.js'
+import { resolveMonitoredDomains } from '../runner/dmarc-domains.js'
 import { HEALTH_AGG_ID } from '../models/index.js'
 
 export type CheckSeverity = 'ok' | 'warn' | 'error'
@@ -410,6 +412,23 @@ async function checkSnds(mailer: Mailer): Promise<SetupCheck> {
 }
 
 async function checkDmarc(mailer: Mailer): Promise<SetupCheck> {
+  const runnerCtx = mailer.getRunnerContext()
+  const { settings } = await loadDmarcSettings(runnerCtx)
+  const reportDomains = (await mailer.collections.dmarcReports.distinct('domain')) as string[]
+  const dnsDomains = resolveMonitoredDomains(mailer.config, settings, reportDomains)
+    .filter((d) => !d.ignored && (d.origin.includes('config') || d.origin.includes('extra')))
+    .map((d) => d.domain)
+  const dnsDocs = await mailer.collections.dmarcDnsChecks.find({ _id: { $in: dnsDomains }, 'result.ok': false }).toArray()
+  if (dnsDocs.length > 0) {
+    const domains = dnsDocs.map((d) => d._id).sort()
+    return {
+      name: 'dmarc',
+      label: 'DMARC RUA reports',
+      severity: 'warn',
+      message: `DNS problems on ${domains.join(', ')}`,
+      hint: 'Open the admin UI, DMARC Monitoring, Setup tab to see each issue and the DNS record that fixes it.',
+    }
+  }
   const reportCount = await mailer.collections.dmarcReports.estimatedDocumentCount()
   if (reportCount === 0) {
     return {
@@ -417,7 +436,7 @@ async function checkDmarc(mailer: Mailer): Promise<SetupCheck> {
       label: 'DMARC RUA reports',
       severity: 'ok',
       message: 'no reports ingested yet',
-      hint: 'Publish DMARC `rua=mailto:<your-mailbox>` in DNS, then upload received reports via /admin/mailer/api/dmarc/upload (or drag-drop in the Health screen). RUA tells you who is sending mail as your domain — both legitimate sources and spoofers.',
+      hint: 'Publish DMARC `rua=mailto:<your-mailbox>` in DNS, then open the admin UI, DMARC Monitoring, Setup tab to finish setup and receive reports. RUA tells you who is sending mail as your domain — both legitimate sources and spoofers.',
     }
   }
 
@@ -459,7 +478,7 @@ async function checkDmarc(mailer: Mailer): Promise<SetupCheck> {
     label: 'DMARC RUA reports',
     severity: 'warn',
     message: `${totalFailing} failing message(s) from ${ips.join(', ')}${more}`,
-    hint: 'These IPs sent mail claiming to be from your domain that failed DMARC alignment. Tag known-legit sources in mailer.config.dmarc.knownSources to silence them. Untagged sources are likely either forgotten SaaS tools or active spoofing.',
+    hint: 'These IPs sent mail claiming to be from your domain that failed DMARC alignment. Tag known-legit sources in the admin UI (DMARC Monitoring) to silence them. Untagged sources are likely either forgotten SaaS tools or active spoofing.',
   }
 }
 

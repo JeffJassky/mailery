@@ -69,10 +69,74 @@ Set `enabled: false`. In-flight runs continue.
 ### `POST /api/flows/:slug/resume`
 Set `enabled: true`.
 
+## Categories
+
+### `GET /api/categories`
+The categories declared in `MailerConfig.categories`, as `{ id, label, description?, defaultOptIn? }[]`. Empty when none are declared. Read-only: config is the source of truth.
+
+## Programs
+
+Programs ([guide](/guide/programs)) are managed here. The agent API serves the same routes at `/programs`. All routes answer `404 { error: 'not_found' }` for an unknown program and `404 { error: 'run_not_found' }` for a subject with no run. Every mutating route is audited (`program.save_draft`, `program.publish`, `program.enable`, `program.disable`, `program.enter`, `program.force_tick`, `program.abort`) with this surface's actor (`program.abort` included: the route passes it to `mailer.abortProgram`).
+
+### `GET /api/programs`
+`[{ slug, name, version, enabled, draft, category, publishedAt, runs: { active, completed, exited, sunset, total } }]`. `draft` is true when an unpublished draft exists.
+
+### `POST /api/programs`
+Save a draft from a `ProgramDefinition` (the body itself, or `{ definition, notes? }`). Creates the program disabled at version 0 when the slug is new (`201 { ok, slug, version, created: true }`); on an existing slug it replaces the draft (`200`, `created: false`). `400 validation_failed` on a structural error (zod message). Semantic checks run at publish.
+
+### `PATCH /api/programs/:slug`
+Replace the draft of an existing program. A `slug` in the body must match the path (it defaults to it).
+
+### `POST /api/programs/:slug/publish`
+Validates the draft (categories, facts, templates, `requires` cycles) and publishes it. `200 { ok: true, version }`, or **`422 { error: 'validation_failed', issues: [{ path, message }] }`** with every issue, nothing published.
+
+### `POST /api/programs/:slug/enable` · `POST /api/programs/:slug/disable`
+Enable requires a published definition (`409 not_published`) and `MailerConfig.factsAdapter` (`409 facts_adapter_required`). Enabling moves the entry watermark to now: entry events from before are not replayed, so enter existing accounts with `/enter`.
+
+### `GET /api/programs/:slug`
+`{ slug, version, enabled, published, publishedAt, publishedBy, draft, facts, templates, versions: [{ version, publishedAt, publishedBy }] }`; `published` and `draft` are definitions (or null). `facts` is the facts adapter's declaration (or null); `templates` lists every existing template either definition sends: `[{ slug, name, subject, kind, category, published }]`.
+
+### `POST /api/programs/:slug/simulate`
+`{ source?, subjectId?, facts?, now?, horizonDays? }`. A read-only dry run of one tick plus the projected send sequence (assuming facts stay as they are and the subject never engages). With `subjectId` it uses that account's run and resolved facts (`facts` are merged over them); without, it simulates a brand-new subject from `facts`. Returns `{ source, version, now, subjectId, facts, run, arm, candidates, next, sequence, sequenceEnd }`; `next.reason` is `send | holdout | min-gap | delivery-window | session-suppressed | in-flight | no-recipients | none-eligible | completed | exited | sunset`. Not audited. `400 validation_failed`, `404 not_found`, `409 no_definition | no_facts_adapter`.
+
+### `GET /api/programs/:slug/lint?source=`
+`{ source, issues }` for the draft (default when one exists) or the published definition. Each issue is `{ severity, code, path, message, actionId?, attempt? }`: errors (`invalid`) are the publish-validation issues; warnings (`template-unpublished`, `template-reused`, `priority-tie`, `no-cta`, `sunset-early`) do not block publish. `400` for a bad `source`, `404 not_found`, `409 no_definition`.
+
+### `GET /api/programs/:slug/runs?status=&arm=&limit=&skip=`
+`{ runs, total, limit, skip }`, newest entry first. `status` is `active | completed | exited | sunset`, `arm` is `treatment | holdout`; `limit` 1–200 (default 50).
+
+### `GET /api/programs/:slug/runs/:subjectId?limit=&skip=`
+`{ run, decisions, total, limit, skip }` with decisions newest first. Each decision lists every candidate with `blockedBy`, the `chosen` action, `reason`, `outcome` and `trigger`: the answer to "why did or didn't this send".
+
+### `GET /api/programs/:slug/state?subject=<id>`
+The checklist (`mailer.getProgramState`): `[{ actionId, title, cta, status, isNext, attempts, completedAt }]`. `400` without `subject`.
+
+### `GET /api/programs/:slug/stats`
+Per action × arm funnel and per-arm run counts:
+
+```json
+{ "actions": [{ "actionId": "connect-shopify", "title": "Connect Shopify",
+  "treatment": { "evaluated": 120, "chosen": 90, "sent": 88, "satisfied": 31 },
+  "holdout":   { "evaluated": 14,  "chosen": 10, "sent": 10, "satisfied": 3 } }],
+  "runs": { "treatment": { "total": 120, "byStatus": { "active": 80, "completed": 31, "exited": 9, "sunset": 0 }, "completed": 31, "completionRate": 0.258 },
+            "holdout": { "total": 14, "byStatus": {}, "completed": 3, "completionRate": 0.214 } } }
+```
+
+`evaluated` counts decisions that listed the action as an unblocked candidate. `chosen` counts decisions that picked it and went on to send (a silent tick such as `min-gap` keeps the chosen action on its row but is not counted). `sent` is treatment sends with status `sent` or `delivered`, and, for holdout, the simulated send rows. `satisfied` is runs where the action has a `completedAt`. `completionRate` is completed runs over runs, `null` with none.
+
+### `POST /api/programs/:slug/runs/:subjectId/tick`
+Force one tick now (`trigger: forced`). It obeys every rule a scheduled tick does (gap, policy, holdout); `{ ok, result }` with the engine's tick result.
+
+### `POST /api/programs/:slug/runs/:subjectId/abort`
+`{ reason? }`. Exits the run and cancels its queued sends: `{ ok, aborted, cancelledSends }`.
+
+### `POST /api/programs/:slug/enter`
+`{ subjectId }`. Creates the subject's run now, without an entry event (backfills, previews). `201 { created: true }`, or `200 { created: false }` when it already has a run.
+
 ## Templates
 
 ### `GET /api/templates`
-List all templates, newest-updated first.
+List all templates, newest-updated first. Each carries its `category` when it has one.
 
 ### `GET /api/templates/:slug`
 Single template's full definition.
@@ -97,12 +161,14 @@ body: {
   fromEmail?: string
   replyTo?: string | null
   kind?: 'marketing' | 'transactional'
+  category?: string | null   // a declared category id; null clears it
   bodyFormat?: 'multipart' | 'text_only'
   trackOpens?: boolean
   trackClicks?: boolean
 }
 → { ok: true }
 → 400 { error: 'sender_domain_invalid', code: string, message: string }
+→ 400 { error: 'validation_failed', message: string }   // undeclared category, or a category on a transactional template
 ```
 
 ## Broadcasts
@@ -167,6 +233,7 @@ Contact detail — adapter fields + subscription + recent events + recent sends 
   recentEvents: EventDoc[]
   recentSends: SendDoc[]
   activeRuns: FlowRunDoc[]
+  preferences?: { marketing: boolean; categories: Record<string, boolean> }   // only when categories are declared
 }
 ```
 
@@ -224,6 +291,8 @@ Render the draft (or published body with `useDraft: false`). Pass `contactId` to
 
 Pass `html`, `mjml` or `editorJson` to render that content instead of the stored draft, resolved in the usual authoring precedence. This is how the editor previews unsaved edits: a preview is a read, and making one should not write a draft — which is an audit-logged mutation — just to see the result.
 
+Pass `program: { slug, source?, actionId, attempt, facts?, subjectId? }` to render as that Program's send would: `{{program}}`, `{{action}}`, `{{attempt}}` and `{{facts}}` are filled from the chosen definition (`source` defaults to the draft when one exists), and win over host vars. `facts` default to the resolved facts of `subjectId`, else empty. `400 validation_failed` for a malformed option, `404 program_not_found` when the program or that definition is missing.
+
 Pass `eventProperties` to simulate a trigger event — both `{{event.*}}` and the resolver's `info.eventProperties` receive it.
 
 ```ts
@@ -279,7 +348,8 @@ body: {
 Publish the saved draft — its content may live in `html`, `mjml` or `editorJson`, resolved in that authoring precedence (`editorJson` → `mjml` → raw `html`); an HTML-only draft is stored verbatim with plain text derived. Rejects with 422 if the linter has errors. Rejects with 422 `mail_tester_blocked` when a cached Mail-Tester score is below `minScore` (`code: 'low_score'`), or — with `mailTester.requireScore` enabled — when the content has no score at all (`code: 'no_score'`, `score: null`). Pass `{ bypassMailTester: true }` to override the Mail-Tester gate (still subject to the lint gate).
 
 ```ts
-body?: { bypassMailTester?: boolean }
+body?: { bypassMailTester?: boolean; category?: string | null }
+→ 400 { error: 'validation_failed', message }   // the resulting category is undeclared or on a transactional template
 → 200 { ok: true, version: number, warnings: CompilerWarning[], lint: LintResult }
 //   CompilerWarning ≈ { line?: number; message: string; tagName?: string; formattedMessage?: string }
 //   These come from the MJML / Maily compiler — formatting warnings that did

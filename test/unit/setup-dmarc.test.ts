@@ -109,3 +109,78 @@ describe('setupDmarc input validation', () => {
     expect(calls.some((c) => c.includes('POST'))).toBe(true)
   })
 })
+
+// plans/18-dmarc-monitoring.md PR 1D: RFC 7489 §7.1 external report authorization.
+describe('setupDmarc external report authorization', () => {
+  function cfFetch(zones: Record<string, string>, calls: string[]): typeof fetch {
+    return ((url: any, init: any = {}) => {
+      const u = String(url)
+      calls.push(`${init.method ?? 'GET'} ${decodeURIComponent(u)}`)
+      const zoneMatch = u.match(/\/zones\?name=([^&]+)/)
+      if (zoneMatch) {
+        const id = zones[decodeURIComponent(zoneMatch[1]!)]
+        return Promise.resolve(new Response(JSON.stringify({ success: true, result: id ? [{ id }] : [] }), { status: 200 }))
+      }
+      if (u.includes('/dns_records?type=TXT')) {
+        return Promise.resolve(new Response(JSON.stringify({ success: true, result: [] }), { status: 200 }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({ success: true, result: { id: 'rec' } }), { status: 200 }))
+    }) as typeof fetch
+  }
+
+  it('same-organization mailboxes need no authorization record', async () => {
+    const r = await setupDmarc({ domain: 'news.example.com', ruaMailbox: 'reports@dmarc-in.example.com', logger: {} })
+    expect(r.authRecords).toEqual([])
+  })
+
+  it('prints the authorization record for a mailbox on another domain', async () => {
+    const logs: string[] = []
+    const r = await setupDmarc({
+      domain: 'maxed.ai',
+      ruaMailbox: 'reports@dmarc-in.jeffjassky.com,dmarc@maxed.ai',
+      logger: { log: (s: unknown) => logs.push(String(s)), warn: (s: unknown) => logs.push(String(s)) },
+    })
+    expect(r.authRecords).toEqual([
+      { host: 'maxed.ai._report._dmarc.dmarc-in.jeffjassky.com', value: 'v=DMARC1', cloudflarePushed: 'skipped' },
+    ])
+    expect(logs.join('\n')).toContain('maxed.ai._report._dmarc.dmarc-in.jeffjassky.com')
+  })
+
+  it('publishes the authorization record into the mailbox domain zone with --cloudflare', async () => {
+    const calls: string[] = []
+    const r = await setupDmarc({
+      domain: 'maxed.ai',
+      ruaMailbox: 'reports@dmarc-in.jeffjassky.com',
+      cloudflare: true,
+      env: { CLOUDFLARE_API_TOKEN: 'cf-test' },
+      fetchFn: cfFetch({ 'maxed.ai': 'z-maxed', 'jeffjassky.com': 'z-jeff' }, calls),
+      logger: {},
+    })
+    expect(r.cloudflarePushed).toBe('created')
+    expect(r.authRecords).toEqual([
+      { host: 'maxed.ai._report._dmarc.dmarc-in.jeffjassky.com', value: 'v=DMARC1', cloudflarePushed: 'created' },
+    ])
+    expect(calls.some((c) => c.startsWith('POST') && c.includes('/zones/z-jeff/dns_records'))).toBe(true)
+  })
+
+  it('a mailbox zone that is not on Cloudflare warns and does not fail the run', async () => {
+    const warns: string[] = []
+    const r = await setupDmarc({
+      domain: 'maxed.ai',
+      ruaMailbox: 'reports@reports.elsewhere.net',
+      cloudflare: true,
+      env: { CLOUDFLARE_API_TOKEN: 'cf-test' },
+      fetchFn: cfFetch({ 'maxed.ai': 'z-maxed' }, []),
+      logger: { warn: (s: unknown) => warns.push(String(s)) },
+    })
+    expect(r.cloudflarePushed).toBe('created')
+    expect(r.authRecords[0]!.cloudflarePushed).toBe('zone_not_found')
+    expect(warns.join('\n')).toContain('maxed.ai._report._dmarc.reports.elsewhere.net')
+  })
+
+  it('next steps mention the inbound webhook instead of manual upload only', async () => {
+    const logs: string[] = []
+    await setupDmarc({ domain: 'example.com', ruaMailbox: 'd@example.com', logger: { log: (s: unknown) => logs.push(String(s)) } })
+    expect(logs.join('\n')).toMatch(/DMARC Monitoring/)
+  })
+})

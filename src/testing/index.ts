@@ -26,26 +26,33 @@ import { MongoClient, type Db } from 'mongodb'
 
 import type { ContactAdapter, Contact, MailProvider } from '../shared/types.js'
 import type { QueueDriverConfig } from '../server/queues/types.js'
-import type { TemplateDoc, FlowDoc } from '../server/models/index.js'
+import type { TemplateDoc, FlowDoc, ProgramDoc } from '../server/models/index.js'
+import type { ProgramDefinition } from '../shared/types.js'
 import type { RunnerContext } from '../server/runner/index.js'
 import { NullProvider } from '../server/providers/null.js'
 import { Mailer } from '../server/mailer.js'
 import { MemoryContactAdapter } from './memory-adapter.js'
+import { MemoryFactsAdapter } from './memory-facts-adapter.js'
 import { RecordingProvider } from './recording-provider.js'
 import {
   buildTemplate,
   buildFlow,
+  buildAction,
+  buildProgram,
+  buildProgramDoc,
   step,
   wrapMjml,
   type TemplateSpec,
   type FlowSpec,
+  type ActionSpec,
+  type ProgramSpec,
 } from './builders.js'
-import { drain, dispatchQueued, type DrainOptions, type DrainResult } from './drive.js'
+import { drain, dispatchQueued, tickProgram, type DrainOptions, type DrainResult } from './drive.js'
 
-export { NullProvider, MemoryContactAdapter, RecordingProvider }
-export { buildTemplate, buildFlow, step, wrapMjml }
-export { drain, dispatchQueued }
-export type { TemplateSpec, FlowSpec, DrainOptions, DrainResult }
+export { NullProvider, MemoryContactAdapter, MemoryFactsAdapter, RecordingProvider }
+export { buildTemplate, buildFlow, buildAction, buildProgram, buildProgramDoc, step, wrapMjml }
+export { drain, dispatchQueued, tickProgram }
+export type { TemplateSpec, FlowSpec, ActionSpec, ProgramSpec, DrainOptions, DrainResult }
 export type { SendRecord } from './recording-provider.js'
 
 /**
@@ -97,6 +104,12 @@ export interface TestMailerHarness {
   seedTemplate: (spec: TemplateSpec) => Promise<TemplateDoc>
   /** Build + insert a published flow. Returns the doc, `_id` included. */
   seedFlow: (spec: FlowSpec) => Promise<FlowDoc>
+  /**
+   * Insert a published, enabled program (0.21) — no publish validation, so a
+   * test can seed exactly the definition it means. Pass `enabled: false` to
+   * seed it switched off.
+   */
+  seedProgram: (definition: ProgramDefinition, opts?: { enabled?: boolean }) => Promise<ProgramDoc>
   /** Run the runner to quiescence. See `drive.ts`. */
   drain: (opts?: DrainOptions) => Promise<DrainResult>
   stop: () => Promise<void>
@@ -167,6 +180,13 @@ export async function createTestMailer(opts: TestMailerOptions = {}): Promise<Te
     async seedFlow(spec) {
       const doc = buildFlow(spec)
       const res = await ctx.collections.flows.insertOne(doc)
+      doc._id = res.insertedId
+      return doc
+    },
+
+    async seedProgram(definition, seedOpts = {}) {
+      const doc = buildProgramDoc(definition, { enabled: seedOpts.enabled })
+      const res = await ctx.collections.programs.insertOne(doc)
       doc._id = res.insertedId
       return doc
     },

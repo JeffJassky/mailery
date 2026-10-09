@@ -22,6 +22,9 @@ import { isSuppressed } from './suppression.js'
 import { advanceStep, failFlowRun } from './step.js'
 import { getBucketStatus, recordHealthCounter } from './health.js'
 import { pauseBroadcast } from './broadcast-control.js'
+import { acquireRecipientLock, applyContactPolicy, contactPolicyApplies } from './contact-policy.js'
+import { sendOrigin, type SendOutcome } from './send-hooks.js'
+import { programRenderVars } from './programs/hooks.js'
 import type { RunnerContext } from './index.js'
 
 export async function handleSend(
@@ -53,7 +56,7 @@ export async function handleSend(
 
   // Render now (with fresh contact + vars). Tracking application happens in
   // dispatchSend once we have the persisted sendId.
-  const renderCtx = buildRenderContext(contact, run, step.vars ?? {}, ctx)
+  const renderCtx = buildRenderContext(contact, run, step.vars ?? {}, ctx, {}, undefined, template.category)
   let rendered
   try {
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
@@ -117,15 +120,25 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   // the recipient gets the email twice. Every downstream path writes a
   // terminal status (or resets to 'queued' for the breaker retry); a crash
   // leaves 'sending', which the stranded-send sweep resets after 5 minutes.
+  //
+  // 0.21: a `deferred` send is claimable once its `notBefore` has passed —
+  // by its own delayed job or after `releaseDueDeferredSends` re-queues it.
+  const claimedAt = new Date()
   const send = await ctx.collections.sends.findOneAndUpdate(
-    { _id: sendId, status: { $in: ['queued', 'failed'] } },
-    { $set: { status: 'sending', updatedAt: new Date() } },
+    {
+      _id: sendId,
+      $or: [
+        { status: { $in: ['queued', 'failed'] } },
+        { status: 'deferred', notBefore: { $lte: claimedAt } },
+      ],
+    },
+    { $set: { status: 'sending', updatedAt: claimedAt } },
   )
-  if (!send) return // already claimed / dispatched / cancelled
+  if (!send) return // already claimed / dispatched / cancelled / not yet due
 
   const template = await ctx.collections.templates.findOne({ _id: send.templateId })
   if (!template) {
-    await markFailed(send._id!, 'template_missing', ctx)
+    await markFailed(send, 'template_missing', ctx)
     return
   }
 
@@ -152,17 +165,21 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
           },
         },
       )
+      if (!held) {
+        await emitOutcome(send, { status: 'cancelled', errorMessage: 'cancelled: broadcast cancelled' }, { status: 'cancelled', exitReason: null, message: 'broadcast cancelled' }, ctx)
+      }
       return
     }
   }
 
   // 1. Suppression check (INVARIANT 3: always re-checked at send time).
-  const supp = await isSuppressed(ctx.collections, send.emailAtSend, send.kind)
+  const supp = await isSuppressed(ctx.collections, send.emailAtSend, send.kind, template.category)
   if (supp.suppressed) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
       { $set: { status: 'suppressed', errorMessage: `suppressed: ${supp.reason}` } },
     )
+    await emitOutcome(send, { status: 'suppressed', errorMessage: `suppressed: ${supp.reason}` }, { status: 'suppressed', scope: supp.scope ?? null }, ctx)
     return
   }
 
@@ -202,7 +219,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   // 3. Pull the contact + re-render (use the contact that exists now, not at flow entry).
   const contact = await ctx.adapter.getById(send.externalId)
   if (!contact) {
-    await markFailed(send._id!, 'contact_missing', ctx)
+    await markFailed(send, 'contact_missing', ctx)
     return
   }
 
@@ -212,23 +229,143 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   // is permanent — fail it once, without the failedToSend counter (nothing
   // reached a provider) and without throwing into the retry policy.
   if (!send.emailAtSend?.trim() || !contact.email?.trim()) {
-    await markFailed(send._id!, 'no_recipient: the contact has no email address', ctx)
+    await markFailed(send, 'no_recipient: the contact has no email address', ctx)
     return
   }
 
-  const run = send.flowRunId ? await ctx.collections.flowRuns.findOne({ _id: send.flowRunId }) : null
-
-  // Aborted-run guard: closes the race where a send is enqueued between the
-  // abort's send-cancellation sweep and dispatch. Only host aborts block here —
-  // completed/naturally-exited runs may still have legitimately queued mail.
-  if (run && run.status === 'exited' && run.exitReason?.startsWith('aborted_by_host')) {
-    await ctx.collections.sends.updateOne(
-      { _id: send._id },
-      { $set: { status: 'cancelled', errorMessage: `cancelled: ${run.exitReason}`, updatedAt: new Date() } },
-    )
-    return
+  // Origin guard (INVARIANT 19): the originating system may veto the send at
+  // the last moment. Runs on every dispatch — a deferred send's re-dispatch
+  // included — after suppression and the breaker and BEFORE the contact
+  // policy, so a send that should be cancelled is never deferred first. The
+  // flow guard closes the race where a send is enqueued between a flow
+  // abort's cancellation sweep and dispatch. A guard that throws fails the
+  // send closed: nothing is sent and the error reaches the queue's retry.
+  const hooks = ctx.sendHooks?.[sendOrigin(send)]
+  if (hooks?.guard) {
+    let verdict
+    try {
+      verdict = await hooks.guard(send, ctx)
+    } catch (err: any) {
+      await releaseClaimAfterError(send, `guard error: ${String(err?.message ?? err)}`, ctx)
+      throw err
+    }
+    if (verdict.verdict === 'cancel') {
+      const patch = {
+        status: 'cancelled' as const,
+        errorMessage: `cancelled: ${verdict.message}`,
+        ...(verdict.exitReason ? { exitReason: verdict.exitReason } : {}),
+      }
+      await ctx.collections.sends.updateOne({ _id: send._id }, { $set: { ...patch, updatedAt: new Date() } })
+      await emitOutcome(send, patch, { status: 'cancelled', exitReason: verdict.exitReason, message: verdict.message }, ctx)
+      return
+    }
   }
 
+  // Contact policy (marketing only; a no-op without `contactPolicy`). Holds a
+  // per-recipient lock from the decision until the send row is final, so two
+  // dispatches to one address cannot both read an empty history.
+  let release: (() => Promise<void>) | null = null
+  if (contactPolicyApplies(ctx, send)) {
+    try {
+      release = await acquireRecipientLock(ctx, send.emailAtSend)
+    } catch (err: any) {
+      await releaseClaimAfterError(send, `contact policy lock error: ${String(err?.message ?? err)}`, ctx)
+      throw err
+    }
+    if (!release) {
+      // The address stayed busy for the whole wait. Hand the claim back and retry shortly.
+      await ctx.collections.sends.updateOne({ _id: send._id }, { $set: { status: 'queued', updatedAt: new Date() } })
+      await ctx.queues.send.add('send', { sendId: String(send._id) }, { delay: 5_000 })
+      return
+    }
+  }
+  try {
+    // The lock wait can be long (CONTACT_LOCK_TIMINGS), and an unsubscribe
+    // may have landed in it: re-check suppression now that we hold the lock
+    // (INVARIANT 3), before the policy or the provider.
+    if (release) {
+      let again
+      try {
+        again = await isSuppressed(ctx.collections, send.emailAtSend, send.kind, template.category)
+      } catch (err: any) {
+        await releaseClaimAfterError(send, `suppression recheck error: ${String(err?.message ?? err)}`, ctx)
+        throw err
+      }
+      if (again.suppressed) {
+        await ctx.collections.sends.updateOne(
+          { _id: send._id },
+          { $set: { status: 'suppressed', errorMessage: `suppressed: ${again.reason}`, updatedAt: new Date() } },
+        )
+        await emitOutcome(send, { status: 'suppressed', errorMessage: `suppressed: ${again.reason}` }, { status: 'suppressed', scope: again.scope ?? null }, ctx)
+        return
+      }
+    }
+    if (contactPolicyApplies(ctx, send)) {
+      const now = new Date()
+      let decision
+      try {
+        decision = await applyContactPolicy(ctx, send, contact, now)
+      } catch (err: any) {
+        await releaseClaimAfterError(send, `contact policy error: ${String(err?.message ?? err)}`, ctx)
+        throw err
+      }
+      if (decision.action === 'defer') {
+        const prior = send.policyDeferral
+        const policyDeferral = {
+          reason: decision.reason,
+          firstDeferredAt: prior?.firstDeferredAt ?? now,
+          count: (prior?.count ?? 0) + 1,
+          ...(decision.reason === 'blackout'
+            ? { blackoutEndedAt: decision.notBefore }
+            : prior?.blackoutEndedAt
+              ? { blackoutEndedAt: prior.blackoutEndedAt }
+              : {}),
+        }
+        await ctx.collections.sends.updateOne(
+          { _id: send._id },
+          { $set: { status: 'deferred', notBefore: decision.notBefore, policyDeferral, updatedAt: now } },
+        )
+        await ctx.queues.send.add(
+          'send',
+          { sendId: String(send._id) },
+          {
+            delay: Math.max(0, decision.notBefore.getTime() - now.getTime()),
+            attempts: ctx.config.sendRetryAttempts,
+            backoff: { type: 'exponential', delay: 60_000 },
+          },
+        )
+        await emitOutcome(
+          send,
+          { status: 'deferred', notBefore: decision.notBefore, policyDeferral },
+          { status: 'deferred', notBefore: decision.notBefore, reason: decision.reason },
+          ctx,
+        )
+        return
+      }
+      if (decision.action === 'drop') {
+        const message = `policy_expired: held back by ${decision.reason} until ${decision.wouldBe.toISOString()}, past the deferral limit`
+        const patch = { status: 'cancelled' as const, exitReason: 'policy_expired' as const, errorMessage: `cancelled: ${message}` }
+        await ctx.collections.sends.updateOne({ _id: send._id }, { $set: { ...patch, updatedAt: now } })
+        await emitOutcome(send, patch, { status: 'cancelled', exitReason: 'policy_expired', message }, ctx)
+        return
+      }
+    }
+
+    const run = send.flowRunId ? await ctx.collections.flowRuns.findOne({ _id: send.flowRunId }) : null
+    await deliver(send, template, contact, run, ctx)
+  } finally {
+    if (release) await release()
+  }
+}
+
+/** Render, track and hand the claimed send to its provider. */
+async function deliver(
+  send: SendDoc,
+  template: TemplateDoc,
+  contact: Contact,
+  run: FlowRunDoc | null,
+  ctx: RunnerContext,
+): Promise<void> {
   // Resolve host vars + render. A throw here (host DB hiccup, bad template)
   // marks the send failed and rethrows so the queue retries with backoff —
   // never dispatch a half-rendered email.
@@ -241,11 +378,20 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       flowSlug: run?.flowSlug,
       eventName: run?.triggerEvent?.name,
       eventProperties: run?.triggerEvent?.properties,
+      // Program sends (0.21): which program/action/attempt, and the subject.
+      ...(send.program
+        ? {
+            program: { slug: send.program.slug, actionId: send.program.actionId, attempt: send.program.attempt },
+            subjectId: send.program.subjectId,
+          }
+        : {}),
     })
-    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id))
+    renderCtx = buildRenderContext(contact, run, send.vars ?? {}, ctx, resolved, String(send._id), template.category)
+    // Program sends (0.21): program/action/attempt/facts. Mailery's keys win over host vars.
+    if (send.program) Object.assign(renderCtx, await programRenderVars(send, ctx))
     rendered = await renderTemplate(template, renderCtx, { helpers: ctx.handlebarsHelpers })
   } catch (err: any) {
-    await markFailed(send._id!, `render error: ${String(err?.message ?? err)}`, ctx)
+    await markFailed(send, `render error: ${String(err?.message ?? err)}`, ctx)
     throw err // let the queue retry per the attempts policy
   }
 
@@ -306,7 +452,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   if (!provider) {
     const known = registeredProviderNames(ctx.providers)
     await markFailed(
-      send._id!,
+      send,
       `provider_unknown: no provider is registered as "${send.provider}". ` +
         `Registered providers: ${known.length ? known.join(', ') : '(none)'}.`,
       ctx,
@@ -323,9 +469,11 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       ? {
           'List-Unsubscribe': `<${renderCtx.unsubscribeUrl}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          ...(template.category ? { 'List-ID': `<${template.category}.${senderDomain(rendered.fromEmail)}>` } : {}),
         }
       : {}
 
+  let sentAt: Date
   try {
     const result = await provider.send({
       to: send.emailAtSend,
@@ -339,12 +487,32 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
       messageMeta: { sendId: String(send._id) },
     })
 
+    if (result.status === 'rejected') {
+      // A definitive refusal: not 'sent', and no retry could change the answer.
+      const reason = 'rejected by provider'
+      await ctx.collections.sends.updateOne(
+        { _id: send._id },
+        { $set: { status: 'failed', errorMessage: reason, updatedAt: new Date() } },
+      )
+      await recordHealthCounter(ctx, 'failedToSend', { fromEmail: send.fromEmail, kind: send.kind })
+      await emitOutcome(send, { status: 'failed', errorMessage: reason }, { status: 'failed', error: reason }, ctx)
+      if (ctx.config.onSendFailure) {
+        try {
+          await ctx.config.onSendFailure({ send, error: new Error(reason) })
+        } catch {
+          /* swallow */
+        }
+      }
+      return
+    }
+
+    sentAt = new Date()
     await ctx.collections.sends.updateOne(
       { _id: send._id },
       {
         $set: {
           status: 'sent',
-          sentAt: new Date(),
+          sentAt,
           providerMessageId: result.providerId,
         },
       },
@@ -356,9 +524,10 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
   } catch (err: any) {
     await ctx.collections.sends.updateOne(
       { _id: send._id },
-      { $set: { status: 'failed', errorMessage: String(err?.message ?? err) } },
+      { $set: { status: 'failed', errorMessage: String(err?.message ?? err), updatedAt: new Date() } },
     )
     await recordHealthCounter(ctx, 'failedToSend', { fromEmail: send.fromEmail, kind: send.kind })
+    await emitOutcome(send, { status: 'failed', errorMessage: String(err?.message ?? err) }, { status: 'failed', error: String(err?.message ?? err) }, ctx)
     if (ctx.config.onSendFailure) {
       try {
         await ctx.config.onSendFailure({ send, error: err })
@@ -368,6 +537,7 @@ export async function dispatchSend(sendId: ObjectId, ctx: RunnerContext): Promis
     }
     throw err // let BullMQ retry per the attempts policy
   }
+  await emitOutcome(send, { status: 'sent', sentAt }, { status: 'sent', at: sentAt }, ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +553,10 @@ function pickProviderName(stepOverride: string | undefined, tpl: TemplateDoc, ct
   return ctx.config.defaultProvider
 }
 
+function senderDomain(fromEmail: string): string {
+  return fromEmail.slice(fromEmail.lastIndexOf('@') + 1).toLowerCase()
+}
+
 function buildRenderContext(
   contact: Contact,
   run: FlowRunDoc | null,
@@ -390,13 +564,14 @@ function buildRenderContext(
   ctx: RunnerContext,
   resolved: Record<string, unknown> = {},
   sendId?: string,
+  category?: string | null,
 ): RenderContext {
   const scope = 'marketing'
   const expiresAt = new Date(Date.now() + ctx.config.unsubscribeTokenLifetimeDays * 24 * 60 * 60 * 1000)
   // The send id lets the one-click unsubscribe be attributed to this send
   // (and so to its broadcast's unsubscribe count and stop rule).
   const token = signUnsubscribeToken(
-    { email: contact.email, scope, expiresAt, ...(sendId ? { sendId } : {}) },
+    { email: contact.email, scope, expiresAt, ...(sendId ? { sendId } : {}), ...(category ? { category } : {}) },
     ctx.config.unsubscribeSecret,
   )
   const unsubscribeUrl = `${ctx.config.publicUrl}/m/unsub/${token}`
@@ -440,6 +615,7 @@ function newSendDoc(input: NewSendInput): SendDoc {
     broadcastId: null,
     manualSendBy: null,
     kind: input.template.kind,
+    ...(input.template.category ? { category: input.template.category } : {}),
     provider: input.providerName,
     providerMessageId: null,
     fromName: input.renderedFrom?.name ?? input.template.fromName,
@@ -466,11 +642,43 @@ function newSendDoc(input: NewSendInput): SendDoc {
   }
 }
 
-async function markFailed(sendId: ObjectId, reason: string, ctx: RunnerContext): Promise<void> {
+async function markFailed(send: SendDoc, reason: string, ctx: RunnerContext): Promise<void> {
   await ctx.collections.sends.updateOne(
-    { _id: sendId },
-    { $set: { status: 'failed', errorMessage: reason } },
+    { _id: send._id },
+    { $set: { status: 'failed', errorMessage: reason, updatedAt: new Date() } },
   )
+  await emitOutcome(send, { status: 'failed', errorMessage: reason }, { status: 'failed', error: reason }, ctx)
+}
+
+/**
+ * An error thrown mid-dispatch (guard, policy lookup) would otherwise strand
+ * the row in 'sending', which the queue's retry cannot claim. 'failed' is
+ * claimable, so the retry picks it up; no outcome is reported for it.
+ */
+async function releaseClaimAfterError(send: SendDoc, reason: string, ctx: RunnerContext): Promise<void> {
+  await ctx.collections.sends
+    .updateOne({ _id: send._id }, { $set: { status: 'failed', errorMessage: reason, updatedAt: new Date() } })
+    .catch(() => {})
+}
+
+/**
+ * Tell the origin's `onOutcome` hook about a status transition. The row is
+ * already written, so a throwing hook is logged rather than propagated: a
+ * retry could not claim the send again and would only mask the real outcome.
+ */
+export async function emitOutcome(
+  send: SendDoc,
+  patch: Partial<SendDoc>,
+  outcome: SendOutcome,
+  ctx: RunnerContext,
+): Promise<void> {
+  const hook = ctx.sendHooks?.[sendOrigin(send)]?.onOutcome
+  if (!hook) return
+  try {
+    await hook({ ...send, ...patch }, outcome, ctx)
+  } catch (err) {
+    console.error(`mailery: onOutcome hook failed for send ${String(send._id)}`, err)
+  }
 }
 
 function sha256(s: string): string {

@@ -1,3 +1,24 @@
+import type { FactDecl } from '../../shared/types.js'
+import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../../shared/program-board.js'
+export type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource }
+import type {
+  DmarcAlert as ServerDmarcAlert,
+  DmarcAlertDelivery as ServerDmarcAlertDelivery,
+  DmarcAlertKind,
+  DmarcAlertStateView as ServerDmarcAlertStateView,
+  DmarcDnsCheckResult as ServerDmarcDnsCheckResult,
+  DmarcDnsIssue,
+  DmarcMonitoringPayload as ServerDmarcMonitoringPayload,
+  DmarcMonitoringSettings,
+  DmarcSettingsPatch,
+  Wire,
+} from '../../shared/dmarc-types.js'
+export type { DmarcAlertKind, DmarcDnsIssue, DmarcMonitoringSettings, DmarcSettingsPatch }
+export type DmarcAlert = Wire<ServerDmarcAlert>
+export type DmarcAlertDelivery = Wire<ServerDmarcAlertDelivery>
+export type DmarcAlertStateView = Wire<ServerDmarcAlertStateView>
+export type DmarcDnsCheckResult = Wire<ServerDmarcDnsCheckResult>
+export type DmarcMonitoringPayload = Wire<ServerDmarcMonitoringPayload>
 /**
  * Typed fetch wrappers against /admin/mailer/api/*. Used by every screen that
  * needs live data. No mock fallback — screens render their own loading /
@@ -64,7 +85,58 @@ export const api = {
   pauseFlow: (slug: string) => json<{ ok: boolean }>(`/flows/${slug}/pause`, { method: 'POST' }),
   resumeFlow: (slug: string) => json<{ ok: boolean }>(`/flows/${slug}/resume`, { method: 'POST' }),
 
+  // Programs (0.21)
+  programs: () => json<ProgramListRow[]>('/programs'),
+  program: (slug: string) => json<ProgramDetail>(`/programs/${encodeURIComponent(slug)}`),
+  createProgram: (definition: unknown, notes?: string) =>
+    json<{ ok: boolean; slug: string }>('/programs', { method: 'POST', body: JSON.stringify(notes ? { definition, notes } : definition) }),
+  saveProgramDraft: (slug: string, definition: unknown) =>
+    json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}`, { method: 'PATCH', body: JSON.stringify(definition) }),
+  publishProgram: (slug: string) =>
+    json<{ ok: boolean; version: number }>(`/programs/${encodeURIComponent(slug)}/publish`, { method: 'POST' }),
+  enableProgram: (slug: string) => json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}/enable`, { method: 'POST' }),
+  disableProgram: (slug: string) => json<{ ok: boolean }>(`/programs/${encodeURIComponent(slug)}/disable`, { method: 'POST' }),
+  programStats: (slug: string) => json<ProgramStatsPayload>(`/programs/${encodeURIComponent(slug)}/stats`),
+  programRuns: (slug: string, q: { status?: string; arm?: string; limit?: number; skip?: number } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') qs.set(k, String(v))
+    return json<{ runs: any[]; total: number; limit: number; skip: number }>(`/programs/${encodeURIComponent(slug)}/runs?${qs}`)
+  },
+  programRun: (slug: string, subjectId: string, q: { limit?: number; skip?: number } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) if (v !== undefined) qs.set(k, String(v))
+    return json<{ run: any; decisions: any[]; total: number; limit: number; skip: number }>(
+      `/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}?${qs}`,
+    )
+  },
+  tickProgramRun: (slug: string, subjectId: string) =>
+    json<{ ok: boolean; result: any }>(`/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}/tick`, { method: 'POST' }),
+  abortProgramRun: (slug: string, subjectId: string, reason?: string) =>
+    json<{ ok: boolean; aborted: boolean; cancelledSends: number }>(
+      `/programs/${encodeURIComponent(slug)}/runs/${encodeURIComponent(subjectId)}/abort`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    ),
+  // Program board (0.21.x) — plans/16-program-board.md
+  simulateProgram: (slug: string, input: ProgramSimulationInput) =>
+    json<ProgramSimulation<string>>(`/programs/${encodeURIComponent(slug)}/simulate`, { method: 'POST', body: JSON.stringify(input) }),
+  lintProgram: (slug: string, source?: ProgramSource) =>
+    json<{ source: ProgramSource; issues: ProgramLintIssue[] }>(
+      `/programs/${encodeURIComponent(slug)}/lint${source ? `?source=${source}` : ''}`,
+    ),
+  /** Render one program email: template + program vars (action, attempt, facts). */
+  previewProgramEmail: (
+    templateSlug: string,
+    program: { slug: string; source?: ProgramSource; actionId: string; attempt: number; facts?: Record<string, unknown>; subjectId?: string },
+  ) =>
+    json<{ subject: string; preheader?: string; html: string; plainText: string }>(
+      `/templates/${encodeURIComponent(templateSlug)}/preview`,
+      { method: 'POST', body: JSON.stringify({ useDraft: false, program }) },
+    ),
+  enterProgram: (slug: string, subjectId: string) =>
+    json<{ ok: boolean; created: boolean }>(`/programs/${encodeURIComponent(slug)}/enter`, { method: 'POST', body: JSON.stringify({ subjectId }) }),
+
   // Templates
+  categories: () => json<Array<{ id: string; label: string; description?: string; defaultOptIn?: boolean }>>('/categories'),
   templates: () => json<any[]>('/templates'),
   template: (slug: string) => json<any>(`/templates/${slug}`),
   createTemplate: (body: { slug: string; name: string; kind: 'marketing' | 'transactional'; subject?: string; preheader?: string; fromName?: string; fromEmail?: string }) =>
@@ -177,6 +249,27 @@ export const api = {
     json<{ ok: boolean; deleted: number }>(`/dmarc/sources/${encodeURIComponent(ip)}`, {
       method: 'DELETE',
     }),
+
+  // DMARC Monitoring
+  dmarcMonitoring: () => json<DmarcMonitoringPayload>('/dmarc/monitoring'),
+  saveDmarcSettings: (patch: DmarcSettingsPatch) =>
+    json<{ settings: DmarcMonitoringSettings }>('/dmarc/settings', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  resetDmarcSettings: () =>
+    json<{ settings: DmarcMonitoringSettings }>('/dmarc/settings', { method: 'DELETE' }),
+  checkDmarcDns: (domain?: string) =>
+    json<{ results: DmarcDnsCheckResult[] }>('/dmarc/dns/check', {
+      method: 'POST',
+      body: JSON.stringify(domain ? { domain } : {}),
+    }),
+  evaluateDmarcAlerts: () =>
+    json<{ ran: boolean; reason?: string; fired: number; open: number }>('/dmarc/alerts/evaluate', {
+      method: 'POST',
+    }),
+  sendTestDmarcAlert: () =>
+    json<{ delivery: DmarcAlertDelivery; alert: DmarcAlert }>('/dmarc/alerts/test', { method: 'POST' }),
 }
 
 export type CheckSeverity = 'ok' | 'warn' | 'error'
@@ -352,6 +445,8 @@ export interface DmarcSourceRow {
   label: string | null
   ignored: boolean
   tagSource: 'config' | 'db' | null
+  /** Reverse DNS name of `sourceIp`, or null when it has none or the lookup timed out. */
+  ptr: string | null
 }
 
 export interface DmarcReportRow {
@@ -367,6 +462,7 @@ export interface DmarcReportRow {
   passCount: number
   failCount: number
   receivedAt: string
+  via?: 'upload' | 'inbound'
 }
 
 export interface DmarcPayload {
@@ -511,4 +607,48 @@ export interface DashboardPayload {
   recentFlows: any[]
   recentSends: any[]
   recentAudit: any[]
+}
+
+export interface ProgramListRow {
+  slug: string
+  name: string
+  version: number
+  enabled: boolean
+  draft: boolean
+  category: string | null
+  publishedAt: string | null
+  runs: { active: number; completed: number; exited: number; sunset: number; total: number }
+}
+
+export interface ProgramDetail {
+  slug: string
+  version: number
+  enabled: boolean
+  published: any | null
+  publishedAt: string | null
+  publishedBy: string | null
+  draft: { definition: any; notes: string; lastModifiedBy: string; lastModifiedAt: string } | null
+  versions: Array<{ version: number; publishedAt: string; publishedBy: string }>
+  /** `factsAdapter.declare`, or null without a facts adapter (board). */
+  facts: Record<string, FactDecl> | null
+  /** Every existing template referenced by the published or draft definition (board). */
+  templates: ProgramTemplateInfo[]
+}
+
+export interface ProgramTemplateInfo {
+  slug: string
+  name: string
+  subject: string
+  kind: 'marketing' | 'transactional'
+  category: string | null
+  /** Has a published body (sendable). */
+  published: boolean
+}
+
+export interface ProgramArmFunnel { evaluated: number; chosen: number; sent: number; satisfied: number }
+export interface ProgramStatsPayload {
+  slug: string
+  version: number
+  actions: Array<{ actionId: string; title: string | null; treatment: ProgramArmFunnel; holdout: ProgramArmFunnel }>
+  runs: Record<'treatment' | 'holdout', { total: number; byStatus: Record<string, number>; completed: number; completionRate: number | null }>
 }

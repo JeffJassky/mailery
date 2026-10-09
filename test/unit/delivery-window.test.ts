@@ -56,6 +56,19 @@ describe('computeDeliveryTime — timeOfDay', () => {
     expect(out.toISOString()).toBe('2026-07-21T09:00:00.000Z')
   })
 
+  it('a slot just before midnight keeps its grace after midnight', () => {
+    const now = new Date('2026-07-21T00:10:00Z') // 40 minutes after Monday 23:30
+    expect(computeDeliveryTime(now, { timeOfDay: '23:30' }).toISOString()).toBe(now.toISOString())
+    expect(computeDeliveryTime(new Date('2026-07-21T00:40:00Z'), { timeOfDay: '23:30' }).toISOString()).toBe('2026-07-21T23:30:00.000Z') // past grace
+  })
+
+  it('the midnight grace honours weekdaysOnly: Friday’s slot still sends, Saturday’s does not', () => {
+    const fri = new Date('2026-07-25T00:10:00Z') // Saturday 00:10, Friday slot was allowed
+    expect(computeDeliveryTime(fri, { timeOfDay: '23:30', weekdaysOnly: true }).toISOString()).toBe(fri.toISOString())
+    const sat = new Date('2026-07-26T00:10:00Z') // Sunday 00:10, Saturday slot was not allowed
+    expect(computeDeliveryTime(sat, { timeOfDay: '23:30', weekdaysOnly: true }).toISOString()).toBe('2026-07-27T23:30:00.000Z')
+  })
+
   it('interprets the slot in the given timezone', () => {
     // 09:00 in New York (EDT, UTC-4) = 13:00 UTC.
     const out = computeDeliveryTime(new Date('2026-07-20T06:00:00Z'), {

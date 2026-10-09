@@ -13,6 +13,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ObjectId } from 'mongodb'
+import { z } from 'zod'
 
 import type { Mailer } from '../mailer.js'
 import {
@@ -22,12 +23,17 @@ import {
   type DraftBodySource,
 } from '../templates/render.js'
 import { validateSenderDomain } from '../templates/sender-domain.js'
+import { templateCategoryIssue } from '../templates/category.js'
+import { programTemplateConflict } from '../programs/template-guard.js'
+import { parseCategoryInput } from '../templates/category-input.js'
 import { lintTemplate, type LintResult } from '../templates/linter.js'
 import { validateHtmlSource, type HtmlSourceIssue } from '../templates/html-source.js'
 import { resolveVars, varsJsonSchema, RESERVED_VAR_KEYS } from '../adapters/vars.js'
-import type { Contact } from '../../shared/types.js'
+import type { Contact, Facts } from '../../shared/types.js'
 import { TEMPLATE_BODY_FORMATS } from '../../shared/enums.js'
+import { buildProgramRenderVars } from '../runner/programs/hooks.js'
 import { runSetupChecks } from './setup-status.js'
+import { createProgramsRouter } from './programs.js'
 import { sha256Hex, signUnsubscribeToken } from '../tokens.js'
 import { registeredProviderNames, resolveProvider } from '../provider-lookup.js'
 import { effectiveOverallStatus } from '../runner/health.js'
@@ -36,6 +42,17 @@ import { runDnsblChecks } from '../runner/dnsbl.js'
 import { runPostmasterPull } from '../runner/postmaster.js'
 import { runSndsPull } from '../runner/snds.js'
 import { ingestDmarcAttachment, resolveSourceTags, suggestPolicyProgression } from '../runner/dmarc.js'
+import type { DmarcAlertStateView, DmarcDnsResolver, DmarcMonitoringPayload } from '../../shared/dmarc-types.js'
+import {
+  DMARC_SETTINGS_DEFAULTS,
+  clearDmarcSettingsPatch,
+  loadDmarcSettings,
+  saveDmarcSettingsPatch,
+  validateDmarcSettingsPatch,
+} from '../runner/dmarc-settings.js'
+import { evaluateDmarcAlerts, runDmarcDnsChecks, sendTestDmarcAlert } from '../runner/dmarc-monitor.js'
+import { resolveMonitoredDomains } from '../runner/dmarc-domains.js'
+import { lookupPtr } from '../runner/dmarc-dns.js'
 import { computeListHygiene } from '../runner/hygiene.js'
 import {
   createMailTesterClient,
@@ -77,6 +94,8 @@ export interface AdminRouterOptions {
    * client is created from `mailer.config.mailTester`.
    */
   mailTesterClient?: MailTesterClient
+  /** Inject a DNS resolver for DMARC checks and reverse DNS (tests use a fake). */
+  dmarcDnsResolver?: DmarcDnsResolver
 }
 
 export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {}): Router {
@@ -118,6 +137,16 @@ export function createAdminRouter(mailer: Mailer, opts: AdminRouterOptions = {})
 // ---------------------------------------------------------------------------
 // JSON API
 // ---------------------------------------------------------------------------
+
+/** `program` option of the template preview: render as a Program send would (plans/16 §7). */
+const previewProgramSchema = z.object({
+  slug: z.string().min(1).max(200),
+  source: z.enum(['published', 'draft']).optional(),
+  actionId: z.string().min(1).max(200),
+  attempt: z.number().int().min(1),
+  facts: z.record(z.string(), z.unknown()).optional(),
+  subjectId: z.string().min(1).max(256).optional(),
+})
 
 /**
  * The JSON API alone, without the SPA shell or the static assets. Exported
@@ -395,6 +424,17 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
     }),
   )
 
+  // ----- Programs (0.21) — see api/programs.ts ------------------------------
+  r.use('/programs', createProgramsRouter(mailer))
+
+  // ----- Categories (read-only; the source of truth is MailerConfig) --------
+  r.get(
+    '/categories',
+    asyncHandler(async (_req, res) => {
+      res.json(mailer.config.categories ?? [])
+    }),
+  )
+
   // ----- Templates ----------------------------------------------------------
   r.get(
     '/templates',
@@ -472,7 +512,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         c.flowRuns.find({ externalId, status: 'active' }).sort({ nextActionAt: 1 }).limit(50).toArray(),
       ])
       if (!contact) return res.status(404).json({ error: 'not_found' })
-      return res.json({ contact, subscription, recentEvents, recentSends, activeRuns })
+      const categories = mailer.config.categories ?? []
+      const preferences = categories.length > 0 ? await mailer.getPreferences(contact.email) : undefined
+      return res.json({ contact, subscription, recentEvents, recentSends, activeRuns, ...(preferences ? { preferences } : {}) })
     }),
   )
 
@@ -754,7 +796,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (!file) return res.status(400).json({ error: 'no_file', message: 'expected a "file" field' })
 
       try {
-        const result = await ingestDmarcAttachment(mailer.getRunnerContext(), file.buffer, file.originalname)
+        const result = await ingestDmarcAttachment(mailer.getRunnerContext(), file.buffer, file.originalname, { via: 'upload' })
         await mailer.audit({
           actor: (req as any).actor,
           action: 'dmarc.ingest',
@@ -868,6 +910,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         ])
         .toArray()
 
+      const ptrs = await lookupPtr(
+        topFailures.map((f) => f._id.sourceIp),
+        { resolver: opts.dmarcDnsResolver },
+      )
       const sources = topFailures.map((f) => {
         const tag = tagged.get(f._id.sourceIp)
         return {
@@ -882,6 +928,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           label: tag?.label ?? null,
           ignored: !!tag?.ignored,
           tagSource: tag?.source ?? null,
+          ptr: ptrs.get(f._id.sourceIp) ?? null,
         }
       })
 
@@ -891,6 +938,143 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         recentReports: reports.slice(0, 30),
         retentionDays: mailer.config.dmarc?.retentionDays ?? 90,
       })
+    }),
+  )
+
+  // ----- DMARC Monitoring ---------------------------------------------------
+  const toAlertView = (row: any): DmarcAlertStateView => {
+    const { _id, subjectKeys: _subjectKeys, ...rest } = row
+    return { id: _id, ...rest }
+  }
+
+  r.get(
+    '/dmarc/monitoring',
+    asyncHandler(async (_req, res) => {
+      const ctx = mailer.getRunnerContext()
+      const { settings, hasDbOverride } = await loadDmarcSettings(ctx)
+      const reportDomains = (await c.dmarcReports.distinct('domain')) as string[]
+      const monitored = resolveMonitoredDomains(mailer.config, settings, reportDomains)
+
+      const since30 = Date.now() - 30 * 86_400_000
+      const reports = await c.dmarcReports
+        .find({}, { projection: { domain: 1, rangeEnd: 1, receivedAt: 1, via: 1 } })
+        .toArray()
+      const stats = new Map<string, { last: Date | null; count: number }>()
+      let lastInbound: Date | null = null
+      for (const rep of reports) {
+        const end = new Date(rep.rangeEnd)
+        const st = stats.get(rep.domain) ?? { last: null, count: 0 }
+        if (!st.last || end > st.last) st.last = end
+        if (end.getTime() >= since30) st.count += 1
+        stats.set(rep.domain, st)
+        if (rep.via === 'inbound') {
+          const at = new Date(rep.receivedAt)
+          if (!lastInbound || at > lastInbound) lastInbound = at
+        }
+      }
+      const dnsDocs = await c.dmarcDnsChecks.find({}).toArray()
+      const dnsByDomain = new Map(dnsDocs.map((d) => [d._id, d.result]))
+
+      const state = mailer.dmarcInboundState
+      const inbound: DmarcMonitoringPayload['inbound'] = state
+        ? {
+            mounted: true,
+            path: state.path,
+            url: `${mailer.config.publicUrl}/m${state.path}`,
+            allowedDomains: state.allowedDomains,
+            lastInboundReportAt: lastInbound,
+          }
+        : { mounted: false, path: null, url: null, allowedDomains: [], lastInboundReportAt: lastInbound }
+
+      const openRows = await c.dmarcAlerts.find({ status: 'open' }).toArray()
+      const recentRows = await c.dmarcAlerts.find({ status: 'resolved' }).sort({ resolvedAt: -1 }).limit(50).toArray()
+
+      const payload: DmarcMonitoringPayload = {
+        settings,
+        defaults: DMARC_SETTINGS_DEFAULTS,
+        hasDbOverride,
+        alertHandlerConfigured: typeof mailer.config.onDmarcAlert === 'function',
+        inbound,
+        domains: monitored.map((d) => ({
+          ...d,
+          lastReportAt: stats.get(d.domain)?.last ?? null,
+          reportCount30d: stats.get(d.domain)?.count ?? 0,
+          dns: dnsByDomain.get(d.domain) ?? null,
+        })),
+        alerts: { open: openRows.map(toAlertView), recent: recentRows.map(toAlertView) },
+      }
+      res.json(payload)
+    }),
+  )
+
+  r.put(
+    '/dmarc/settings',
+    asyncHandler(async (req, res) => {
+      const v = validateDmarcSettingsPatch(req.body)
+      if (!v.ok) return res.status(400).json({ error: 'validation_failed', message: v.message })
+      const keys: string[] = []
+      for (const [k, val] of Object.entries(v.patch)) {
+        if (k === 'alerts' && val && typeof val === 'object') {
+          for (const ak of Object.keys(val)) keys.push(`alerts.${ak}`)
+        } else {
+          keys.push(k)
+        }
+      }
+      const settings = await saveDmarcSettingsPatch(mailer.getRunnerContext(), v.patch, (req as any).actor)
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.settings.update',
+        resource: { collection: 'mailer_dmarc_settings', id: 'settings' },
+        diffSummary: keys.join(', '),
+      })
+      return res.json({ settings })
+    }),
+  )
+
+  r.delete(
+    '/dmarc/settings',
+    asyncHandler(async (req, res) => {
+      const settings = await clearDmarcSettingsPatch(mailer.getRunnerContext())
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.settings.reset',
+        resource: { collection: 'mailer_dmarc_settings', id: 'settings' },
+        diffSummary: 'reset to config + defaults',
+      })
+      res.json({ settings })
+    }),
+  )
+
+  r.post(
+    '/dmarc/dns/check',
+    asyncHandler(async (req, res) => {
+      const domain = typeof req.body?.domain === 'string' && req.body.domain !== '' ? req.body.domain : undefined
+      try {
+        const results = await runDmarcDnsChecks(mailer.getRunnerContext(), {
+          force: true,
+          resolver: opts.dmarcDnsResolver,
+          domain,
+        })
+        return res.json({ results })
+      } catch (err: any) {
+        const message = String(err?.message ?? err)
+        if (/not monitored/.test(message)) return res.status(400).json({ error: 'validation_failed', message })
+        throw err
+      }
+    }),
+  )
+
+  r.post(
+    '/dmarc/alerts/evaluate',
+    asyncHandler(async (_req, res) => {
+      res.json(await evaluateDmarcAlerts(mailer.getRunnerContext(), { force: true, resolver: opts.dmarcDnsResolver }))
+    }),
+  )
+
+  r.post(
+    '/dmarc/alerts/test',
+    asyncHandler(async (_req, res) => {
+      res.json(await sendTestDmarcAlert(mailer.getRunnerContext()))
     }),
   )
 
@@ -1136,11 +1320,21 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
     '/templates',
     asyncHandler(async (req, res) => {
       const { slug, name, kind, subject, preheader, fromName, fromEmail } = req.body ?? {}
+      const categoryInput = parseCategoryInput(req.body?.category)
+      if ('error' in categoryInput) return res.status(400).json({ error: 'validation_failed', message: categoryInput.error })
       if (!slug || !name || !kind) {
         return res.status(400).json({ error: 'validation_failed', message: 'slug, name, kind required' })
       }
       if (kind !== 'marketing' && kind !== 'transactional') {
         return res.status(400).json({ error: 'validation_failed', message: 'kind must be marketing or transactional' })
+      }
+      if (categoryInput.provided) {
+        const issue = templateCategoryIssue(kind, categoryInput.value, mailer.config.categories)
+        if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
+      }
+      {
+        const conflict = await programTemplateConflict(c, String(slug), { kind, category: categoryInput.provided ? categoryInput.value : null })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
       }
       const resolvedFromEmail =
         fromEmail ??
@@ -1162,6 +1356,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           name,
           description: '',
           kind,
+          ...(categoryInput.provided && categoryInput.value ? { category: categoryInput.value } : {}),
           fromName:
             fromName ??
             (kind === 'transactional' ? mailer.config.transactionalFromDefaults?.name : undefined) ??
@@ -1214,6 +1409,18 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
 
       const { subject, preheader, mjml, html, editorJson, notes, name, fromName, fromEmail, replyTo, kind, bodyFormat, trackOpens, trackClicks } = req.body ?? {}
 
+      // Category rule on the resulting (kind, category) pair, before any write.
+      const categoryInput = parseCategoryInput(req.body?.category)
+      if ('error' in categoryInput) return res.status(400).json({ error: 'validation_failed', message: categoryInput.error })
+      const resultingKind = kind === 'marketing' || kind === 'transactional' ? kind : tpl.kind
+      const resultingCategory = categoryInput.provided ? categoryInput.value : (tpl.category ?? null)
+      if (categoryInput.provided || resultingKind !== tpl.kind) {
+        const conflict = await programTemplateConflict(c, tpl.slug, { kind: resultingKind, category: resultingCategory })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
+        const issue = templateCategoryIssue(resultingKind, resultingCategory, mailer.config.categories)
+        if (issue) return res.status(400).json({ error: 'validation_failed', message: issue })
+      }
+
       // Mongo refuses to $set a dotted 'draft.xxx' path when 'draft' is
       // currently null (script-seeded / never-drafted templates land here) —
       // seed a base draft object first so the dot-path $set below has
@@ -1253,6 +1460,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (typeof fromEmail === 'string') set.fromEmail = fromEmail
       if (typeof replyTo === 'string' || replyTo === null) set.replyTo = replyTo
       if (kind === 'marketing' || kind === 'transactional') set.kind = kind
+      if (categoryInput.provided && categoryInput.value) set.category = categoryInput.value
 
       // Validate resulting (kind, fromEmail) against the senderDomains registry
       // whenever either field is being touched.
@@ -1272,7 +1480,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (typeof trackOpens === 'boolean') set.trackOpens = trackOpens
       if (typeof trackClicks === 'boolean') set.trackClicks = trackClicks
 
-      await c.templates.updateOne({ _id: tpl._id }, { $set: set })
+      await c.templates.updateOne(
+        { _id: tpl._id },
+        categoryInput.provided && categoryInput.value === null ? { $set: set, $unset: { category: '' } } : { $set: set },
+      )
       await mailer.audit({
         actor: (req as any).actor,
         action: 'template.draft.update',
@@ -1534,6 +1745,18 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const draft = tpl.draft
       if (!draft) return res.status(400).json({ error: 'no_draft' })
 
+      // Category rule (0.21): the stored category (or one supplied with the
+      // publish) must be valid for the template's kind and declared.
+      const publishCategory = parseCategoryInput(req.body?.category)
+      if ('error' in publishCategory) return res.status(400).json({ error: 'validation_failed', message: publishCategory.error })
+      const effectiveCategory = publishCategory.provided ? publishCategory.value : (tpl.category ?? null)
+      const categoryIssue = templateCategoryIssue(tpl.kind, effectiveCategory, mailer.config.categories)
+      if (categoryIssue) return res.status(400).json({ error: 'validation_failed', message: categoryIssue })
+      {
+        const conflict = await programTemplateConflict(c, tpl.slug, { kind: tpl.kind, category: effectiveCategory })
+        if (conflict) return res.status(409).json({ error: 'program_template_conflict', message: conflict })
+      }
+
       // Short-circuit sender-domain check — preserves the pre-linter 400
       // sender_domain_invalid contract so external callers (and the SPA's
       // own publish modal) can key on it without conflating with lint errors.
@@ -1657,7 +1880,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
             publishedAt: now,
             publishedBy: (req as any).actor,
             updatedAt: now,
+            ...(publishCategory.provided && publishCategory.value ? { category: publishCategory.value } : {}),
           },
+          ...(publishCategory.provided && publishCategory.value === null ? { $unset: { category: '' } } : {}),
         },
       )
       await mailer.audit({
@@ -1682,6 +1907,16 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       if (!tpl) return res.status(404).json({ error: 'not_found' })
 
       const useDraft = req.body?.useDraft !== false
+
+      let programOpt: z.infer<typeof previewProgramSchema> | undefined
+      if (req.body?.program !== undefined) {
+        const parsed = previewProgramSchema.safeParse(req.body.program)
+        if (!parsed.success) {
+          const message = parsed.error.issues.map((i) => `program.${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
+          return res.status(400).json({ error: 'validation_failed', message })
+        }
+        programOpt = parsed.data
+      }
 
       // Inline body overrides, same tolerance as the lint endpoint. The editor
       // holds unsaved edits in local state; without this the only way to see
@@ -1758,8 +1993,23 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         })
       }
 
+      // Program context (action/attempt/facts) wins over host vars, as at send time.
+      let programVars: Record<string, unknown> = {}
+      if (programOpt) {
+        const prog = await c.programs.findOne({ slug: programOpt.slug })
+        const source = programOpt.source ?? (prog?.draft ? 'draft' : 'published')
+        const def = source === 'draft' ? prog?.draft?.definition : prog?.definition
+        if (!def) {
+          return res.status(404).json({ error: 'program_not_found', message: `program "${programOpt.slug}" has no ${source} definition` })
+        }
+        const adapter = mailer.config.factsAdapter
+        const facts: Facts = (programOpt.facts as Facts | undefined) ?? (programOpt.subjectId && adapter ? await adapter.resolve(programOpt.subjectId) : {})
+        programVars = buildProgramRenderVars(def, programOpt, facts, 0)
+      }
+
       const renderCtx = {
         ...resolved,
+        ...programVars,
         contact,
         vars: req.body?.vars ?? {},
         event: eventProperties ?? {},

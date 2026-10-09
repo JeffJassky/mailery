@@ -754,3 +754,68 @@ pre.code .k { color: var(--violet-fg); }
 pre.code .s { color: var(--green-fg); }
 pre.code .n { color: var(--amber-fg); }
 pre.code .c { color: var(--fg-subtle); font-style: italic; }
+
+/* ============================================================
+   Tip + icon buttons (components/tip.tsx)
+   ============================================================ */
+.tip-wrap { position: relative; display: inline-flex; align-items: center; max-width: 100%; }
+.tip-wrap.block { display: flex; width: 100%; }
+.tip-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: var(--r-xs); }
+.tip-bubble {
+  position: fixed;
+  z-index: 1000;
+  max-width: 280px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: var(--fg);
+  color: var(--bg-elev);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 500;
+  white-space: pre-line;
+  pointer-events: none;
+  box-shadow: var(--shadow-md);
+}
+.icon-btn2 {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg-muted);
+}
+.icon-btn2.sm { width: 24px; height: 24px; border-radius: var(--r-sm); }
+.icon-btn2:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.icon-btn2.active { background: var(--accent-soft); color: var(--accent-press); border-color: var(--accent-border); }
+.icon-btn2.danger:hover:not(:disabled) { background: var(--red-soft); color: var(--red-fg); }
+.icon-btn2:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn2:focus-visible, .seg-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Toggle switch */
+.switch {
+  position: relative; width: 28px; height: 16px; padding: 0; border: 0; border-radius: var(--r-pill);
+  background: var(--border-strong); transition: background 0.12s;
+}
+.switch > span {
+  position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--bg-elev); transition: transform 0.12s; box-shadow: var(--shadow-sm);
+}
+.switch.on { background: var(--green); }
+.switch.on > span { transform: translateX(12px); }
+.switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+button.seg-item { border: 0; background: transparent; font: inherit; }
+button.seg-item.active { background: var(--bg-elev); }
+button.seg-item:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Condition outline inside a tooltip (program board) */
+.tip-bubble .cond { display: block; white-space: normal; }
+.tip-bubble .cond-title { display: block; font-weight: 600; margin-bottom: 3px; }
+.tip-bubble .cond-line { display: block; font-weight: 400; }
+.tip-bubble .cond-group { font-weight: 400; font-style: italic; }
+.tip-bubble .cond-list { margin: 0; padding-left: 14px; font-weight: 400; list-style: disc; }
+.tip-bubble .cond-list .cond-list { list-style: circle; margin-top: 1px; }
+.tip-bubble .cond-list li { margin: 1px 0; }

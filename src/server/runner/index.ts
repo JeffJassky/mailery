@@ -14,6 +14,7 @@ import type { ResolvedConfig } from '../config.js'
 import type { Collections } from '../models/index.js'
 import type { Queues } from '../queues/index.js'
 import type { VarsAdapter } from '../adapters/vars.js'
+import type { SendHooks } from './send-hooks.js'
 
 export interface RunnerContext {
   db: Db
@@ -36,6 +37,8 @@ export interface RunnerContext {
     resource: { collection: string; id?: string; slug?: string }
     diffSummary?: string
   }) => Promise<void>
+  /** Per-origin dispatch hooks (0.21). Absent in lightweight harnesses = no hooks. */
+  sendHooks?: SendHooks
 }
 
 export { runTick } from './tick.js'
@@ -50,3 +53,5 @@ export type {
   DrainPendingUnsubsOptions,
   DrainPendingUnsubsResult,
 } from './pending-unsubs.js'
+export { sendOrigin } from './send-hooks.js'
+export type { SendHooks, SendOriginHooks, SendGuardVerdict, SendOutcome } from './send-hooks.js'

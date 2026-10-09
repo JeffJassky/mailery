@@ -29,7 +29,7 @@ export function Sidebar({
 }) {
   const Item = ({ icon: Ic, label, badge, screen }: any) => (
     <div
-      className={'sidebar-link' + (route.screen === screen ? ' active' : '')}
+      className={'sidebar-link' + (route.screen === screen || (screen === 'programs' && route.screen.startsWith('program-')) ? ' active' : '')}
       onClick={() => setRoute({ screen })}
     >
       <Ic className="icon" />
@@ -54,6 +54,7 @@ export function Sidebar({
         <nav className="sidebar-nav">
           <Item icon={Icons.Home} label="Dashboard" screen="dashboard" />
           <Item icon={Icons.Health} label="Health" screen="health" />
+          <Item icon={Icons.Health} label="DMARC Monitoring" screen="dmarc" />
         </nav>
       </div>
 
@@ -62,6 +63,8 @@ export function Sidebar({
         <nav className="sidebar-nav">
           <Item icon={Icons.Flows} label="Flows" screen="flows" badge={formatCount(counts?.flows)} />
           <Item icon={Icons.Template} label="Templates" screen="templates" badge={formatCount(counts?.templates)} />
+          <Item icon={Icons.Tag} label="Categories" screen="categories" />
+          <Item icon={Icons.Rocket} label="Programs" screen="programs" />
           <Item icon={Icons.Broadcast} label="Broadcasts" screen="broadcasts" badge={formatCount(counts?.broadcasts)} />
         </nav>
       </div>
@@ -164,6 +167,8 @@ export function StatusPill({ status }: { status: string }) {
     bounced: { cls: 'red', label: 'Bounced' },
     failed: { cls: 'red', label: 'Failed' },
     suppressed: { cls: 'amber', label: 'Suppressed' },
+    deferred: { cls: 'amber', label: 'Deferred' },
+    cancelled: { cls: 'neutral', label: 'Cancelled' },
     complained: { cls: 'red', label: 'Complained' },
     enabled: { cls: 'green', label: 'Enabled' },
     disabled: { cls: 'neutral', label: 'Disabled' },

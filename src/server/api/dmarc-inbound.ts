@@ -44,9 +44,6 @@
  *   allowlist that silently matches the wrong address either locks out the
  *   real sender or admits everyone. Put an allowlist in your ingress if you
  *   want one; it is a good second layer and a bad only layer.
- * - **Secret in the path.** Works, and is the fallback, but a URL path is
- *   logged by every proxy, load balancer and access log between SendGrid and
- *   you. Supported implicitly: nothing stops you making `path` unguessable.
  * - **Secret in the `Authorization` header.** The default and the
  *   recommendation. Inbound Parse cannot set custom headers, but its
  *   destination URL accepts embedded basic-auth credentials
@@ -65,6 +62,7 @@ import type { Request, Response, Router } from 'express'
 import multer from 'multer'
 
 import { ingestDmarcAttachment } from '../runner/dmarc.js'
+import { deriveSenderDomains } from '../runner/dmarc-domains.js'
 import type { Mailer } from '../mailer.js'
 import { wrap, type RouteLogger } from './wrap.js'
 
@@ -136,7 +134,7 @@ export function mountDmarcInbound(
 
   const routePath = opts.path ?? DEFAULT_PATH
   const parseInbound = opts.parseInbound ?? sendgridInboundParser
-  const allowedDomains = normalizeDomains(opts.allowedDomains ?? deriveSenderDomains(mailer))
+  const allowedDomains = normalizeDomains(opts.allowedDomains ?? deriveSenderDomains(mailer.config))
 
   if (allowedDomains.size === 0) {
     logger.warn?.(
@@ -214,7 +212,7 @@ export function mountDmarcInbound(
 
       for (const file of candidates) {
         try {
-          const result = await ingestDmarcAttachment(ctx, file.buffer, file.filename, { allowDomain })
+          const result = await ingestDmarcAttachment(ctx, file.buffer, file.filename, { allowDomain, via: 'inbound' })
           ingested.push({ reportId: result.reportId, domain: result.domain, duplicate: result.duplicate })
         } catch (err: unknown) {
           const message = String((err as Error)?.message ?? err)
@@ -235,6 +233,8 @@ export function mountDmarcInbound(
       return res.status(200).json({ ok: true, ingested, rejected })
     }),
   )
+
+  mailer.dmarcInboundState = { mounted: true, path: routePath, allowedDomains: [...allowedDomains].sort() }
 
   return routePath
 }
@@ -340,39 +340,4 @@ function normalizeDomains(domains: Iterable<string>): Set<string> {
     if (trimmed) out.add(trimmed)
   }
   return out
-}
-
-/**
- * Domains this deployment sends from: the `senderDomains` registry plus the
- * From defaults. DMARC reports are published per organizational domain, so a
- * deployment sending from `news.example.com` receives reports whose
- * `policy_published.domain` may be either that or `example.com` — both are
- * included.
- */
-function deriveSenderDomains(mailer: Mailer): string[] {
-  const out: string[] = []
-  const push = (domain: string | undefined) => {
-    if (!domain) return
-    out.push(domain)
-    // The organizational domain the subdomain's DMARC policy is inherited
-    // from. Approximated as the last two labels, which is right for
-    // `example.com` and over-permissive for a multi-label public suffix like
-    // `example.co.uk` — set `dmarcInbound.allowedDomains` explicitly there.
-    const labels = domain.split('.')
-    if (labels.length > 2) out.push(labels.slice(-2).join('.'))
-  }
-
-  for (const domain of Object.keys(mailer.config.senderDomains ?? {})) push(domain.toLowerCase())
-  push(emailDomain(mailer.config.fromDefaults?.email))
-  push(emailDomain(mailer.config.transactionalFromDefaults?.email))
-  push(emailDomain(mailer.config.senderAddress))
-  return out
-}
-
-function emailDomain(email: string | undefined): string | undefined {
-  if (typeof email !== 'string') return undefined
-  const at = email.lastIndexOf('@')
-  if (at === -1) return undefined
-  const domain = email.slice(at + 1).trim().toLowerCase()
-  return domain || undefined
 }

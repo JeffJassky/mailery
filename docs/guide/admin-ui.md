@@ -32,7 +32,7 @@ To use a different path (`/dashboard/email`, `/internal/mailer`, etc.) you can:
 
 ## Screens
 
-The SPA has 15 screens organized in four sidebar sections:
+The SPA has 18 screens organized in four sidebar sections:
 
 **Overview**
 - Dashboard — KPIs (sends, deliverability, open rate, click rate), health, recent flows / sends / audit
@@ -41,6 +41,8 @@ The SPA has 15 screens organized in four sidebar sections:
 **Compose**
 - Flows — list + detail with step editor
 - Templates — list + Maily WYSIWYG editor (Design / MJML / HTML / Plain text / Preview tabs) with live content linter + Mail-Tester deliverability check
+- Categories — the declared preference categories and how many templates use each (read-only; edit them in `MailerConfig.categories`)
+- Programs — see [Programs screens](#programs-screens) below
 - Broadcasts — list + composer with segment builder + confirmation gate
 
 **Audience**
@@ -51,6 +53,20 @@ The SPA has 15 screens organized in four sidebar sections:
 **Activity**
 - Sends — log with status filter, click-through to send detail
 - Audit log — every mutation, filterable by actor / action / resource
+
+## Programs screens
+
+**Programs list.** One row per program: enabled dot, name, category, published version (with a `draft` badge when an unpublished draft exists) and run counts by status. *New program* takes a definition as JSON and saves it as a disabled draft.
+
+**Program detail** has four tabs and Enable / Disable in the header (Enable needs a published version and `factsAdapter`).
+- *Actions* — the published actions as a table: priority, attempts, `requires`, the `eligible` and `satisfied` predicates as compact JSON, and `onExhaust`.
+- *Definition* — a JSON editor (the same Monaco component as the template editor) over the draft, or the published definition when there is no draft. *Save draft* stores it; *Publish* saves, validates and publishes, and when validation fails it lists every issue with its path (nothing is published). Past versions are listed underneath.
+- *Funnel* — per action, treatment next to holdout: evaluated, chosen, sent, satisfied, plus runs and completion rate per arm.
+- *Runs* — filter by status and arm, paginated; click a row for the run view. *Enter* adds a subject by id without an entry event, which is how you backfill existing accounts after enabling (enabling does not replay earlier entry events).
+
+**Run view.** The action grid (status, attempts out of the ladder length, ladder number, last sent, `completedAt`, cooldown), the run's arm and sunset stage, and the decision timeline, newest first. Each decision shows when, the trigger, the reason in words, what was chosen, and every candidate with `eligible`, `satisfied`, `blockedBy` and rank, so "why did / didn't this send" is answerable from one screen. *Force tick* runs one tick now (it still obeys the gap, contact policy and holdout); *Abort* exits the run and cancels its queued sends.
+
+See [Programs](/guide/programs) for the model, and the [`mailery doctor`](/guide/programs#doctor-and-backfill) CLI to check a deploy before enabling one.
 
 ## Health screen
 
@@ -86,7 +102,19 @@ See [Deliverability → Microsoft SNDS](./deliverability#microsoft-snds).
 
 ### DMARC RUA reports
 
-Multi-file upload widget for `.zip` / `.gz` aggregate reports. Below it: per-domain pass/fail summary table with a 14-day alignment-rate sparkline + policy progression suggestion. When failures exist, a second table lists top failing source IPs with inline tag editor.
+A compact card: pass rate per domain, the number of open DMARC alerts, and an **Open DMARC Monitoring** button. The upload widget and the report tables live on the DMARC Monitoring screen.
+
+## DMARC Monitoring screen
+
+The place to set up DMARC reporting and see what it found. Top to bottom:
+
+- **Explainer.** Three sentences on why DMARC reports matter, with a link to the guide.
+- **Alerts.** Open alerts with severity, title, domain, when each was first detected and whether the last delivery to your `onDmarcAlert` hook worked (`Delivered`, `No onDmarcAlert handler is configured`, or `Failed: …`). Click one to read its full `alert.text`. **Run checks now** evaluates immediately. **History** lists resolved alerts, newest first (50 shown).
+- **Setup.** Six numbered steps, each with a status pill: the inbound route (with the `createPublicRouter` snippet when it is not mounted), the inbound-parse destination URL to paste into your provider (the secret is never shown), the report address, a DNS check per monitored domain (each problem lists the exact record to publish; **Re-check DNS** re-runs all of them), whether reports are arriving, and whether alerts reach you (**Send test alert** calls `onDmarcAlert` with a sample alert and shows the outcome).
+- **Report tables.** Per-domain pass/fail summary with a 14-day sparkline and the policy suggestion; the top failing source IPs with reverse DNS and the inline tag editor; recent reports with how each arrived (`Via`: `inbound` or `upload`). **Upload report(s)** takes `.zip`, `.gz` or `.xml` files.
+- **Settings.** Alert switches and thresholds, the report address, extra and ignored domains. **Save** stores only what you changed in a single override document; **Reset to defaults** deletes it and returns to the config baseline. The inbound secret and `onDmarcAlert` are config-only.
+
+Mailery only checks DNS and evaluates alerts if `dmarc` is configured or at least one report has been ingested.
 
 See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
 

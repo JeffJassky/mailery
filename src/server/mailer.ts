@@ -6,16 +6,38 @@
  * See plans/10-public-api.md for the surface.
  */
 
+import type { ProgramLintIssue, ProgramSimulation, ProgramSimulationInput, ProgramSource } from '../shared/program-board.js'
+import { simulateProgram } from './runner/programs/simulate.js'
 import type { Db, ClientSession, MongoClient, ObjectId } from 'mongodb'
+import type { DmarcInboundState } from '../shared/dmarc-types.js'
 import { ObjectId as ObjectIdCtor } from 'mongodb'
 
 import type {
   ContactAdapter,
   MailProvider,
+  PreferenceState,
+  PreferenceUpdate,
+  ProgramChecklistItem,
+  ProgramDefinition,
 } from '../shared/types.js'
+import type { ProgramDoc } from './models/index.js'
+import {
+  abortProgramRun,
+  enterProgram as enterProgramRun,
+  FACTS_CHANGED_EVENT,
+  getProgramChecklist,
+  programSendHooks,
+  tickProgramRun,
+  type ProgramTickResult,
+} from './runner/programs/index.js'
+import { flowSendHooks } from './runner/flow-hooks.js'
+import { emitOutcome } from './runner/send.js'
+import { lintProgram } from './programs/lint.js'
+import { referencedTemplateSlugs, validateProgramDefinition, type ProgramValidationIssue } from './programs/validate.js'
 import {
   abortAllFlowsInputSchema,
   abortFlowInputSchema,
+  programDefinitionSchema,
   fireInputSchema,
   registerEventSchema,
   sendOneOffInputSchema,
@@ -33,7 +55,14 @@ import {
   type UnsubscribeInput,
   type UpsertSubscriptionInput,
 } from '../shared/schemas.js'
-import { resolveConfig, type MailerConfig, type ResolvedConfig } from './config.js'
+import {
+  assertValidCategories,
+  assertValidContactPolicy,
+  assertValidPreferences,
+  resolveConfig,
+  type MailerConfig,
+  type ResolvedConfig,
+} from './config.js'
 import {
   ensureIndexes,
   getCollections,
@@ -43,6 +72,7 @@ import { EventRegistry } from './events.js'
 import { resolveProvider, registeredProviderNames } from './provider-lookup.js'
 import { sha256Hex, signDoiToken } from './tokens.js'
 import { applyUnsubscribe, clearUnsubscribeSuppressions } from './unsubscribe.js'
+import { getPreferences, pauseMarketing, resumeMarketing, setPreferences } from './preferences.js'
 import {
   createQueueDriver,
   type QueueDriver,
@@ -69,6 +99,8 @@ export class Mailer {
   readonly queues: Queues
   readonly config: ResolvedConfig
   readonly events: EventRegistry
+  /** Set by `createPublicRouter` when the inbound DMARC route mounts. Read by the admin UI. */
+  dmarcInboundState: DmarcInboundState | null = null
 
   private queueDriver: QueueDriver
   /** The client `Mailer.init` opened from `config.mongo`; closed by `stop()`. Null when the host gave `db`. */
@@ -106,6 +138,7 @@ export class Mailer {
       config: this.config,
       handlebarsHelpers: this.config.handlebarsHelpers,
       audit: (entry) => this.audit(entry),
+      sendHooks: { flow: flowSendHooks, program: programSendHooks },
     }
   }
 
@@ -231,6 +264,9 @@ export class Mailer {
           + `Registered: ${registeredProviderNames(input.providers).join(', ') || '(none)'}`,
       )
     }
+    assertValidCategories(input.categories)
+    assertValidContactPolicy(input.contactPolicy)
+    assertValidPreferences(input.preferences)
     if (input.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
       assertNoReservedVarKeys(input.varsAdapter)
@@ -256,12 +292,16 @@ export class Mailer {
         adapter: typeof input.adapter === 'function' ? input.adapter(db) : input.adapter,
       })
       const collections = getCollections(config.db, config.collectionPrefix)
-      await ensureIndexes(config.db, config.collectionPrefix)
+      await ensureIndexes(config.db, config.collectionPrefix, { backgroundSends: true })
 
       const queueDriver = await createQueueDriver(config.queue, config.db)
       if (!config.workerless && config.queue.driver !== 'noop') {
         await queueDriver.scheduleRepeatingTick(config.tickIntervalSeconds)
       }
+
+      const events = new EventRegistry()
+      // 0.21: hosts fire this (externalId = subjectId) to wake a Program run.
+      if (config.factsAdapter) events.register({ name: FACTS_CHANGED_EVENT, dedupePolicy: 'every-time' })
 
       return new Mailer({
         config,
@@ -270,7 +310,7 @@ export class Mailer {
         adapter: config.adapter,
         providers: config.providers,
         queueDriver,
-        events: new EventRegistry(),
+        events,
         ownedClient,
       })
     } catch (err) {
@@ -603,16 +643,292 @@ export class Mailer {
     return result
   }
 
+  // -------------------------------------------------------------------------
+  // 0.21 — preferences (PR 2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Current opt-in state for an address across declared categories. Reads
+   * `mailer_suppressions` only; transactional is never listed.
+   */
+  async getPreferences(email: string): Promise<PreferenceState> {
+    return getPreferences(this.collections, this.config.categories ?? [], email)
+  }
+
+  /**
+   * Apply a preference update for an address (the preference page's save,
+   * also usable by a host settings screen). Audited as
+   * `contact.preferences`. See `server/preferences.ts`.
+   */
+  async setPreferences(
+    email: string,
+    update: PreferenceUpdate,
+    opts: { source?: string } = {},
+  ): Promise<{ optedOut: string[]; optedIn: string[] }> {
+    const source = opts.source ?? 'api'
+    const result = await setPreferences(this.collections, this.config.categories ?? [], email, update, { source })
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.preferences',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: opted out [${result.optedOut.join(', ')}] opted in [${result.optedIn.join(', ')}]`,
+    })
+    return result
+  }
+
+  /**
+   * Pause all marketing email to an address for `days` days (plans/17 F3):
+   * a `marketing_pause` suppression with `expiresAt`. `days` must be an integer
+   * 1–365. Audited as `contact.pause`.
+   */
+  async pauseMarketing(email: string, opts: { days: number; source?: string }): Promise<{ pausedUntil: Date }> {
+    if (!Number.isInteger(opts.days) || opts.days < 1 || opts.days > 365) {
+      throw new Error('pauseMarketing: days must be an integer from 1 to 365')
+    }
+    const source = opts.source ?? 'api'
+    const result = await pauseMarketing(this.collections, email, { days: opts.days, source })
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.pause',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: paused ${opts.days} days until ${result.pausedUntil.toISOString()}`,
+    })
+    return result
+  }
+
+  /** Lift a pause early. Audited as `contact.resume`. */
+  async resumeMarketing(email: string, opts: { source?: string } = {}): Promise<{ resumed: boolean }> {
+    const source = opts.source ?? 'api'
+    const result = await resumeMarketing(this.collections, email)
+    await this.audit({
+      actor: `host:${source}`,
+      action: 'contact.resume',
+      resource: { collection: 'mailer_suppressions' },
+      diffSummary: `${email.toLowerCase()}: ${result.resumed ? 'resumed' : 'was not paused'}`,
+    })
+    return result
+  }
+
+  // -------------------------------------------------------------------------
+  // 0.21 — Programs (PR 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Save a program definition as the draft. Creates the program (disabled,
+   * version 0) when the slug is new. Structure is validated with
+   * `programDefinitionSchema`; semantic checks run at publish.
+   */
+  async saveProgramDraft(
+    definition: ProgramDefinition,
+    opts: { actor: string; notes?: string },
+  ): Promise<ProgramDoc> {
+    const parsed = programDefinitionSchema.parse(definition) as ProgramDefinition
+    const now = new Date()
+    const draft = {
+      definition: parsed,
+      notes: opts.notes ?? '',
+      lastModifiedBy: opts.actor,
+      lastModifiedAt: now,
+    }
+    const doc = await this.collections.programs.findOneAndUpdate(
+      { slug: parsed.slug },
+      {
+        $set: { draft, updatedAt: now },
+        $setOnInsert: {
+          slug: parsed.slug,
+          definition: null,
+          version: 0,
+          enabled: false,
+          lastEntryScanAt: null,
+          lastFactsScanAt: null,
+          publishedAt: null,
+          publishedBy: null,
+          createdAt: now,
+        },
+      },
+      { upsert: true, returnDocument: 'after' },
+    )
+    await this.audit({
+      actor: opts.actor,
+      action: 'program.save_draft',
+      resource: { collection: 'mailer_programs', slug: parsed.slug },
+    })
+    return doc as ProgramDoc
+  }
+
+  /**
+   * Validate the draft with `validateProgramDefinition` and publish it:
+   * `definition = draft.definition`, `version + 1`, snapshot to
+   * `mailer_program_versions`, draft cleared. Audited. Returns the issues
+   * instead of throwing when validation fails.
+   */
+  async publishProgram(
+    slug: string,
+    opts: { actor: string },
+  ): Promise<{ ok: true; version: number } | { ok: false; issues: ProgramValidationIssue[] }> {
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) throw new Error(`publishProgram: unknown program "${slug}"`)
+    if (!doc.draft) return { ok: false, issues: [{ path: '', message: 'there is no draft to publish' }] }
+
+    const draft = doc.draft.definition
+    const rows = await this.collections.templates
+      .find({ slug: { $in: referencedTemplateSlugs(draft) } }, { projection: { slug: 1, kind: 1, category: 1 } })
+      .toArray()
+    const result = validateProgramDefinition(draft, {
+      categories: this.config.categories ?? [],
+      facts: this.config.factsAdapter?.declare ?? null,
+      templates: new Map(rows.map((t) => [t.slug, { kind: t.kind, category: t.category ?? null }])),
+    })
+    if (!result.ok) return { ok: false, issues: result.issues }
+
+    const now = new Date()
+    const version = doc.version + 1
+    const claimed = await this.collections.programs.updateOne(
+      { slug, version: doc.version },
+      {
+        $set: {
+          definition: result.definition,
+          version,
+          draft: null,
+          publishedAt: now,
+          publishedBy: opts.actor,
+          updatedAt: now,
+        },
+      },
+    )
+    if (claimed.modifiedCount === 0) throw new Error(`publishProgram: "${slug}" changed while publishing; retry`)
+    await this.collections.programVersions.insertOne({
+      programId: doc._id!,
+      slug,
+      version,
+      definition: result.definition,
+      publishedAt: now,
+      publishedBy: opts.actor,
+    })
+    await this.audit({
+      actor: opts.actor,
+      action: 'program.publish',
+      resource: { collection: 'mailer_programs', slug },
+      diffSummary: `published version ${version}`,
+    })
+    return { ok: true, version }
+  }
+
+  /** Enable or disable a published program. Enabling an unpublished program throws. Audited. */
+  async setProgramEnabled(slug: string, enabled: boolean, opts: { actor: string }): Promise<void> {
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) throw new Error(`setProgramEnabled: unknown program "${slug}"`)
+    const now = new Date()
+    if (enabled) {
+      if (!doc.definition || doc.version < 1) {
+        throw new Error(`setProgramEnabled: program "${slug}" has never been published`)
+      }
+      if (!this.config.factsAdapter) {
+        throw new Error('setProgramEnabled: programs require MailerConfig.factsAdapter')
+      }
+      // Events from before enabling are history, not a backlog to mail (existing
+      // subjects are entered deliberately with `enterProgram`).
+      await this.collections.programs.updateOne(
+        { slug },
+        { $set: { enabled: true, lastEntryScanAt: now, lastFactsScanAt: now, updatedAt: now } },
+      )
+    } else {
+      await this.collections.programs.updateOne({ slug }, { $set: { enabled: false, updatedAt: now } })
+      // Kill switch: nothing already queued for this program may go out.
+      await this.collections.sends.updateMany(
+        { 'program.slug': slug, status: { $in: ['queued', 'deferred', 'held'] } },
+        { $set: { status: 'cancelled', exitReason: 'run_inactive', errorMessage: 'cancelled: program disabled', updatedAt: now } },
+      )
+    }
+    await this.audit({
+      actor: opts.actor,
+      action: enabled ? 'program.enable' : 'program.disable',
+      resource: { collection: 'mailer_programs', slug },
+    })
+  }
+
+  /** Enter a subject into a program now, without an entry event (backfills, previews). */
+  async enterProgram(slug: string, subjectId: string): Promise<{ created: boolean }> {
+    const { created } = await enterProgramRun(this.runnerContext, slug, subjectId)
+    return { created }
+  }
+
+  /**
+   * Run one tick for a subject's run now (admin "force tick", previews).
+   * Respects every rule a scheduled tick does — gap, policy, holdout — and
+   * writes a decision row with `trigger: 'forced'`.
+   */
+  async tickProgram(slug: string, subjectId: string): Promise<ProgramTickResult> {
+    const run = await this.collections.programRuns.findOne(
+      { programSlug: slug, subjectId },
+      { projection: { _id: 1 } },
+    )
+    if (!run) throw new Error(`tickProgram: no run for program "${slug}" subject "${subjectId}"`)
+    return tickProgramRun(this.runnerContext, run._id!, { trigger: 'forced' })
+  }
+
+  /** Same semantics as `abortFlow`, for one subject's Program run. Audited when it aborts something, with `opts.actor` (default `host`). */
+  async abortProgram(
+    slug: string,
+    subjectId: string,
+    opts: { reason?: string; actor?: string } = {},
+  ): Promise<{ aborted: boolean; cancelledSends: number }> {
+    const res = await abortProgramRun(this.runnerContext, slug, subjectId, opts.reason ?? '')
+    if (res.aborted) {
+      await this.audit({
+        actor: opts.actor ?? 'host',
+        action: 'program.abort',
+        resource: { collection: 'mailer_program_runs', slug },
+        diffSummary: `subject ${subjectId}: ${opts.reason ?? 'no reason given'}; cancelled ${res.cancelledSends} send(s)`,
+      })
+    }
+    return res
+  }
+
+  /**
+   * Dry-run one tick and project the send sequence (board). Read-only: writes
+   * nothing, sends nothing. Throws `ProgramSimulationError`. plans/16-program-board.md §3.
+   */
+  async simulateProgram(slug: string, input: ProgramSimulationInput = {}): Promise<ProgramSimulation> {
+    return simulateProgram(this.runnerContext, slug, input)
+  }
+
+  /**
+   * Lint a program's draft or published definition (default: draft when one
+   * exists). Null when the program or that source does not exist. §4.
+   */
+  async lintProgram(slug: string, source?: ProgramSource): Promise<{ source: ProgramSource; issues: ProgramLintIssue[] } | null> {
+    const doc = await this.collections.programs.findOne({ slug })
+    if (!doc) return null
+    const chosen: ProgramSource = source ?? (doc.draft ? 'draft' : 'published')
+    const definition = chosen === 'draft' ? doc.draft?.definition : doc.definition
+    if (!definition) return null
+
+    const rows = await this.collections.templates
+      .find({ slug: { $in: referencedTemplateSlugs(definition) } }, { projection: { slug: 1, kind: 1, category: 1, 'body.html': 1 } })
+      .toArray()
+    const issues = lintProgram(definition, {
+      categories: this.config.categories ?? [],
+      facts: this.config.factsAdapter?.declare ?? null,
+      templates: new Map(
+        rows.map((t) => [t.slug, { kind: t.kind, category: t.category ?? null, published: !!t.body?.html }]),
+      ),
+    })
+    return { source: chosen, issues }
+  }
+
+  /** Checklist for the host's in-app UI. Null when the subject has no run. §5.11. */
+  async getProgramState(slug: string, subjectId: string): Promise<ProgramChecklistItem[] | null> {
+    return getProgramChecklist(this.runnerContext, slug, subjectId)
+  }
+
   private async abortActiveRuns(
     // Open-ended extra keys carry caller-supplied dotted paths (e.g.
     // 'triggerEvent.properties.accountId') straight into the run query.
     filter: { externalId: string; flowId?: ObjectId } & Record<string, unknown>,
     exitReason: string,
   ): Promise<{ abortedRuns: number; cancelledSends: number }> {
-    const runs = await this.collections.flowRuns
-      .find({ ...filter, status: 'active' })
-      .toArray()
-    if (runs.length === 0) return { abortedRuns: 0, cancelledSends: 0 }
+    const runs = await this.collections.flowRuns.find({ ...filter, status: 'active' }).toArray()
 
     for (const run of runs) {
       await exitFlowRun(run, exitReason, this.runnerContext)
@@ -622,12 +938,39 @@ export class Mailer {
     // past send steps but not yet dispatched (provider retry backoff, tripped
     // circuit breaker, stranded-send sweep). 'failed' is included because the
     // send queue re-dispatches failed sends on retry.
-    const cancelled = await this.collections.sends.updateMany(
-      { flowRunId: { $in: runs.map((r) => r._id!) }, status: { $in: ['queued', 'failed'] } },
-      { $set: { status: 'cancelled', errorMessage: `cancelled: ${exitReason}`, updatedAt: new Date() } },
-    )
+    const message = `cancelled: ${exitReason}`
+    const cancelSends = async (filter: Record<string, unknown>): Promise<number> => {
+      const rows = await this.collections.sends.find(filter).toArray()
+      if (rows.length === 0) return 0
+      const res = await this.collections.sends.updateMany(
+        { _id: { $in: rows.map((r) => r._id!) }, status: { $in: ['queued', 'failed', 'deferred'] } },
+        { $set: { status: 'cancelled', errorMessage: message, updatedAt: new Date() } },
+      )
+      for (const row of rows) {
+        await emitOutcome(
+          row,
+          { status: 'cancelled', errorMessage: message },
+          { status: 'cancelled', exitReason: null, message: exitReason },
+          this.runnerContext,
+        )
+      }
+      return res.modifiedCount
+    }
+    const stopped = runs.length
+      ? await cancelSends({ flowRunId: { $in: runs.map((r) => r._id!) }, status: { $in: ['queued', 'failed', 'deferred'] } })
+      : 0
 
-    return { abortedRuns: runs.length, cancelledSends: cancelled.modifiedCount }
+    // A send the contact policy is holding for later outlives its run: the
+    // step that produced it has long since advanced (the run may have
+    // completed). Aborting still has to stop it.
+    const others = await this.collections.flowRuns
+      .find({ ...filter, status: { $ne: 'active' } }, { projection: { _id: 1 } })
+      .toArray()
+    const heldBack = others.length
+      ? await cancelSends({ flowRunId: { $in: others.map((r) => r._id!) }, status: 'deferred' })
+      : 0
+
+    return { abortedRuns: runs.length, cancelledSends: stopped + heldBack }
   }
 
   /**
@@ -683,6 +1026,25 @@ export class Mailer {
     })
   }
 
+  /**
+   * GDPR erasure for a Program subject (an account). Deletes the subject's
+   * runs and decision rows across every program. Facts are stored inline on
+   * decisions, so this is what erases them. Call it alongside `forget` for
+   * each of the account's contacts when the host erases an account. Audited as
+   * `gdpr.forget_subject`.
+   */
+  async forgetSubject(subjectId: string): Promise<{ runs: number; decisions: number }> {
+    const decisions = await this.collections.programDecisions.deleteMany({ subjectId })
+    const runs = await this.collections.programRuns.deleteMany({ subjectId })
+    await this.audit({
+      actor: 'system:gdpr',
+      action: 'gdpr.forget_subject',
+      resource: { collection: 'mailer_program_runs' },
+      diffSummary: `forget subjectId=${subjectId} runs=${runs.deletedCount ?? 0} decisions=${decisions.deletedCount ?? 0}`,
+    })
+    return { runs: runs.deletedCount ?? 0, decisions: decisions.deletedCount ?? 0 }
+  }
+
   /** GDPR data export. JSON-serializable. */
   async exportContactData(externalId: string): Promise<Record<string, unknown>> {
     const subscription = await this.collections.subscriptions.findOne({ externalId })
@@ -733,6 +1095,7 @@ export class Mailer {
       broadcastId: null,
       manualSendBy: 'sendOneOff',
       kind: template.kind,
+      ...(template.category ? { category: template.category } : {}),
       provider: providerName,
       providerMessageId: null,
       fromName: template.fromName,

@@ -4,6 +4,8 @@
  *
  *   npx mailery setup-sendgrid --domain X --webhook-url Y [--cloudflare]
  *   npx mailery setup-dmarc --domain X --rua-mailbox Y [--cloudflare]
+ *   npx mailery doctor [--categories a,b] [--prefix p_] [--json]
+ *   npx mailery backfill-categories --map slug=category[,slug=category] [--dry-run]
  *
  * See src/cli/setup-{sendgrid,dmarc}.ts for the full option lists.
  */
@@ -11,6 +13,24 @@
 import { setupSendgrid } from './setup-sendgrid.js'
 import { setupDmarc, type DmarcPolicy } from './setup-dmarc.js'
 import { makeReadlinePrompter, runInteractive } from './interactive.js'
+import { runDoctor, formatDoctor } from './doctor.js'
+import { backfillCategories, formatBackfill, parseCategoryMap } from './backfill-categories.js'
+
+declare const __PKG_VERSION__: string | undefined
+const VERSION = typeof __PKG_VERSION__ === 'string' ? __PKG_VERSION__ : 'dev'
+
+/** Connect with the env vars `Mailer.fromEnv` uses; the other provider/queue vars are not needed. */
+async function connectDb() {
+  const uri = process.env.MAILER_MONGODB_URI
+  if (!uri) {
+    console.error('error: MAILER_MONGODB_URI is required')
+    process.exit(2)
+  }
+  const { MongoClient } = await import('mongodb')
+  const client = await MongoClient.connect(uri)
+  const db = process.env.MAILER_MONGODB_DB ? client.db(process.env.MAILER_MONGODB_DB) : client.db()
+  return { client, db }
+}
 
 async function main() {
   const argv = process.argv.slice(2)
@@ -131,6 +151,52 @@ async function main() {
       }
       break
     }
+    case 'doctor': {
+      const opts = parseArgs(argv.slice(1))
+      const categories = opts.categories !== undefined ? collectStringList(opts.categories) : undefined
+      const prefix = typeof opts.prefix === 'string' && opts.prefix ? opts.prefix : undefined
+      const { client, db } = await connectDb()
+      try {
+        const report = await runDoctor(db, { version: VERSION, categories, prefix })
+        console.log(opts.json ? JSON.stringify(report, null, 2) : formatDoctor(report))
+        process.exitCode = report.ok ? 0 : 1
+      } catch (err: any) {
+        console.error(`\n✗ ${err?.message ?? err}`)
+        process.exitCode = 1
+      } finally {
+        await client.close()
+      }
+      break
+    }
+    case 'backfill-categories': {
+      const opts = parseArgs(argv.slice(1))
+      const mapArg = collectStringList(opts.map).join(',')
+      if (!mapArg) {
+        console.error('error: --map slug=category[,slug=category] is required')
+        process.exit(2)
+      }
+      let map: Array<[string, string]>
+      try {
+        map = parseCategoryMap(mapArg)
+      } catch (err: any) {
+        console.error(`error: ${err.message}`)
+        process.exit(2)
+      }
+      const dryRun = Boolean(opts['dry-run'])
+      const prefix = typeof opts.prefix === 'string' && opts.prefix ? opts.prefix : undefined
+      const { client, db } = await connectDb()
+      try {
+        const results = await backfillCategories(db, map, { dryRun, overwrite: Boolean(opts.overwrite), prefix })
+        console.log(formatBackfill(results, dryRun))
+        process.exitCode = results.some((r) => r.status === 'error') ? 1 : 0
+      } catch (err: any) {
+        console.error(`\n✗ ${err?.message ?? err}`)
+        process.exitCode = 1
+      } finally {
+        await client.close()
+      }
+      break
+    }
     default:
       console.error(`unknown command: ${cmd}`)
       printUsage()
@@ -155,6 +221,10 @@ Options:
   --adkim r|s              DKIM alignment mode (default r — relaxed)
   --cloudflare             Publish TXT record via Cloudflare API
   --cloudflare-zone <z>    Override inferred zone
+
+If a --rua-mailbox is on a different organizational domain than --domain, an
+external report authorization record (<domain>._report._dmarc.<mailbox-domain>,
+RFC 7489 §7.1) is printed, and published too with --cloudflare.
 
 Env:
   CLOUDFLARE_API_TOKEN     Required when --cloudflare is set.
@@ -212,6 +282,8 @@ function printUsage() {
 mailery CLI
 
 Usage:
+  mailery doctor [--categories a,b] [--prefix p_] [--json]        (read-only 0.21 upgrade check; exit 1 on blocking problems)
+  mailery backfill-categories --map slug=category[,slug=category] [--dry-run] [--overwrite] [--prefix p_]
   mailery setup-sendgrid                              (interactive — prompts you for everything)
   mailery setup-sendgrid --domain <d>[,<d>...] --webhook-url <u> [options]   (non-interactive)
 

@@ -121,6 +121,10 @@ body: { contactId: string; vars?: object; dedupeKey?: string; dispatch?: 'now' |
 
 This is how an automated check proves delivery end to end: send, then wait.
 
+### `GET /categories`
+
+The declared categories (`{ id, label, description?, defaultOptIn? }[]`); `[]` when none. The same list is at `GET /api/categories`.
+
 ### `PUT /templates/:slug`
 
 Publish a compiled template document directly — the deploy-script path over HTTP.
@@ -132,13 +136,74 @@ body: {
   subject: string; preheader?: string;
   body: { html: string; plainText?: string; mjml?: string; editorJson?: object | null };
   variablesSchema?: object; tags?: string[]; bodyFormat?: 'multipart' | 'text_only';
-  trackOpens?: boolean; trackClicks?: boolean; publishedBy?: string
+  trackOpens?: boolean; trackClicks?: boolean; publishedBy?: string;
+  category?: string | null   // a declared category id (marketing only); omitted or null clears it
 }
+→ 400 { error: 'validation_failed', message }   // undeclared category, or a category on a transactional template
 → 201 { slug, created: true, lint: { warnings, infos }, template }   // inserted
 → 200 { slug, created: false, … }                                     // updated in place
 ```
 
 `POST /api/templates/:slug/publish` compiles a draft. A program authored as hand-built HTML has no draft, so until 0.16.5 its only way into `mailer_templates` was a direct database write with the production credential — the one credential an agent or a CI job should not hold. This route takes the published fields as JSON, runs the same sender-domain (`400 sender_domain_invalid`) and lint (`422 lint_failed`, with the `lint` report) gates publish runs, and upserts on slug. `plainText` is derived from the HTML when omitted. `createdAt` and `stats` are written only on insert, so a redeploy never resets send counters. `publishedBy` defaults to the token's actor. Not gated by `testContacts`: a template is inert until a flow references its slug.
+
+## Programs
+
+The same routes as the admin API's Programs section, at the top level (they are also reachable at `/api/programs`). See the [Programs guide](/guide/programs). All routes answer `404 { error: 'not_found' }` for an unknown program and `404 { error: 'run_not_found' }` for a subject with no run. Every mutating route is audited (`program.save_draft`, `program.publish`, `program.enable`, `program.disable`, `program.enter`, `program.force_tick`, `program.abort`) with this surface's actor (`program.abort` included: the route passes it to `mailer.abortProgram`).
+
+### `GET /programs`
+`[{ slug, name, version, enabled, draft, category, publishedAt, runs: { active, completed, exited, sunset, total } }]`. `draft` is true when an unpublished draft exists.
+
+### `POST /programs`
+Save a draft from a `ProgramDefinition` (the body itself, or `{ definition, notes? }`). Creates the program disabled at version 0 when the slug is new (`201 { ok, slug, version, created: true }`); on an existing slug it replaces the draft (`200`, `created: false`). `400 validation_failed` on a structural error (zod message). Semantic checks run at publish.
+
+### `PATCH /programs/:slug`
+Replace the draft of an existing program. A `slug` in the body must match the path (it defaults to it).
+
+### `POST /programs/:slug/publish`
+Validates the draft (categories, facts, templates, `requires` cycles) and publishes it. `200 { ok: true, version }`, or **`422 { error: 'validation_failed', issues: [{ path, message }] }`** with every issue, nothing published.
+
+### `POST /programs/:slug/enable` · `POST /programs/:slug/disable`
+Enable requires a published definition (`409 not_published`) and `MailerConfig.factsAdapter` (`409 facts_adapter_required`). Enabling moves the entry watermark to now: entry events from before are not replayed, so enter existing accounts with `/enter`.
+
+### `GET /programs/:slug`
+`{ slug, version, enabled, published, publishedAt, publishedBy, draft, facts, templates, versions: [{ version, publishedAt, publishedBy }] }`; `published` and `draft` are definitions (or null). `facts` is the facts adapter's declaration (or null); `templates` lists every existing template either definition sends: `[{ slug, name, subject, kind, category, published }]`.
+
+### `POST /programs/:slug/simulate`
+`{ source?, subjectId?, facts?, now?, horizonDays? }`. A read-only dry run of one tick plus the projected send sequence (assuming facts stay as they are and the subject never engages). With `subjectId` it uses that account's run and resolved facts (`facts` are merged over them); without, it simulates a brand-new subject from `facts`. Returns `{ source, version, now, subjectId, facts, run, arm, candidates, next, sequence, sequenceEnd }`; `next.reason` is `send | holdout | min-gap | delivery-window | blackout | session-suppressed | in-flight | no-recipients | none-eligible | completed | exited | sunset`. `blackout` means the next send falls on a [blackout date](/guide/contact-policy#blackout-dates); `next.at` is already past it. Not audited. `400 validation_failed`, `404 not_found`, `409 no_definition | no_facts_adapter`. A send deferred by a blackout carries `policyDeferral.reason: 'blackout'`.
+
+### `GET /programs/:slug/lint?source=`
+`{ source, issues }` for the draft (default when one exists) or the published definition. Each issue is `{ severity, code, path, message, actionId?, attempt? }`: errors (`invalid`) are the publish-validation issues; warnings (`template-unpublished`, `template-reused`, `priority-tie`, `no-cta`, `sunset-early`) do not block publish. `400` for a bad `source`, `404 not_found`, `409 no_definition`.
+
+### `GET /programs/:slug/runs?status=&arm=&limit=&skip=`
+`{ runs, total, limit, skip }`, newest entry first. `status` is `active | completed | exited | sunset`, `arm` is `treatment | holdout`; `limit` 1–200 (default 50).
+
+### `GET /programs/:slug/runs/:subjectId?limit=&skip=`
+`{ run, decisions, total, limit, skip }` with decisions newest first. Each decision lists every candidate with `blockedBy`, the `chosen` action, `reason`, `outcome` and `trigger`: the answer to "why did or didn't this send".
+
+### `GET /programs/:slug/state?subject=<id>`
+The checklist (`mailer.getProgramState`): `[{ actionId, title, cta, status, isNext, attempts, completedAt }]`. `400` without `subject`.
+
+### `GET /programs/:slug/stats`
+Per action × arm funnel and per-arm run counts:
+
+```json
+{ "actions": [{ "actionId": "connect-shopify", "title": "Connect Shopify",
+  "treatment": { "evaluated": 120, "chosen": 90, "sent": 88, "satisfied": 31 },
+  "holdout":   { "evaluated": 14,  "chosen": 10, "sent": 10, "satisfied": 3 } }],
+  "runs": { "treatment": { "total": 120, "byStatus": { "active": 80, "completed": 31, "exited": 9, "sunset": 0 }, "completed": 31, "completionRate": 0.258 },
+            "holdout": { "total": 14, "byStatus": {}, "completed": 3, "completionRate": 0.214 } } }
+```
+
+`evaluated` counts decisions that listed the action as an unblocked candidate. `chosen` counts decisions that picked it and went on to send (a silent tick such as `min-gap` keeps the chosen action on its row but is not counted). `sent` is treatment sends with status `sent` or `delivered`, and, for holdout, the simulated send rows. `satisfied` is runs where the action has a `completedAt`. `completionRate` is completed runs over runs, `null` with none.
+
+### `POST /programs/:slug/runs/:subjectId/tick`
+Force one tick now (`trigger: forced`). It obeys every rule a scheduled tick does (gap, policy, holdout); `{ ok, result }` with the engine's tick result.
+
+### `POST /programs/:slug/runs/:subjectId/abort`
+`{ reason? }`. Exits the run and cancels its queued sends: `{ ok, aborted, cancelledSends }`.
+
+### `POST /programs/:slug/enter`
+`{ subjectId }`. Creates the subject's run now, without an entry event (backfills, previews). `201 { created: true }`, or `200 { created: false }` when it already has a run.
 
 ## Sends
 
@@ -251,8 +316,10 @@ body: { name: string; externalId: string; properties?: object; dedupeKey?: strin
 ### `GET /contacts/:externalId` · `GET /contacts/by-email/:email`
 
 ```ts
-→ { contact, isTestContact: boolean | null, subscription, suppressions, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
+→ { contact, isTestContact: boolean | null, subscription, suppressions, preferences?: { marketing, categories, pausedUntil }, recentEvents, recentSends: SendSummary[], runs: RunSummary[] }
 ```
+
+`preferences` is present only when `categories` are declared. `pausedUntil` is an ISO date while a marketing pause is live, else `null`.
 
 ### `GET /contacts/:externalId/unsubscribe-url` — test contacts only
 

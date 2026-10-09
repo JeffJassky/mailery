@@ -34,6 +34,9 @@ This document is the **design spec**. It precedes any implementation. The packag
 | 12 | [`testing.md`](./12-testing.md) | Test strategy, fixtures, CI. |
 | 13 | [`roadmap.md`](./13-roadmap.md) | Phased build plan. |
 | 14 | [`admin-api.md`](./14-admin-api.md) | REST surface the React admin SPA consumes. |
+| 15 | [`programs.md`](./15-programs.md) | **Release 0.21**: categories + preference page, contact policy, Programs (next-best-action engine). |
+| 15a | [`work-breakdown.md`](./15a-work-breakdown.md) | PR plan for 0.21: contract PR, four Sonnet PRs, three Fable area reviews. |
+| 18 | [`dmarc-monitoring.md`](./18-dmarc-monitoring.md) | **Release 0.21**: DMARC Monitoring — DNS checks, `onDmarcAlert`, admin screen. Spec + work breakdown. |
 | ★ | [`INVARIANTS.md`](./INVARIANTS.md) | **Non-negotiable rules.** Every PR checks against these. |
 | ★ | [`DIRECT_DB.md`](./DIRECT_DB.md) | Advanced: configuring flows/templates via direct MongoDB writes. |
 
