@@ -42,7 +42,17 @@ import { runDnsblChecks } from '../runner/dnsbl.js'
 import { runPostmasterPull } from '../runner/postmaster.js'
 import { runSndsPull } from '../runner/snds.js'
 import { ingestDmarcAttachment, resolveSourceTags, suggestPolicyProgression } from '../runner/dmarc.js'
-import type { DmarcDnsResolver } from '../../shared/dmarc-types.js'
+import type { DmarcAlertStateView, DmarcDnsResolver, DmarcMonitoringPayload } from '../../shared/dmarc-types.js'
+import {
+  DMARC_SETTINGS_DEFAULTS,
+  clearDmarcSettingsPatch,
+  loadDmarcSettings,
+  saveDmarcSettingsPatch,
+  validateDmarcSettingsPatch,
+} from '../runner/dmarc-settings.js'
+import { evaluateDmarcAlerts, runDmarcDnsChecks, sendTestDmarcAlert } from '../runner/dmarc-monitor.js'
+import { resolveMonitoredDomains } from '../runner/dmarc-domains.js'
+import { lookupPtr } from '../runner/dmarc-dns.js'
 import { computeListHygiene } from '../runner/hygiene.js'
 import {
   createMailTesterClient,
@@ -900,6 +910,10 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         ])
         .toArray()
 
+      const ptrs = await lookupPtr(
+        topFailures.map((f) => f._id.sourceIp),
+        { resolver: opts.dmarcDnsResolver },
+      )
       const sources = topFailures.map((f) => {
         const tag = tagged.get(f._id.sourceIp)
         return {
@@ -914,6 +928,7 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
           label: tag?.label ?? null,
           ignored: !!tag?.ignored,
           tagSource: tag?.source ?? null,
+          ptr: ptrs.get(f._id.sourceIp) ?? null,
         }
       })
 
@@ -923,6 +938,143 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
         recentReports: reports.slice(0, 30),
         retentionDays: mailer.config.dmarc?.retentionDays ?? 90,
       })
+    }),
+  )
+
+  // ----- DMARC Monitoring ---------------------------------------------------
+  const toAlertView = (row: any): DmarcAlertStateView => {
+    const { _id, subjectKeys: _subjectKeys, ...rest } = row
+    return { id: _id, ...rest }
+  }
+
+  r.get(
+    '/dmarc/monitoring',
+    asyncHandler(async (_req, res) => {
+      const ctx = mailer.getRunnerContext()
+      const { settings, hasDbOverride } = await loadDmarcSettings(ctx)
+      const reportDomains = (await c.dmarcReports.distinct('domain')) as string[]
+      const monitored = resolveMonitoredDomains(mailer.config, settings, reportDomains)
+
+      const since30 = Date.now() - 30 * 86_400_000
+      const reports = await c.dmarcReports
+        .find({}, { projection: { domain: 1, rangeEnd: 1, receivedAt: 1, via: 1 } })
+        .toArray()
+      const stats = new Map<string, { last: Date | null; count: number }>()
+      let lastInbound: Date | null = null
+      for (const rep of reports) {
+        const end = new Date(rep.rangeEnd)
+        const st = stats.get(rep.domain) ?? { last: null, count: 0 }
+        if (!st.last || end > st.last) st.last = end
+        if (end.getTime() >= since30) st.count += 1
+        stats.set(rep.domain, st)
+        if (rep.via === 'inbound') {
+          const at = new Date(rep.receivedAt)
+          if (!lastInbound || at > lastInbound) lastInbound = at
+        }
+      }
+      const dnsDocs = await c.dmarcDnsChecks.find({}).toArray()
+      const dnsByDomain = new Map(dnsDocs.map((d) => [d._id, d.result]))
+
+      const state = mailer.dmarcInboundState
+      const inbound: DmarcMonitoringPayload['inbound'] = state
+        ? {
+            mounted: true,
+            path: state.path,
+            url: `${mailer.config.publicUrl}/m${state.path}`,
+            allowedDomains: state.allowedDomains,
+            lastInboundReportAt: lastInbound,
+          }
+        : { mounted: false, path: null, url: null, allowedDomains: [], lastInboundReportAt: lastInbound }
+
+      const openRows = await c.dmarcAlerts.find({ status: 'open' }).toArray()
+      const recentRows = await c.dmarcAlerts.find({ status: 'resolved' }).sort({ resolvedAt: -1 }).limit(50).toArray()
+
+      const payload: DmarcMonitoringPayload = {
+        settings,
+        defaults: DMARC_SETTINGS_DEFAULTS,
+        hasDbOverride,
+        alertHandlerConfigured: typeof mailer.config.onDmarcAlert === 'function',
+        inbound,
+        domains: monitored.map((d) => ({
+          ...d,
+          lastReportAt: stats.get(d.domain)?.last ?? null,
+          reportCount30d: stats.get(d.domain)?.count ?? 0,
+          dns: dnsByDomain.get(d.domain) ?? null,
+        })),
+        alerts: { open: openRows.map(toAlertView), recent: recentRows.map(toAlertView) },
+      }
+      res.json(payload)
+    }),
+  )
+
+  r.put(
+    '/dmarc/settings',
+    asyncHandler(async (req, res) => {
+      const v = validateDmarcSettingsPatch(req.body)
+      if (!v.ok) return res.status(400).json({ error: 'validation_failed', message: v.message })
+      const keys: string[] = []
+      for (const [k, val] of Object.entries(v.patch)) {
+        if (k === 'alerts' && val && typeof val === 'object') {
+          for (const ak of Object.keys(val)) keys.push(`alerts.${ak}`)
+        } else {
+          keys.push(k)
+        }
+      }
+      const settings = await saveDmarcSettingsPatch(mailer.getRunnerContext(), v.patch, (req as any).actor)
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.settings.update',
+        resource: { collection: 'mailer_dmarc_settings', id: 'settings' },
+        diffSummary: keys.join(', '),
+      })
+      return res.json({ settings })
+    }),
+  )
+
+  r.delete(
+    '/dmarc/settings',
+    asyncHandler(async (req, res) => {
+      const settings = await clearDmarcSettingsPatch(mailer.getRunnerContext())
+      await mailer.audit({
+        actor: (req as any).actor,
+        action: 'dmarc.settings.reset',
+        resource: { collection: 'mailer_dmarc_settings', id: 'settings' },
+        diffSummary: 'reset to config + defaults',
+      })
+      res.json({ settings })
+    }),
+  )
+
+  r.post(
+    '/dmarc/dns/check',
+    asyncHandler(async (req, res) => {
+      const domain = typeof req.body?.domain === 'string' && req.body.domain !== '' ? req.body.domain : undefined
+      try {
+        const results = await runDmarcDnsChecks(mailer.getRunnerContext(), {
+          force: true,
+          resolver: opts.dmarcDnsResolver,
+          domain,
+        })
+        return res.json({ results })
+      } catch (err: any) {
+        const message = String(err?.message ?? err)
+        if (/not monitored/.test(message)) return res.status(400).json({ error: 'validation_failed', message })
+        throw err
+      }
+    }),
+  )
+
+  r.post(
+    '/dmarc/alerts/evaluate',
+    asyncHandler(async (_req, res) => {
+      res.json(await evaluateDmarcAlerts(mailer.getRunnerContext(), { force: true, resolver: opts.dmarcDnsResolver }))
+    }),
+  )
+
+  r.post(
+    '/dmarc/alerts/test',
+    asyncHandler(async (_req, res) => {
+      res.json(await sendTestDmarcAlert(mailer.getRunnerContext()))
     }),
   )
 
