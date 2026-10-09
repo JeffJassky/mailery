@@ -416,6 +416,15 @@ describe('checkDmarcDns', () => {
     expect(resolver.calls).not.toContain('txt:_dmarc.example.com')
   })
 
+  it('a failed org lookup after an empty subdomain record is not dmarc_missing', async () => {
+    const r = await checkDmarcDns('news.example.com', {
+      resolver: fake({ txt: { '_dmarc.news.example.com': [['unrelated']] }, fail: { '_dmarc.example.com': 'ESERVFAIL' } }),
+    })
+    expect(issue(r, 'dmarc_missing')).toBeUndefined()
+    expect(issue(r, 'lookup_failed')).toBeDefined()
+    expect(r.ok).toBe(true)
+  })
+
   it('a missing record still checks SPF but no rua steps', async () => {
     const resolver = fake({ txt: { 'example.com': [['v=spf1 +all']] } })
     const r = await checkDmarcDns('example.com', { resolver })

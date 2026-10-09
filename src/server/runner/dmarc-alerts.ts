@@ -1,7 +1,6 @@
 /**
  * DMARC alert rules and text. Pure: no I/O, no clock reads (`now` is input).
- * Spec: plans/18-dmarc-monitoring.md §6. CONTRACT STUB — PR 1B replaces every
- * body except `dmarcAlertId`. Signatures are fixed.
+ * Spec: plans/18-dmarc-monitoring.md §6.
  */
 
 import type { DmarcFailureDoc, DmarcReportDoc } from '../models/index.js'

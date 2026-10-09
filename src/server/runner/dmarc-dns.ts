@@ -206,9 +206,11 @@ export async function checkDmarcDns(domain: string, opts: CheckDmarcDnsOptions =
 
   const own = await txt(`_dmarc.${domain}`)
   let records = own?.filter((r) => DMARC_RE.test(r)) ?? []
+  let orgLookupFailed = false
   if (own !== null && records.length === 0 && domain !== org) {
     // A failed subdomain lookup (own === null) deliberately skips this fall-through.
     const inherited = await txt(`_dmarc.${org}`)
+    orgLookupFailed = inherited === null
     const found = inherited?.filter((r) => DMARC_RE.test(r)) ?? []
     if (found.length > 0) {
       records = found
@@ -227,7 +229,7 @@ export async function checkDmarcDns(domain: string, opts: CheckDmarcDnsOptions =
     }
   }
 
-  if (own !== null && records.length === 0) {
+  if (own !== null && records.length === 0 && !orgLookupFailed) {
     issues.push({
       code: 'dmarc_missing',
       severity: 'error',

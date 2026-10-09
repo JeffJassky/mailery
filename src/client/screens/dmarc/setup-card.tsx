@@ -54,10 +54,10 @@ function Snippet({ text }: { text: string }) {
   )
 }
 
-function DomainDns({ domain, onChanged }: { domain: DmarcMonitoringPayload['domains'][number]; onChanged: () => void }) {
+function DomainDns({ domain }: { domain: DmarcMonitoringPayload['domains'][number] }) {
   const [open, setOpen] = React.useState(false)
   const dns = domain.dns
-  const problems = dns ? dns.issues.length : 0
+  const problems = dns ? dns.issues.filter((i) => i.severity !== 'info').length : 0
   const tone: Tone = !dns ? 'amber' : dns.ok && problems === 0 ? 'green' : dns.ok ? 'amber' : 'red'
   const label = !dns ? 'Not checked' : problems === 0 ? 'OK' : `${problems} problem${problems === 1 ? '' : 's'}`
   return (
@@ -195,7 +195,7 @@ export function SetupCard({ data, onChanged }: Props) {
                 <tr><th>Domain</th><th>Policy</th><th>Status</th><th>Checked</th><th /></tr>
               </thead>
               <tbody>
-                {domains.map((d) => <DomainDns key={d.domain} domain={d} onChanged={onChanged} />)}
+                {domains.map((d) => <DomainDns key={d.domain} domain={d} />)}
               </tbody>
             </table>
           )}

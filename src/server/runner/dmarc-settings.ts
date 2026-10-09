@@ -1,7 +1,6 @@
 /**
  * DMARC Monitoring settings: defaults ← `MailerConfig.dmarc` ← admin-UI patch.
- * Spec: plans/18-dmarc-monitoring.md §6.1. CONTRACT STUB — PR 1B replaces every
- * body except `DMARC_SETTINGS_DEFAULTS`. Signatures are fixed.
+ * Spec: plans/18-dmarc-monitoring.md §6.1.
  */
 
 import type { DmarcConfig } from '../config.js'
