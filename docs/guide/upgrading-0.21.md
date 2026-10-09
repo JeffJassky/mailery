@@ -49,6 +49,10 @@ db.mailer_sends.createIndex(
 - `SendStatus` gains `deferred` (the contact policy held the send; `notBefore` and `policyDeferral` say until when) and `holdout` (a Program send to a holdout subject: logged like any send, no provider call).
 - `SendDoc.exitReason` (set with `status: 'cancelled'`) gains `policy_expired`, `satisfied_before_send`, `ineligible_before_send` and `run_inactive`. Code that switches on `status` or `exitReason` must tolerate the new values.
 
+## DMARC Monitoring
+
+DMARC Monitoring is off for hosts with no `dmarc` config and no ingested reports: no DNS lookups, no alert reads, nothing on the tick. Setting `dmarc`, or ingesting a report by upload, turns it on. Three collections are created automatically by index sync on init: `mailer_dmarc_alerts`, `mailer_dmarc_settings` and `mailer_dmarc_dns_checks`. Reports ingested earlier have no `via` field and show as unknown. There is nothing to migrate. Setup: [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
+
 ## Rolling back to 0.20
 
 0.21 changes no existing data, but 0.20 does not know the new rows. Before you roll back:

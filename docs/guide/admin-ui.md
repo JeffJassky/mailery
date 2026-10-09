@@ -102,7 +102,20 @@ See [Deliverability → Microsoft SNDS](./deliverability#microsoft-snds).
 
 ### DMARC RUA reports
 
-Multi-file upload widget for `.zip` / `.gz` aggregate reports. Below it: per-domain pass/fail summary table with a 14-day alignment-rate sparkline + policy progression suggestion. When failures exist, a second table lists top failing source IPs with inline tag editor.
+A compact card that shows report counts and the policy suggestion, and links to the DMARC Monitoring screen for everything else. Multi-file upload widget for `.zip` / `.gz` aggregate reports. Below it: per-domain pass/fail summary table with a 14-day alignment-rate sparkline + policy progression suggestion. When failures exist, a second table lists top failing source IPs with inline tag editor.
+
+See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
+
+## DMARC Monitoring screen
+
+The place to set up DMARC reporting and see what it found. It has an explainer at the top (what SPF, DKIM, DMARC and alignment mean, in a few lines) and four parts.
+
+- **Alerts.** Open alerts first, each with severity, kind, domain, when it was first seen, how many times it fired, and whether the last delivery to your `onDmarcAlert` hook worked (delivered, no handler, or the error). Expand one to see the message, the failing sources (with reverse DNS), DNS issues, and the recommendation. Resolved alerts follow, newest first (50 shown). *Run check now* evaluates immediately.
+- **Setup.** The inbound endpoint URL (the secret is never shown), whether the route is mounted, the domains it accepts, and when the last inbound report arrived. Then one DNS check per monitored domain: DMARC record, `rua=` against your report address, the external authorization record, the report domain's MX, and SPF, each with the exact record to publish when something is wrong. *Check DNS* re-runs one domain or all. *Send test alert* calls `onDmarcAlert` with a sample alert; if no hook is configured it says so.
+- **Reports.** Per-domain pass/fail summary with a 14-day alignment sparkline and the policy progression suggestion, then the top failing source IPs with reverse DNS and the inline tag editor. Each report shows whether it arrived by `inbound` or `upload`. The upload widget is here too.
+- **Settings.** Alert switches and thresholds, the report address, extra domains and ignored domains. Saving stores a single override document; *Reset* deletes it and returns to the config baseline. The inbound secret and `onDmarcAlert` are config-only and not editable here.
+
+Mailery only checks DNS and evaluates alerts if `dmarc` is configured or at least one report has been ingested. Otherwise the screen explains how to start.
 
 See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
 

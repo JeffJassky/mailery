@@ -336,7 +336,7 @@ Requires an OAuth refresh token with `https://www.googleapis.com/auth/postmaster
 
 Only meaningful if you send from a dedicated IP. Visibility-only — RED filter results surface in setup-status but don't auto-trip. JMRP enrolment is a separate manual step. See [Deliverability → Microsoft SNDS](./deliverability#microsoft-snds).
 
-## DMARC ingestion
+## DMARC ingestion and monitoring
 
 ```ts
 {
@@ -346,11 +346,28 @@ Only meaningful if you send from a dedicated IP. Visibility-only — RED filter 
       { ip: '203.0.113.99', label: 'Old marketing', ignored: true },
     ],
     retentionDays: 90,                   // failure rows older than this are pruned by an hourly housekeeping job
+    reportAddress: 'reports@dmarc-in.example.com', // the rua= mailbox; DNS checks compare each domain's record to it
+    extraDomains: ['example.org'],       // monitored in addition to senderDomains and the From defaults
+    ignoredDomains: ['legacy.example.com'], // left out of DNS checks and alerts
+    adminUrl: 'https://your-app/admin/mailer', // copied into every alert
+    alerts: { windowDays: 7, unknownSourceMinMessages: 10 }, // baseline thresholds, all optional
   },
 }
 ```
 
-Tags merge with the mutable `mailer_dmarc_source_tags` collection that the admin UI writes to. See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
+| Key | Default | Purpose |
+|---|---|---|
+| `knownSources` | `[]` | Baseline source tags (`ip`, `label`, `ignored`). |
+| `retentionDays` | `90` | How long failure rows are kept. |
+| `alerts` | see below | Partial alert settings. The baseline for DMARC Monitoring → Settings. |
+| `reportAddress` | unset | The rua= mailbox. Used to check each domain's DMARC record and its external authorization. |
+| `extraDomains` | `[]` | Domains to monitor beyond those derived from `senderDomains` and the From defaults. |
+| `ignoredDomains` | `[]` | Domains to leave out of DNS checks and alerts. |
+| `adminUrl` | unset | Absolute URL of the admin UI, copied into every alert's `adminUrl` and `text`. |
+
+`alerts` keys and defaults: `enabled: true`, `disabledKinds: []`, `windowDays: 7`, `unknownSourceMinMessages: 10`, `knownSourceMinMessages: 5`, `alignmentMinRate: 0.98`, `alignmentMinMessages: 100`, `reportsStoppedDays: 7`, `realertAfterHours: 168` (0 = no reminders), `dnsCheckIntervalHours: 24` (0 = no scheduled DNS checks). What each controls: [Deliverability → What triggers an alert](./deliverability#what-triggers-an-alert).
+
+Tags merge with the mutable `mailer_dmarc_source_tags` collection that the admin UI writes to. `alerts`, `reportAddress`, `extraDomains` and `ignoredDomains` are a baseline too: values saved in DMARC Monitoring → Settings override them key by key. `retentionDays` and `adminUrl` are config-only. The inbound secret is not part of `dmarc`; it is an option of `createPublicRouter`. The monitor does nothing until `dmarc` is set or a report has been ingested. See [Deliverability → DMARC RUA report ingestion](./deliverability#dmarc-rua-report-ingestion).
 
 ## Mail-Tester (optional)
 
@@ -409,8 +426,13 @@ Custom Handlebars helpers + alert callbacks:
   onSendFailure: async ({ send, error }) => {
     sentry.captureException(error, { extra: { sendId: send._id } })
   },
+  onDmarcAlert: async (alert) => {
+    await slack.notify('#alerts', alert.text)
+  },
 }
 ```
+
+`onDmarcAlert(alert)` receives DMARC Monitoring alerts: a failing source, a pass-rate drop, reports that stopped, a domain ready for a stricter policy, a DNS problem. It runs on `opened`, `updated`, `reminder` and `resolved` events, once per domain and kind (never per IP). `alert.text` is ready to post as is. A throw is swallowed and recorded on the alert; the hook is config-only. Fields and examples: [Deliverability → Delivering alerts](./deliverability#delivering-alerts).
 
 ## From environment variables
 
