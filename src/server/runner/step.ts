@@ -12,6 +12,7 @@ import { evaluatePredicate } from './predicate.js'
 import type { RunnerContext } from './index.js'
 import { computeDeliveryTime } from './delivery-window.js'
 import { handleSend } from './send.js'
+import { notImplemented } from '../not-implemented.js'
 
 /**
  * Tolerance on the not-yet-due check below. A delayed job may fire a few
@@ -99,7 +100,24 @@ export async function processOneRunStep(runId: ObjectId, ctx: RunnerContext): Pr
       return handleWebhookStep(run, step, ctx)
     case 'exit':
       return exitFlowRun(run, step.reason ?? 'exit_step', ctx)
+    case 'wait_until':
+      return handleWaitUntil(run, step, ctx)
   }
+}
+
+/**
+ * `wait_until` (plans/19). Parks on the SAME step and re-reads the date fact at
+ * every wake; see `./wait-until.ts` for the full contract.
+ */
+async function handleWaitUntil(
+  run: FlowRunDoc,
+  step: Extract<FlowStep, { type: 'wait_until' }>,
+  ctx: RunnerContext,
+): Promise<void> {
+  void run
+  void step
+  void ctx
+  return notImplemented('handleWaitUntil', 'PR2')
 }
 
 // ---------------------------------------------------------------------------

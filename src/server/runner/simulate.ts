@@ -30,6 +30,12 @@ export interface SimulateOptions {
   eventProperties?: Record<string, unknown>
   /** Steps to walk. Defaults to the flow's live steps. */
   steps?: FlowStep[]
+  /**
+   * Fact values merged over the live `factsAdapter.resolve(subjectId)` result
+   * for `wait_until` steps (plans/19), as the program simulator does. Applies
+   * to every subject the simulation resolves. Live facts only without it.
+   */
+  facts?: Record<string, unknown>
 }
 
 export interface SimulatedStep {
@@ -40,6 +46,7 @@ export interface SimulatedStep {
   type: FlowStep['type']
   outcome:
     | 'waited'
+    | 'waited_until'
     | 'passed'
     | 'skipped_next'
     | 'exited'

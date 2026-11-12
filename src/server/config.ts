@@ -417,6 +417,13 @@ export interface MailerConfig {
   softBouncePromotionWindowDays?: number
   webhookRetryAttempts?: number
   sendRetryAttempts?: number
+  /**
+   * Longest a flow `wait_until` step sleeps before re-reading its date fact
+   * (plans/19). A date moved later is followed at the next wake whatever this
+   * is; a date moved EARLIER is noticed at most this many hours late. Finite,
+   * at least 1. Default 24.
+   */
+  flowWaitUntilRecheckHours?: number
 
   // ---- Tracking -------------------------------------------------------------
   trackOpens?: boolean
@@ -646,6 +653,20 @@ export function assertValidPreferences(prefs: PreferencesConfig | undefined): vo
   if (problems.length) throw new Error(`MailerConfig.preferences is invalid:\n  - ${problems.join('\n  - ')}`)
 }
 
+/**
+ * Init-time check for `MailerConfig.flowWaitUntilRecheckHours` (plans/19):
+ * finite and at least 1 when set. Throws rather than clamps, like the other
+ * config validators, so a typo is loud.
+ */
+export function assertValidFlowWaitUntilRecheckHours(hours: number | undefined): void {
+  if (hours === undefined) return
+  if (typeof hours !== 'number' || !Number.isFinite(hours) || hours < 1) {
+    throw new Error(
+      `MailerConfig.flowWaitUntilRecheckHours must be a finite number of at least 1 (got ${JSON.stringify(hours)})`,
+    )
+  }
+}
+
 export const CONTACT_POLICY_DEFAULTS = {
   deferralMaxHours: 72,
   sourcePriority: ['transactional', 'flow', 'oneoff', 'broadcast', 'program'] as const,
@@ -672,6 +693,7 @@ export type ResolvedConfig = Required<
     | 'softBouncePromotionWindowDays'
     | 'webhookRetryAttempts'
     | 'sendRetryAttempts'
+    | 'flowWaitUntilRecheckHours'
     | 'trackOpens'
     | 'trackClicks'
     | 'storeTrackingIp'
@@ -709,6 +731,7 @@ export const DEFAULTS = {
   softBouncePromotionWindowDays: 30,
   webhookRetryAttempts: 3,
   sendRetryAttempts: 4,
+  flowWaitUntilRecheckHours: 24,
   trackOpens: true,
   trackClicks: true,
   storeTrackingIp: false,
@@ -755,6 +778,7 @@ export function resolveConfig(c: StorageResolvedConfig): ResolvedConfig {
     softBouncePromotionWindowDays: c.softBouncePromotionWindowDays ?? DEFAULTS.softBouncePromotionWindowDays,
     webhookRetryAttempts: c.webhookRetryAttempts ?? DEFAULTS.webhookRetryAttempts,
     sendRetryAttempts: c.sendRetryAttempts ?? DEFAULTS.sendRetryAttempts,
+    flowWaitUntilRecheckHours: c.flowWaitUntilRecheckHours ?? DEFAULTS.flowWaitUntilRecheckHours,
     trackOpens: c.trackOpens ?? DEFAULTS.trackOpens,
     trackClicks: c.trackClicks ?? DEFAULTS.trackClicks,
     storeTrackingIp: c.storeTrackingIp ?? DEFAULTS.storeTrackingIp,

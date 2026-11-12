@@ -296,6 +296,13 @@ export const flowStepSchema: z.ZodType<unknown> = z.lazy(() =>
       type: z.literal('exit'),
       reason: z.string().optional(),
     }),
+    z.object({
+      type: z.literal('wait_until'),
+      fact: z.string().min(1).max(128),
+      subjectFrom: z.string().min(1).max(128),
+      offsetDays: z.number().finite().optional(),
+      ifMissing: z.enum(['exit', 'continue']).optional(),
+    }),
   ]),
 )
 

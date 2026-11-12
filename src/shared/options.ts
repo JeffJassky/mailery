@@ -32,6 +32,7 @@ export const FLOW_STEP_KINDS: readonly FlowStepKindOption[] = [
   { value: 'fire_event', label: 'Fire event', icon: 'Activity', iconClass: 'send',      description: 'Insert a synthetic event (cross-flow handoff).' },
   { value: 'webhook',    label: 'Webhook',    icon: 'Webhook',  iconClass: 'tag',       description: 'POST to an external URL.' },
   { value: 'exit',       label: 'Exit',       icon: 'Exit',     iconClass: 'exit',      description: 'End the run with an optional reason.' },
+  { value: 'wait_until', label: 'Wait until', icon: 'Clock',    iconClass: 'wait',      description: 'Pause the run until a host date fact (re-read at every wake), plus an offset.' },
 ] as const
 
 export function defaultFlowStep(type: FlowStep['type']): FlowStep {
@@ -44,6 +45,7 @@ export function defaultFlowStep(type: FlowStep['type']): FlowStep {
     case 'fire_event': return { type: 'fire_event', eventName: '' }
     case 'webhook':    return { type: 'webhook', url: '', method: 'POST' }
     case 'exit':       return { type: 'exit' }
+    case 'wait_until': return { type: 'wait_until', fact: '', subjectFrom: '', offsetDays: 0, ifMissing: 'exit' }
   }
 }
 
