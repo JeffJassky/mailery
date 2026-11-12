@@ -57,7 +57,7 @@ import { effectiveOverallStatus } from '../runner/health.js'
 import { runTick } from '../runner/tick.js'
 import { dispatchSend } from '../runner/send.js'
 import { webhookEventsForMessageId } from '../runner/webhook.js'
-import { processOneRunStep, exitFlowRun } from '../runner/step.js'
+import { processOneRunStep, exitFlowRun, advanceStep, loadStepsForRun, locateStep } from '../runner/step.js'
 import {
   armFlow,
   disarmFlow,
@@ -609,10 +609,16 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
           steps = snap.steps
         }
       }
+      let facts: Record<string, unknown> | undefined
+      if (req.body?.facts !== undefined) {
+        facts = objectOrUndefined(req.body.facts)
+        if (!facts) return res.status(400).json({ error: 'validation_failed', message: 'facts must be an object' })
+      }
       const result = await simulateFlow(flow, contact, mailer.getRunnerContext(), {
         at,
         eventProperties: objectOrUndefined(req.body?.eventProperties),
         steps,
+        facts,
       })
       res.json(result)
     }),
@@ -1619,6 +1625,22 @@ async function advanceOnce(
   for (let hop = 0; hop < 10; hop += 1) {
     const run = await c.flowRuns.findOne({ _id: runId })
     if (!run || run.status !== 'active') return false
+    // wait_until parks on its own step, so the forced-wait write below (which
+    // logs currentStepIndex - 1, right only for `wait`) does not apply, and
+    // reprocessing would just re-park. Force moves past it directly; the
+    // missing-date check is skipped.
+    const flow = await c.flows.findOne({ _id: run.flowId })
+    if (flow) {
+      const steps = await loadStepsForRun(run, flow, ctx)
+      const current = locateStep(steps, run.currentStepIndex, run.currentBranchPath)
+      if (current?.type === 'wait_until') {
+        await advanceStep(run, ctx, {
+          action: 'wait_completed',
+          details: { forcedBy: actor, fact: current.fact, scheduledFor: run.nextActionAt },
+        })
+        continue
+      }
+    }
     if (run.nextActionAt && run.nextActionAt.getTime() > Date.now()) {
       await c.flowRuns.updateOne(
         { _id: runId, status: 'active' },
@@ -1739,7 +1761,7 @@ const ENDPOINTS: Array<{ method: string; path: string; summary: string; testCont
   { method: 'PUT', path: '/templates/:slug', summary: 'Publish a compiled template document (html, plain text, kind, optional category, sender, subject, tracking flags) with the sender-domain and lint gates; upserts on slug, keeping createdAt and stats. The deploy-script path over HTTP.' },
   { method: 'GET', path: '/sends/:id/wait?status=delivered&timeoutMs=30000', summary: 'Long-poll a send until it reaches sent | delivered | opened | clicked | terminal, with its webhook events.' },
   { method: 'POST', path: '/sends/:id/dispatch', summary: 'Dispatch a queued send now (test contacts only).', testContactsOnly: true },
-  { method: 'POST', path: '/flows/:slug/simulate', summary: 'Dry-run the flow for {contactId} from {at} with {eventProperties}: the path taken, every gate verdict, projected send times, where it ends. Writes nothing.' },
+  { method: 'POST', path: '/flows/:slug/simulate', summary: 'Dry-run the flow for {contactId} from {at} with {eventProperties, facts?} (facts override live factsAdapter values for wait_until): the path taken, every gate verdict, projected send times, where it ends. Writes nothing.' },
   { method: 'POST', path: '/flows/:slug/arm', summary: 'Enable the flow for FUTURE events: stamps the trigger watermark ({since} or now) in the same write. Requires {confirm: true}.' },
   { method: 'POST', path: '/flows/:slug/disarm', summary: 'Disable the flow (pause). In-flight runs continue.' },
   { method: 'POST', path: '/flows/:slug/gate', summary: 'Publish a canary version whose first step exits anyone without {tag}.' },

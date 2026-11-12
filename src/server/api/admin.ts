@@ -54,6 +54,7 @@ import { evaluateDmarcAlerts, runDmarcDnsChecks, sendTestDmarcAlert } from '../r
 import { resolveMonitoredDomains } from '../runner/dmarc-domains.js'
 import { lookupPtr } from '../runner/dmarc-dns.js'
 import { computeListHygiene } from '../runner/hygiene.js'
+import { validateFlowWaitUntilSteps } from '../runner/wait-until.js'
 import {
   createMailTesterClient,
   evaluateMailTesterGate,
@@ -1258,6 +1259,13 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const draftSteps = flow.draft?.steps ?? flow.steps
       if (!Array.isArray(draftSteps) || draftSteps.length === 0) {
         return res.status(400).json({ error: 'empty_flow', message: 'flow has no steps to publish' })
+      }
+      // wait_until steps only (plans/19a trap 2): existing flows were never validated.
+      const issues = validateFlowWaitUntilSteps(draftSteps, mailer.config.factsAdapter?.declare ?? null)
+      if (issues.length > 0) {
+        return res
+          .status(422)
+          .json({ error: 'validation_failed', message: 'the draft did not pass publish validation', issues })
       }
       // `enable: false` publishes without turning the flow on — the human
       // decision to enable stays separate from the mechanical one to promote
