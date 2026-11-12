@@ -12,7 +12,15 @@ import { evaluatePredicate } from './predicate.js'
 import type { RunnerContext } from './index.js'
 import { computeDeliveryTime } from './delivery-window.js'
 import { handleSend } from './send.js'
-import { notImplemented } from '../not-implemented.js'
+import {
+  WAIT_UNTIL_MISCONFIGURED,
+  WAIT_UNTIL_MISSING,
+  waitUntilMisconfiguration,
+  waitUntilSubject,
+  waitUntilTarget,
+  waitUntilWakeAt,
+  type WaitUntilMissingReason,
+} from './wait-until.js'
 
 /**
  * Tolerance on the not-yet-due check below. A delayed job may fire a few
@@ -114,10 +122,70 @@ async function handleWaitUntil(
   step: Extract<FlowStep, { type: 'wait_until' }>,
   ctx: RunnerContext,
 ): Promise<void> {
-  void run
-  void step
-  void ctx
-  return notImplemented('handleWaitUntil', 'PR2')
+  const adapter = ctx.config.factsAdapter
+  const bad = waitUntilMisconfiguration(step, adapter?.declare)
+  if (bad) {
+    await failFlowRun(run, `${WAIT_UNTIL_MISCONFIGURED}: ${bad}`, ctx)
+    return
+  }
+
+  const missing = async (reason: WaitUntilMissingReason): Promise<void> => {
+    if ((step.ifMissing ?? 'exit') === 'continue') {
+      await advanceStep(run, ctx, { action: 'wait_until_skipped', details: { fact: step.fact, reason } })
+    } else {
+      await exitFlowRun(run, WAIT_UNTIL_MISSING, ctx)
+    }
+  }
+
+  const subjectId = waitUntilSubject(run, step)
+  if (!subjectId) return missing('subject_missing')
+
+  // A throw here propagates: nothing is written, the run stays due and the sweep retries.
+  const facts = await adapter!.resolve(subjectId)
+  const target = waitUntilTarget(step, facts)
+  if (!target) return missing('fact_missing')
+
+  const now = new Date()
+  if (target.getTime() <= now.getTime() + DUE_SKEW_MS) {
+    await advanceStep(run, ctx, { action: 'wait_until_reached', details: { fact: step.fact, subjectId, target } })
+    return
+  }
+
+  const wakeAt = waitUntilWakeAt(target, now, ctx.config.flowWaitUntilRecheckHours)
+  const last = run.history[run.history.length - 1]
+  const lastTarget = last?.details?.target
+  const unchanged =
+    last?.action === 'wait_until_parked' &&
+    last.stepIndex === run.currentStepIndex &&
+    lastTarget instanceof Date &&
+    lastTarget.getTime() === target.getTime()
+
+  const update: Record<string, unknown> = { $set: { nextActionAt: wakeAt, updatedAt: now } }
+  if (!unchanged) {
+    update.$push = {
+      history: {
+        stepIndex: run.currentStepIndex,
+        action: 'wait_until_parked' as const,
+        at: now,
+        details: { fact: step.fact, subjectId, target, wakeAt },
+      },
+    }
+  }
+  const updated = await ctx.collections.flowRuns.findOneAndUpdate(
+    { _id: run._id, currentStepIndex: run.currentStepIndex, nextActionAt: { $lt: wakeAt } },
+    update,
+    { returnDocument: 'after' },
+  )
+  if (!updated) return
+
+  await ctx.queues.advance.add(
+    'advance',
+    { flowRunId: String(run._id) },
+    {
+      delay: Math.max(0, wakeAt.getTime() - now.getTime()),
+      jobId: `advance:${run._id}:${branchKey(run)}:${run.currentStepIndex}:until:${wakeAt.getTime()}`,
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

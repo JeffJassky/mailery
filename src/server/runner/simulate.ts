@@ -15,11 +15,12 @@
 
 import { ObjectId } from 'mongodb'
 
-import type { Contact, FlowStep } from '../../shared/types.js'
+import type { Contact, Facts, FlowStep } from '../../shared/types.js'
 import type { FlowDoc, FlowRunDoc } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 import { evaluatePredicate } from './predicate.js'
 import { computeDeliveryTime } from './delivery-window.js'
+import { WAIT_UNTIL_MISCONFIGURED, WAIT_UNTIL_MISSING, waitUntilMisconfiguration, waitUntilSubject, waitUntilTarget } from './wait-until.js'
 
 const MAX_STEPS = 1000
 
@@ -132,6 +133,7 @@ export async function simulateFlow(
   let branchPath: Array<number | 'true' | 'false'> = []
   let t = enteredAt
   let terminal: SimulationResult['terminal'] | null = null
+  const factsBySubject = new Map<string, Facts>()
 
   const record = (type: FlowStep['type'], outcome: SimulatedStep['outcome'], detail?: Record<string, unknown>) => {
     path.push({ at: t, stepIndex: index, branchPath: [...branchPath], type, outcome, ...(detail ? { detail } : {}) })
@@ -155,6 +157,42 @@ export async function simulateFlow(
         const ms = unitToMs(step.value, step.unit)
         record('wait', 'waited', { value: step.value, unit: step.unit, until: new Date(t.getTime() + ms) })
         t = new Date(t.getTime() + ms)
+        index += 1
+        break
+      }
+      case 'wait_until': {
+        const adapter = ctx.config.factsAdapter
+        const bad = waitUntilMisconfiguration(step, adapter?.declare)
+        if (bad) {
+          record('wait_until', 'exited', { fact: step.fact, misconfigured: bad })
+          terminal = { kind: 'exited', reason: `${WAIT_UNTIL_MISCONFIGURED}: ${bad}`, at: t }
+          break
+        }
+        const subjectId = waitUntilSubject(run, step)
+        let target: Date | null = null
+        let reason: 'subject_missing' | 'fact_missing' = 'subject_missing'
+        if (subjectId) {
+          let facts = factsBySubject.get(subjectId)
+          if (!facts) {
+            facts = { ...(await adapter!.resolve(subjectId)), ...(opts.facts ?? {}) } as Facts
+            factsBySubject.set(subjectId, facts)
+          }
+          target = waitUntilTarget(step, facts)
+          reason = 'fact_missing'
+        }
+        if (!target) {
+          if ((step.ifMissing ?? 'exit') === 'continue') {
+            record('wait_until', 'waited_until', { fact: step.fact, skipped: reason })
+            index += 1
+          } else {
+            record('wait_until', 'exited', { fact: step.fact, skipped: reason })
+            terminal = { kind: 'exited', reason: WAIT_UNTIL_MISSING, at: t }
+          }
+          break
+        }
+        const until = new Date(Math.max(t.getTime(), target.getTime()))
+        record('wait_until', 'waited_until', { fact: step.fact, subjectId, target, until })
+        t = until
         index += 1
         break
       }
