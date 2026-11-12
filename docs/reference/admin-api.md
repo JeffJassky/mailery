@@ -61,7 +61,10 @@ The full event registry — declared events with their dedupe policies, the even
 List all flows, newest-updated first.
 
 ### `GET /api/flows/:slug`
-Single flow's full definition.
+Single flow's full definition, plus `facts`: the facts adapter's declaration (`Record<name, { type, values?, description? }>`) or `null` when none is configured. The editor lists only `date` facts for a `wait_until` step.
+
+### `POST /api/flows/:slug/publish`
+Publishes the draft. Each [`wait_until`](/guide/flows#waiting-for-a-host-date) step is validated (a `factsAdapter` is configured; `fact` is declared with type `date`): `422 { error: 'validation_failed', issues: [{ path, message }] }` with nothing published. Other step types are not validated.
 
 ### `POST /api/flows/:slug/pause`
 Set `enabled: false`. In-flight runs continue.
