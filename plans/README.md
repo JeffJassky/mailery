@@ -37,6 +37,8 @@ This document is the **design spec**. It precedes any implementation. The packag
 | 15 | [`programs.md`](./15-programs.md) | **Release 0.21**: categories + preference page, contact policy, Programs (next-best-action engine). |
 | 15a | [`work-breakdown.md`](./15a-work-breakdown.md) | PR plan for 0.21: contract PR, four Sonnet PRs, three Fable area reviews. |
 | 18 | [`dmarc-monitoring.md`](./18-dmarc-monitoring.md) | **Release 0.21**: DMARC Monitoring — DNS checks, `onDmarcAlert`, admin screen. Spec + work breakdown. |
+| 19 | [`wait-until.md`](./19-wait-until.md) | **Release 0.22**: `wait_until` flow step — park until a host date fact, re-read at every wake. |
+| 19a | [`wait-until-handoff.md`](./19a-wait-until-handoff.md) | Build and release handoff for 0.22: code map, traps, order of work, release procedure. |
 | ★ | [`INVARIANTS.md`](./INVARIANTS.md) | **Non-negotiable rules.** Every PR checks against these. |
 | ★ | [`DIRECT_DB.md`](./DIRECT_DB.md) | Advanced: configuring flows/templates via direct MongoDB writes. |
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.22.0 — `wait_until`: flow waits anchored to a host date
+
+Additive. No migration; existing flows and runs are unchanged.
+
+### Added
+
+- **`wait_until` flow step** `{ type: 'wait_until', fact, subjectFrom, offsetDays?, ifMissing? }`. Parks the run until a `date` fact from `factsAdapter` (for the subject named by trigger-event property `subjectFrom`), plus `offsetDays` (negative = before). The date is re-read at every wake, so a host that moves it (a trial extended, a renewal rescheduled) moves the run with no abort and no re-fire. Guide: [Flows → Waiting for a host date](docs/guide/flows.md).
+- **`MailerConfig.flowWaitUntilRecheckHours`** (default 24, finite and at least 1, else `Mailer.init` throws): the longest a parked `wait_until` sleeps before re-reading. A later date is followed at the next wake; an earlier one is noticed within this window.
+- **Publish validation for `wait_until`.** `POST /flows/:slug/publish` returns 422 with `issues` (the program-publish shape) when a `wait_until` names an undeclared or non-date fact, or no `factsAdapter` is configured. Other step types are still not validated. Flows written straight to Mongo bypass this; the runner fails such a step instead (below).
+- **Simulate and force.** `POST /flows/:slug/simulate` (agent) projects `wait_until` from live facts or from an optional `facts` override in the body. `POST /runs/:id/advance` moves a test contact's run past a parked `wait_until`.
+- **Admin flow editor**: a Wait until step with a date-fact dropdown; `GET /flows/:slug` (admin) returns the declared `facts`.
+- `step.waitUntil(fact, subjectFrom, opts?)` in `mailery/testing`.
+
+### Changed — new statuses
+
+- `FlowRunHistoryEntry.action` gains `wait_until_parked`, `wait_until_reached` and `wait_until_skipped`.
+- Flow run `exitReason` gains `wait_until_missing` (subject id or date missing with `ifMissing: 'exit'`, the default) and, on `failed` runs, `wait_until_misconfigured: <code>` (`invalid_fact`, `invalid_subject_from`, `invalid_offset_days`, `invalid_if_missing`, `no_facts_adapter`, `fact_not_declared`, `fact_not_date`).
+- `SimulatedStep.outcome` gains `waited_until`.
+
+Code that switches on these values must tolerate the new ones.
+
 ## 0.21.0 — Categories, contact policy, Programs and DMARC Monitoring
 
 Additive. No forced data migration: every new field is optional, every new collection is created by index sync on init, and every new config key defaults to off.
