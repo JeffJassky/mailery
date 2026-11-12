@@ -26,7 +26,8 @@
 
 import type { FactDecl, Facts, FlowStep } from '../../shared/types.js'
 import type { FlowRunDoc } from '../models/index.js'
-import { notImplemented } from '../not-implemented.js'
+import { flowStepSchema } from '../../shared/schemas.js'
+import { toEpochMs } from './programs/predicate.js'
 
 export type WaitUntilStep = Extract<FlowStep, { type: 'wait_until' }>
 
@@ -72,9 +73,19 @@ export function waitUntilMisconfiguration(
   step: unknown,
   declare: Record<string, FactDecl> | undefined,
 ): WaitUntilMisconfiguration | null {
-  void step
-  void declare
-  return notImplemented('waitUntilMisconfiguration', 'PR2')
+  const s = (step ?? {}) as Record<string, unknown>
+  const nonEmpty = (v: unknown) => typeof v === 'string' && v.length > 0
+  if (!nonEmpty(s.fact)) return 'invalid_fact'
+  if (!nonEmpty(s.subjectFrom)) return 'invalid_subject_from'
+  if (s.offsetDays !== undefined && !(typeof s.offsetDays === 'number' && Number.isFinite(s.offsetDays))) {
+    return 'invalid_offset_days'
+  }
+  if (s.ifMissing !== undefined && s.ifMissing !== 'exit' && s.ifMissing !== 'continue') return 'invalid_if_missing'
+  if (!declare) return 'no_facts_adapter'
+  const fact = s.fact as string
+  if (!Object.hasOwn(declare, fact)) return 'fact_not_declared'
+  if (declare[fact]!.type !== 'date') return 'fact_not_date'
+  return null
 }
 
 /**
@@ -86,9 +97,10 @@ export function waitUntilSubject(
   run: Pick<FlowRunDoc, 'triggerEvent'>,
   step: Pick<WaitUntilStep, 'subjectFrom'>,
 ): string | null {
-  void run
-  void step
-  return notImplemented('waitUntilSubject', 'PR2')
+  const v = run.triggerEvent?.properties?.[step.subjectFrom]
+  if (typeof v !== 'string') return null
+  const trimmed = v.trim()
+  return trimmed.length > 0 ? trimmed : null
 }
 
 /**
@@ -98,9 +110,8 @@ export function waitUntilSubject(
  * from `./programs/predicate.js`.
  */
 export function waitUntilTarget(step: Pick<WaitUntilStep, 'fact' | 'offsetDays'>, facts: Facts): Date | null {
-  void step
-  void facts
-  return notImplemented('waitUntilTarget', 'PR2')
+  const ms = toEpochMs(facts[step.fact]) + (step.offsetDays ?? 0) * DAY_MS
+  return Number.isFinite(ms) ? new Date(ms) : null
 }
 
 /**
@@ -108,10 +119,7 @@ export function waitUntilTarget(step: Pick<WaitUntilStep, 'fact' | 'offsetDays'>
  * Callers only call it with `target > now`.
  */
 export function waitUntilWakeAt(target: Date, now: Date, recheckHours: number): Date {
-  void target
-  void now
-  void recheckHours
-  return notImplemented('waitUntilWakeAt', 'PR2')
+  return new Date(Math.min(target.getTime(), now.getTime() + recheckHours * HOUR_MS))
 }
 
 /** One publish-blocking problem with a `wait_until` step. Same shape as `ProgramValidationIssue`. */
@@ -138,7 +146,39 @@ export function validateFlowWaitUntilSteps(
   steps: unknown,
   declare: Record<string, FactDecl> | null,
 ): FlowValidationIssue[] {
-  void steps
-  void declare
-  return notImplemented('validateFlowWaitUntilSteps', 'PR2')
+  const issues: FlowValidationIssue[] = []
+  const walk = (list: unknown, prefix: string): void => {
+    if (!Array.isArray(list)) return
+    list.forEach((raw, i) => {
+      const p = `${prefix}.${i}`
+      const step = raw as Record<string, unknown> | null
+      if (!step || typeof step !== 'object') return
+      if (step.type === 'branch') {
+        walk(step.ifTrueSteps, `${p}.ifTrueSteps`)
+        walk(step.ifFalseSteps, `${p}.ifFalseSteps`)
+        return
+      }
+      if (step.type !== 'wait_until') return
+      const parsed = flowStepSchema.safeParse(step)
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          const sub = issue.path.map(String).join('.')
+          issues.push({ path: sub ? `${p}.${sub}` : p, message: issue.message })
+        }
+        return
+      }
+      if (!declare) {
+        issues.push({ path: p, message: 'wait_until needs a factsAdapter, and none is configured' })
+        return
+      }
+      const fact = step.fact as string
+      if (!Object.hasOwn(declare, fact)) {
+        issues.push({ path: `${p}.fact`, message: `fact "${fact}" is not declared by the factsAdapter` })
+      } else if (declare[fact]!.type !== 'date') {
+        issues.push({ path: `${p}.fact`, message: `wait_until needs a date fact; "${fact}" is ${declare[fact]!.type}` })
+      }
+    })
+  }
+  walk(steps, 'steps')
+  return issues
 }
