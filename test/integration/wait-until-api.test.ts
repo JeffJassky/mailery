@@ -119,6 +119,17 @@ async function draftFlow(srv: Server, draftSteps: unknown[]): Promise<string> {
   return slug
 }
 
+describe('admin flow detail: declared facts for the editor', () => {
+  it('returns factsAdapter.declare, or null without an adapter', async () => {
+    const slug = await draftFlow(S, [])
+    const res = await call(S, 'GET', `/admin/api/flows/${slug}`)
+    expect(res.status).toBe(200)
+    expect(res.body.facts).toEqual({ trial_ends_at: { type: 'date' }, plan: { type: 'string' } })
+    const slug0 = await draftFlow(NO_FACTS, [])
+    expect((await call(NO_FACTS, 'GET', `/admin/api/flows/${slug0}`)).body.facts).toBeNull()
+  })
+})
+
 describe('admin publish: wait_until', () => {
   const valid = { type: 'wait_until', fact: 'trial_ends_at', subjectFrom: 'accountId', offsetDays: -3 }
 

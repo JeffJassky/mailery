@@ -382,7 +382,9 @@ export function createAdminApiRouter(mailer: Mailer, opts: AdminRouterOptions = 
       const flow = await c.flows.findOne({ slug: req.params.slug })
       if (!flow) return res.status(404).json({ error: 'not_found' })
       const stats = (await computeFlowStats(mailer, flow.slug)).get(flow.slug) ?? emptyFlowStats()
-      return res.json({ ...flow, stats })
+      // Declared facts drive the wait_until editor's date-fact dropdown (plans/19).
+      // null = no factsAdapter, and the editor disables the step.
+      return res.json({ ...flow, stats, facts: mailer.config.factsAdapter?.declare ?? null })
     }),
   )
 
