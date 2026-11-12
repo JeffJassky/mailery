@@ -57,7 +57,8 @@ import { effectiveOverallStatus } from '../runner/health.js'
 import { runTick } from '../runner/tick.js'
 import { dispatchSend } from '../runner/send.js'
 import { webhookEventsForMessageId } from '../runner/webhook.js'
-import { processOneRunStep, exitFlowRun, advanceStep, loadStepsForRun, locateStep } from '../runner/step.js'
+import { processOneRunStep, exitFlowRun, loadStepsForRun, locateStep } from '../runner/step.js'
+import { waitUntilDeclare, waitUntilMisconfiguration } from '../runner/wait-until.js'
 import {
   armFlow,
   disarmFlow,
@@ -613,6 +614,15 @@ export function createAgentRouter(mailer: Mailer, opts: AgentRouterOptions): Rou
       if (req.body?.facts !== undefined) {
         facts = objectOrUndefined(req.body.facts)
         if (!facts) return res.status(400).json({ error: 'validation_failed', message: 'facts must be an object' })
+        // A typo (`trial_end_at`) would otherwise be ignored and the live value used.
+        const declared = mailer.config.factsAdapter?.declare
+        const unknown = declared ? Object.keys(facts).filter((k) => !Object.hasOwn(declared, k)) : []
+        if (unknown.length) {
+          return res.status(400).json({
+            error: 'validation_failed',
+            message: `facts override names undeclared fact(s): ${unknown.join(', ')}`,
+          })
+        }
       }
       const result = await simulateFlow(flow, contact, mailer.getRunnerContext(), {
         at,
@@ -1628,16 +1638,52 @@ async function advanceOnce(
     // wait_until parks on its own step, so the forced-wait write below (which
     // logs currentStepIndex - 1, right only for `wait`) does not apply, and
     // reprocessing would just re-park. Force moves past it directly; the
-    // missing-date check is skipped.
+    // missing-date check is skipped. A MISCONFIGURED wait_until is not forced:
+    // it falls through and the runner fails the run, as a real run would.
     const flow = await c.flows.findOne({ _id: run.flowId })
     if (flow) {
       const steps = await loadStepsForRun(run, flow, ctx)
       const current = locateStep(steps, run.currentStepIndex, run.currentBranchPath)
-      if (current?.type === 'wait_until') {
-        await advanceStep(run, ctx, {
+      if (
+        current?.type === 'wait_until' &&
+        waitUntilMisconfiguration(current, waitUntilDeclare(ctx.config.factsAdapter)) === null
+      ) {
+        const now = new Date()
+        const forced: FlowRunDoc['history'] = []
+        const last = run.history[run.history.length - 1]
+        // A plain `wait` in front of this step (it has already moved the index
+        // on) is forced first and logged at its own index, as before.
+        if (run.nextActionAt && run.nextActionAt.getTime() > now.getTime() && last?.action === 'wait_started') {
+          forced.push({
+            stepIndex: Math.max(0, run.currentStepIndex - 1),
+            action: 'wait_completed',
+            at: now,
+            details: { forcedBy: actor, scheduledFor: run.nextActionAt },
+          })
+        }
+        // What this wait_until was waiting for, if it had parked.
+        const parked =
+          last?.action === 'wait_until_parked' && last.stepIndex === run.currentStepIndex ? last.details : undefined
+        forced.push({
+          stepIndex: run.currentStepIndex,
           action: 'wait_completed',
-          details: { forcedBy: actor, fact: current.fact, scheduledFor: run.nextActionAt },
+          at: now,
+          details: { forcedBy: actor, fact: current.fact, scheduledFor: parked?.target ?? null },
         })
+        // Bump the index here rather than through advanceStep, which would
+        // enqueue an advance job that a live worker could run concurrently
+        // with the processOneRunStep this loop does next.
+        const moved = await c.flowRuns.findOneAndUpdate(
+          { _id: runId, status: 'active', currentStepIndex: run.currentStepIndex, currentBranchPath: run.currentBranchPath },
+          {
+            $set: { nextActionAt: now, attemptsForCurrentStep: 0, updatedAt: now },
+            $inc: { currentStepIndex: 1 },
+            $push: { history: { $each: forced } },
+          },
+        )
+        // Moved, or lost a race to another writer: either way re-read and
+        // process whatever the run is on now.
+        void moved
         continue
       }
     }

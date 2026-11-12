@@ -17,7 +17,7 @@ Additive. No migration; existing flows and runs are unchanged.
 
 - `FlowRunHistoryEntry.action` gains `wait_until_parked`, `wait_until_reached` and `wait_until_skipped`.
 - Flow run `exitReason` gains `wait_until_missing` (subject id or date missing with `ifMissing: 'exit'`, the default) and, on `failed` runs, `wait_until_misconfigured: <code>` (`invalid_fact`, `invalid_subject_from`, `invalid_offset_days`, `invalid_if_missing`, `no_facts_adapter`, `fact_not_declared`, `fact_not_date`).
-- `SimulatedStep.outcome` gains `waited_until`.
+- `SimulatedStep.outcome` gains `waited_until`; `SimulationResult.terminal.kind` gains `failed` (a misconfigured `wait_until`).
 
 Code that switches on these values must tolerate the new ones.
 

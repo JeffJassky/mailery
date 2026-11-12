@@ -15,6 +15,7 @@ import { handleSend } from './send.js'
 import {
   WAIT_UNTIL_MISCONFIGURED,
   WAIT_UNTIL_MISSING,
+  waitUntilDeclare,
   waitUntilMisconfiguration,
   waitUntilSubject,
   waitUntilTarget,
@@ -123,7 +124,7 @@ async function handleWaitUntil(
   ctx: RunnerContext,
 ): Promise<void> {
   const adapter = ctx.config.factsAdapter
-  const bad = waitUntilMisconfiguration(step, adapter?.declare)
+  const bad = waitUntilMisconfiguration(step, waitUntilDeclare(adapter))
   if (bad) {
     await failFlowRun(run, `${WAIT_UNTIL_MISCONFIGURED}: ${bad}`, ctx)
     return
@@ -171,8 +172,20 @@ async function handleWaitUntil(
       },
     }
   }
+  // Compare-and-swap on the state this call read. `wakeAt` is not
+  // deterministic (it is `now + recheck` for a far target), so the
+  // `nextActionAt < wakeAt` guard `deferSendForWindow` uses would let a second
+  // worker overwrite the first and log a duplicate park. The branch path is in
+  // the filter so a park computed for this step can never land on a different
+  // step that has the same index inside a branch.
   const updated = await ctx.collections.flowRuns.findOneAndUpdate(
-    { _id: run._id, currentStepIndex: run.currentStepIndex, nextActionAt: { $lt: wakeAt } },
+    {
+      _id: run._id,
+      status: 'active',
+      currentStepIndex: run.currentStepIndex,
+      currentBranchPath: run.currentBranchPath,
+      nextActionAt: run.nextActionAt,
+    },
     update,
     { returnDocument: 'after' },
   )

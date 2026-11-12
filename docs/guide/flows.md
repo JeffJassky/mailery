@@ -89,6 +89,13 @@ How it works:
   must be a non-empty string; it is passed to
   [`factsAdapter.resolve`](./configuration#programs). It is not a template and
   nothing is rendered. The fact must be declared with type `date`.
+- **How the date is read.** A `Date`, a number (epoch **milliseconds**, not
+  seconds) or a string starting `YYYY-MM-DD`. A date-only string
+  (`'2026-12-01'`) is UTC midnight; a string with a time but no offset
+  (`'2026-12-01T09:00:00'`) is read in the **server's** time zone, so send
+  ISO strings with `Z` or an offset, or `Date` objects. A host that answers
+  "unset" with `0` gets an immediate advance: return `null` instead.
+  `offsetDays` is limited to ±36500.
 - **Read at every wake.** The run parks on the `wait_until` step itself. Each
   time it wakes, the step reads the fact again and computes
   `date + offsetDays`. The date is never stored as the schedule: if it has
@@ -104,7 +111,10 @@ How it works:
   `wait_until_missing`; `continue` moves to the next step. Sending a deadline
   email with no deadline is worse than sending nothing, so `exit` is the default.
 - **Resolver errors.** If `factsAdapter.resolve` throws, nothing is written and
-  the recovery sweep retries the run.
+  the recovery sweep retries the run on its next tick, with no backoff and no
+  limit. Return facts without `trial_ends_at` (or `null`) for an unknown subject
+  rather than throwing, so the run takes `ifMissing` instead of being retried
+  forever. A `resolve` that returns `null` is treated as no facts.
 - **History.** `wait_until_parked` (`{ fact, subjectId, target, wakeAt }`,
   written only when the target changes, so rechecks do not grow the history),
   `wait_until_reached` (`{ fact, subjectId, target }`) and `wait_until_skipped`
@@ -115,16 +125,19 @@ How it works:
   and nothing is published. Other step types are not validated.
 - **Misconfigured steps.** Flows written straight to Mongo skip publish
   validation. The runner re-checks each time and fails the run (it never
-  throws, never advances) with `failReason` `wait_until_misconfigured: <code>`,
+  throws, never advances) with `exitReason` `wait_until_misconfigured: <code>`,
   where `<code>` is one of `invalid_fact`, `invalid_subject_from`,
   `invalid_offset_days`, `invalid_if_missing`, `no_facts_adapter`,
   `fact_not_declared` or `fact_not_date`.
 - **Forcing and simulating.** The agent API's
   [`POST /runs/:id/advance`](/reference/agent-api#post-runs-id-advance-test-contacts-only)
   moves past a parked `wait_until` (history `wait_completed` with
-  `forcedBy`, `fact`, `scheduledFor`), skipping the `ifMissing` check. The
-  flow simulator resolves the fact once per subject and accepts a `facts`
-  override; see [`POST /flows/:slug/simulate`](/reference/agent-api#post-flows-slug-simulate).
+  `forcedBy`, `fact`, and `scheduledFor`: the date it was waiting for, or
+  `null` if it had not parked yet), skipping the `ifMissing` check. A
+  misconfigured `wait_until` is not forced past: the run fails as it would for
+  real. The flow simulator resolves the fact once per subject and accepts a
+  `facts` override (keys must be declared facts); a misconfigured step ends the
+  simulation with `terminal.kind: 'failed'`. See [`POST /flows/:slug/simulate`](/reference/agent-api#post-flows-slug-simulate).
 
 Abort, unsubscribe and missing-contact handling are unchanged: a parked run is
 an ordinary active run with a future `nextActionAt`.

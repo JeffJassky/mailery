@@ -20,7 +20,7 @@ import type { FlowDoc, FlowRunDoc } from '../models/index.js'
 import type { RunnerContext } from './index.js'
 import { evaluatePredicate } from './predicate.js'
 import { computeDeliveryTime } from './delivery-window.js'
-import { WAIT_UNTIL_MISCONFIGURED, WAIT_UNTIL_MISSING, waitUntilMisconfiguration, waitUntilSubject, waitUntilTarget } from './wait-until.js'
+import { WAIT_UNTIL_MISCONFIGURED, WAIT_UNTIL_MISSING, waitUntilDeclare, waitUntilMisconfiguration, waitUntilSubject, waitUntilTarget } from './wait-until.js'
 
 const MAX_STEPS = 1000
 
@@ -70,7 +70,8 @@ export interface SimulationResult {
   wouldEnter: { ok: boolean; reasons: string[] }
   path: SimulatedStep[]
   sends: Array<{ templateSlug: string; at: Date; stepIndex: number; branchPath: Array<number | 'true' | 'false'> }>
-  terminal: { kind: 'completed' | 'exited' | 'truncated'; reason: string; at: Date }
+  /** `failed`: a step the runner would fail the run on (a misconfigured `wait_until`). */
+  terminal: { kind: 'completed' | 'exited' | 'failed' | 'truncated'; reason: string; at: Date }
   /** Projected time from entry to the terminal step. */
   durationMs: number
 }
@@ -162,10 +163,10 @@ export async function simulateFlow(
       }
       case 'wait_until': {
         const adapter = ctx.config.factsAdapter
-        const bad = waitUntilMisconfiguration(step, adapter?.declare)
+        const bad = waitUntilMisconfiguration(step, waitUntilDeclare(adapter))
         if (bad) {
           record('wait_until', 'exited', { fact: step.fact, misconfigured: bad })
-          terminal = { kind: 'exited', reason: `${WAIT_UNTIL_MISCONFIGURED}: ${bad}`, at: t }
+          terminal = { kind: 'failed', reason: `${WAIT_UNTIL_MISCONFIGURED}: ${bad}`, at: t }
           break
         }
         const subjectId = waitUntilSubject(run, step)

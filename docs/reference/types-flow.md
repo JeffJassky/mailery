@@ -37,7 +37,7 @@ The runner schedules a delayed wakeup at `now + duration`. While waiting, the fl
 { type: 'wait_until', fact: 'renews_at', subjectFrom: 'accountId', ifMissing: 'continue' }
 ```
 
-Waits until a date fact from your `factsAdapter`, plus `offsetDays` (negative = before; real number; default 0). `fact` must be declared with type `date`. `subjectFrom` is the name of a trigger-event property holding the subject id (not a template). The run parks on this step and re-reads the date at every wake, waking at the earlier of the target and `flowWaitUntilRecheckHours` (default 24). `ifMissing` (default `'exit'`, exit reason `wait_until_missing`) decides what happens when the subject or date is missing. See [Waiting for a host date](/guide/flows#waiting-for-a-host-date).
+Waits until a date fact from your `factsAdapter`, plus `offsetDays` (negative = before; real number from −36500 to 36500; default 0). Unknown keys are rejected at publish. `fact` must be declared with type `date`. `subjectFrom` is the name of a trigger-event property holding the subject id (not a template). The run parks on this step and re-reads the date at every wake, waking at the earlier of the target and `flowWaitUntilRecheckHours` (default 24). `ifMissing` (default `'exit'`, exit reason `wait_until_missing`) decides what happens when the subject or date is missing. See [Waiting for a host date](/guide/flows#waiting-for-a-host-date).
 
 Run history written by this step:
 

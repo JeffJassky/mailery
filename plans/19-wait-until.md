@@ -195,3 +195,18 @@ days of work for 1 to 4, one more for 5 and 6.
 1. `ifMissing` defaults to `exit`.
 2. Recheck defaults to 24 hours.
 3. Forcing a step in the agent API advances past a `wait_until`.
+4. Forcing does not move past a *misconfigured* `wait_until`; the run fails as it would for real.
+
+## 8. Changed after the area reviews (2026-11-11)
+
+Two Fable area reviews of `release/0.22` (runner park/wake; HTTP surfaces):
+
+- The park write is a true compare-and-swap on `{ currentStepIndex, currentBranchPath, nextActionAt }` as read. `wakeAt` is `now + recheck` for a far target, so the `nextActionAt < wakeAt` guard copied from `deferSendForWindow` let a second worker overwrite the first and log a duplicate park.
+- `offsetDays` is bounded to ±36500 (schema and runner), and a target outside the Date range is a missing date. Before, `offsetDays: 1e9` or a fact of `1e20` left the run due forever.
+- `resolve` returning `null`, a `null` declare entry, and an adapter without `resolve` no longer throw: they are a missing date, `fact_not_date` and `no_facts_adapter`.
+- The `wait_until` schema is `.strict()`, so a typo such as `offsetdays` fails publish instead of being ignored.
+- Force: a misconfigured step falls through to the runner (fails the run); a `wait` directly before a `wait_until` is logged at its own index; `scheduledFor` is the parked target (or `null`); the index bump does not enqueue a job, so a live worker cannot process the next step concurrently with the force loop.
+- Simulate: misconfiguration is `terminal.kind: 'failed'`; a `facts` override key that is not declared is `400`.
+- Not changed, for a decision: a `resolve` that always throws is retried every tick with no backoff, and such runs sit at the head of the sweep (oldest `nextActionAt`, limit 500). The guide tells hosts to return no date rather than throw. A backoff or attempt cap would apply to every step type, so it is left out of this release.
+- Documented: dates are read by `toEpochMs` (numbers are epoch ms; a string with a time and no offset is in the server's zone).
+

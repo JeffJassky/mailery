@@ -17,7 +17,7 @@ import {
   step,
   type TestMailerHarness,
 } from '../../src/testing/index.js'
-import { processOneRunStep } from '../../src/server/runner/index.js'
+import { processNewlyFiredEventTriggers, processOneRunStep } from '../../src/server/runner/index.js'
 import { Mailer } from '../../src/server/mailer.js'
 import { advance, DAY, freezeAt, HOUR, restoreClock } from './clock.js'
 import type { FlowStep } from '../../src/shared/types.js'
@@ -449,6 +449,55 @@ describe('wait_until: the facts adapter throws', () => {
   })
 })
 
+describe('wait_until: bad host data', () => {
+  it('resolve returning null is a missing date, not a crash', async () => {
+    freezeAt(T0)
+    const c = await newCase((s) => [step.waitUntil('trial_ends_at', 'accountId', { ifMissing: 'continue' }), step.send(s.tpl)])
+    vi.spyOn(facts, 'resolve').mockResolvedValue(null as never)
+    await c.fire({ accountId: 'acct-null-facts' })
+    const result = await H.drain()
+    expect(result.settled).toBe(true)
+    const run = await c.run()
+    expect(ofAction(run, 'wait_until_skipped')[0]?.details?.reason).toBe('fact_missing')
+    expect(c.sentCount()).toBe(1)
+  })
+
+  it('a date beyond the Date range is a missing date, not a spin', async () => {
+    freezeAt(T0)
+    const c = await newCase((s) => [step.waitUntil('trial_ends_at', 'accountId'), step.send(s.tpl)])
+    facts.set('acct-huge', { trial_ends_at: 1e20 })
+    await c.fire({ accountId: 'acct-huge' })
+    const result = await H.drain()
+    expect(result.settled).toBe(true)
+    expect((await c.run()).exitReason).toBe('wait_until_missing')
+  })
+
+  it('a seeded offsetDays beyond ±36500 fails as invalid_offset_days', async () => {
+    freezeAt(T0)
+    const c = await newCase((s) => [
+      { type: 'wait_until', fact: 'trial_ends_at', subjectFrom: 'accountId', offsetDays: 1e9 } as FlowStep,
+      step.send(s.tpl),
+    ])
+    facts.set('acct-big-offset', { trial_ends_at: at(DAY) })
+    await c.fire({ accountId: 'acct-big-offset' })
+    expect((await H.drain()).settled).toBe(true)
+    expect((await c.run()).exitReason).toBe('wait_until_misconfigured: invalid_offset_days')
+  })
+
+  it('a null declare entry fails as fact_not_date', async () => {
+    freezeAt(T0)
+    ;(facts.declare as Record<string, unknown>).broken_decl = null
+    try {
+      const c = await newCase((s) => [step.waitUntil('broken_decl', 'accountId'), step.send(s.tpl)])
+      await c.fire({ accountId: 'acct-broken-decl' })
+      expect((await H.drain()).settled).toBe(true)
+      expect((await c.run()).exitReason).toBe('wait_until_misconfigured: fact_not_date')
+    } finally {
+      delete (facts.declare as Record<string, unknown>).broken_decl
+    }
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 10. Offsets
 // ---------------------------------------------------------------------------
@@ -507,6 +556,54 @@ describe('wait_until: placement and concurrency', () => {
     run = await c.run()
     expect(run.status).toBe('completed')
     expect(c.sentCount()).toBe(1)
+  })
+
+  it('parks with the branch path, and its jobId carries the branch key', async () => {
+    freezeAt(T0)
+    const c = await newCase((s) => [
+      { type: 'branch', test: { triggerPropertyTruthy: 'accountId' }, ifTrueSteps: [step.waitUntil('trial_ends_at', 'accountId'), step.send(s.tpl)], ifFalseSteps: [] },
+    ])
+    facts.set('acct-branch2', { trial_ends_at: at(5 * HOUR) })
+    const add = vi.spyOn(H.ctx.queues.advance, 'add')
+    await c.fire({ accountId: 'acct-branch2' })
+    await H.drain()
+    const run = await c.run()
+    expect(run.currentBranchPath).toEqual([0, 'true', 0])
+    const jobIds = add.mock.calls.map(([, , o]) => String((o as any)?.jobId ?? '')).filter((j) => j.includes(':until:'))
+    expect(jobIds).toHaveLength(1)
+    expect(jobIds[0]).toContain(String(run._id))
+    expect(jobIds[0]).not.toContain(`${run._id}::`) // a non-empty branch key
+  })
+
+  it('the DUE_SKEW_MS boundary: now + 1000 ms is reached, now + 1001 ms parks', async () => {
+    freezeAt(T0)
+    const c = await newCase((s) => [step.waitUntil('trial_ends_at', 'accountId'), step.send(s.tpl)])
+    facts.set('acct-skew-in', { trial_ends_at: at(1000) })
+    facts.set('acct-skew-out', { trial_ends_at: at(1001) })
+    await c.fire({ accountId: 'acct-skew-in' }, 'in')
+    await c.fire({ accountId: 'acct-skew-out' }, 'out')
+    const result = await H.drain()
+    expect(result.settled).toBe(true)
+    const byAcct = Object.fromEntries((await c.runs()).map((r) => [String(r.triggerEvent?.properties?.accountId), r]))
+    expect(byAcct['acct-skew-in']!.status).toBe('completed')
+    expect(byAcct['acct-skew-out']!.status).toBe('active')
+    expect(ms(byAcct['acct-skew-out']!.nextActionAt)).toBe(t0() + 1001)
+  })
+
+  it('two workers on a real clock, first park: one history entry, one wake', async () => {
+    // No frozen clock: wakeAt = now + recheck differs by a few ms between the
+    // two workers, which a `nextActionAt < wakeAt` guard would let both write.
+    const c = await newCase((s) => [step.waitUntil('trial_ends_at', 'accountId'), step.send(s.tpl)])
+    facts.set('acct-real-race', { trial_ends_at: new Date(Date.now() + 3 * DAY) })
+    await c.fire({ accountId: 'acct-real-race' })
+    await processNewlyFiredEventTriggers(H.ctx) // creates the run, due now; no sweep yet
+    const run = await c.run()
+    expect(run.history.map((h) => h.action)).toEqual(['entered'])
+    const add = vi.spyOn(H.ctx.queues.advance, 'add')
+    await Promise.all([processOneRunStep(run._id!, H.ctx), processOneRunStep(run._id!, H.ctx)])
+    const after = await c.run()
+    expect(ofAction(after, 'wait_until_parked')).toHaveLength(1)
+    expect(add.mock.calls.filter(([, , o]) => String((o as any)?.jobId ?? '').includes(':until:'))).toHaveLength(1)
   })
 
   it('two workers parking the same run write one history entry', async () => {

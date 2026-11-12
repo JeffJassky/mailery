@@ -12,6 +12,7 @@ import {
   DAY_MS,
   HOUR_MS,
   validateFlowWaitUntilSteps,
+  waitUntilDeclare,
   waitUntilMisconfiguration,
   waitUntilSubject,
   waitUntilTarget,
@@ -22,6 +23,7 @@ import type { FactDecl } from '../../src/shared/types.js'
 const DECLARE: Record<string, FactDecl> = {
   trial_ends_at: { type: 'date' },
   plan: { type: 'string' },
+  broken: null as unknown as FactDecl, // nothing validates declare at init
 }
 const ok = { type: 'wait_until', fact: 'trial_ends_at', subjectFrom: 'accountId' }
 const END = new Date('2026-03-12T09:00:00Z')
@@ -45,6 +47,9 @@ describe('flowStepSchema: wait_until', () => {
     { ...ok, offsetDays: Number.POSITIVE_INFINITY },
     { ...ok, offsetDays: '-3' },
     { ...ok, ifMissing: 'skip' },
+    { ...ok, offsetDays: 36501 },
+    { ...ok, offsetDays: -36501 },
+    { ...ok, offsetdays: -3 },
   ])('rejects %j', (s) => {
     expect(flowStepSchema.safeParse(s).success).toBe(false)
   })
@@ -89,6 +94,8 @@ describe('waitUntilMisconfiguration', () => {
     [{ ...ok, offsetDays: '1' }, 'invalid_offset_days'],
     [{ ...ok, offsetDays: Number.NaN }, 'invalid_offset_days'],
     [{ ...ok, ifMissing: 'skip' }, 'invalid_if_missing'],
+    [{ ...ok, offsetDays: 36501 }, 'invalid_offset_days'],
+    [{ ...ok, fact: 'broken' }, 'fact_not_date'],
     [{ ...ok, fact: 'nope' }, 'fact_not_declared'],
     [{ ...ok, fact: 'plan' }, 'fact_not_date'],
   ])('%j → %s', (s, code) => {
@@ -100,6 +107,14 @@ describe('waitUntilMisconfiguration', () => {
   })
   it('does not treat inherited keys as declared', () => {
     expect(waitUntilMisconfiguration({ ...ok, fact: 'toString' }, DECLARE)).toBe('fact_not_declared')
+  })
+})
+
+describe('waitUntilDeclare', () => {
+  it('undefined unless the adapter can resolve', () => {
+    expect(waitUntilDeclare(undefined)).toBeUndefined()
+    expect(waitUntilDeclare({ declare: DECLARE })).toBeUndefined()
+    expect(waitUntilDeclare({ declare: DECLARE, resolve: async () => ({}) })).toBe(DECLARE)
   })
 })
 
@@ -136,8 +151,13 @@ describe('waitUntilTarget', () => {
   ])('%s %s', (value, offsetDays, expected) => {
     expect(waitUntilTarget({ fact: 'f', offsetDays: offsetDays as number | undefined }, { f: value })?.getTime()).toBe(expected)
   })
-  it.each([[undefined], [null], ['soon'], [true], ['']])('null for %j', (value) => {
+  it.each([[undefined], [null], ['soon'], [true], [''], [1e20]])('null for %j', (value) => {
     expect(waitUntilTarget({ fact: 'f' }, { f: value as never })).toBeNull()
+  })
+  it('null for an out-of-range offset and for a non-object facts result', () => {
+    expect(waitUntilTarget({ fact: 'f', offsetDays: 1e12 }, { f: END })).toBeNull()
+    expect(waitUntilTarget({ fact: 'f' }, null)).toBeNull()
+    expect(waitUntilTarget({ fact: 'f' }, undefined)).toBeNull()
   })
 })
 
@@ -173,6 +193,10 @@ describe('validateFlowWaitUntilSteps', () => {
   it('undeclared fact', () => {
     const issues = validateFlowWaitUntilSteps([{ ...ok, fact: 'nope' }], DECLARE)
     expect(issues).toEqual([{ path: 'steps.0.fact', message: expect.stringMatching(/not declared/) }])
+  })
+  it('a null declare entry is not a date fact, and does not throw', () => {
+    const issues = validateFlowWaitUntilSteps([{ ...ok, fact: 'broken' }], DECLARE)
+    expect(issues).toEqual([{ path: 'steps.0.fact', message: expect.stringMatching(/needs a date fact/) }])
   })
   it('non-date fact', () => {
     const issues = validateFlowWaitUntilSteps([{ ...ok, fact: 'plan' }], DECLARE)

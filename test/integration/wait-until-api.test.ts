@@ -147,6 +147,7 @@ describe('admin publish: wait_until', () => {
   ])('422 for $name, flow untouched', async ({ s, path, msg }) => {
     const slug = await draftFlow(S, [step.send('tw-first'), s])
     const before = await S.H.ctx.collections.flows.findOne({ slug })
+    const versionsBefore = await S.H.ctx.collections.flowVersions.countDocuments({ flowId: before!._id })
     const res = await call(S, 'POST', `/admin/api/flows/${slug}/publish`, {})
     expect(res.status).toBe(422)
     expect(res.body.error).toBe('validation_failed')
@@ -154,9 +155,30 @@ describe('admin publish: wait_until', () => {
     const after = await S.H.ctx.collections.flows.findOne({ slug })
     expect(after!.version).toBe(before!.version)
     expect(after!.draft?.steps).toEqual(before!.draft?.steps)
-    expect(await S.H.ctx.collections.flowVersions.countDocuments({ flowId: after!._id })).toBe(
-      await S.H.ctx.collections.flowVersions.countDocuments({ flowId: before!._id }),
+    expect(await S.H.ctx.collections.flowVersions.countDocuments({ flowId: after!._id })).toBe(versionsBefore)
+  })
+
+  it.each([
+    { name: 'missing subjectFrom', s: { type: 'wait_until', fact: 'trial_ends_at' }, path: 'steps.0.subjectFrom' },
+    { name: 'string offsetDays', s: { ...valid, offsetDays: '-3' }, path: 'steps.0.offsetDays' },
+    { name: 'offsetDays out of range', s: { ...valid, offsetDays: 1e9 }, path: 'steps.0.offsetDays' },
+    { name: 'a typo key (offsetdays)', s: { type: 'wait_until', fact: 'trial_ends_at', subjectFrom: 'accountId', offsetdays: -3 }, path: 'steps.0' },
+  ])('422 for $name', async ({ s, path }) => {
+    const slug = await draftFlow(S, [s])
+    const res = await call(S, 'POST', `/admin/api/flows/${slug}/publish`, {})
+    expect(res.status).toBe(422)
+    expect(res.body.issues.map((i: any) => i.path)).toContain(path)
+  })
+
+  it('validates the live steps when there is no draft', async () => {
+    const slug = await draftFlow(S, [])
+    await S.H.ctx.collections.flows.updateOne(
+      { slug },
+      { $set: { draft: null, steps: [{ type: 'wait_until', fact: 'nope', subjectFrom: 'accountId' }] as never } },
     )
+    const res = await call(S, 'POST', `/admin/api/flows/${slug}/publish`, {})
+    expect(res.status).toBe(422)
+    expect(res.body.issues[0].path).toBe('steps.0.fact')
   })
 
   it('422 when no facts adapter is configured', async () => {
@@ -179,6 +201,11 @@ describe('admin publish: wait_until', () => {
     const res = await call(S, 'POST', `/admin/api/flows/${slug}/publish`, {})
     expect(res.status).toBe(422)
     expect(res.body.issues[0].path).toBe('steps.0.ifTrueSteps.0.fact')
+    const slug2 = await draftFlow(S, [
+      { type: 'branch', test: { hasTag: 'x' }, ifTrueSteps: [], ifFalseSteps: [step.send('tw-first'), { ...valid, fact: 'plan' }] },
+    ])
+    const res2 = await call(S, 'POST', `/admin/api/flows/${slug2}/publish`, {})
+    expect(res2.body.issues[0].path).toBe('steps.0.ifFalseSteps.1.fact')
   })
 })
 
@@ -242,6 +269,33 @@ describe('agent simulate: wait_until', () => {
     expect((await S.facts!.resolve('acct-sim')).trial_ends_at).toEqual(END)
   })
 
+  it('writes nothing', async () => {
+    const counts = async () => [
+      await S.H.ctx.collections.flowRuns.countDocuments({}),
+      await S.H.ctx.collections.sends.countDocuments({}),
+      await S.H.ctx.collections.events.countDocuments({}),
+    ]
+    const before = await counts()
+    const res = await call(S, 'POST', '/agent/flows/sim-trial/simulate', {
+      contactId: 'sim1',
+      at: AT.toISOString(),
+      eventProperties: { accountId: 'acct-sim' },
+      facts: { trial_ends_at: END.toISOString() },
+    })
+    expect(res.status).toBe(200)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('400 for an override naming an undeclared fact', async () => {
+    const res = await call(S, 'POST', '/agent/flows/sim-trial/simulate', {
+      contactId: 'sim1',
+      eventProperties: { accountId: 'acct-sim' },
+      facts: { trial_end_at: END.toISOString() },
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.message).toMatch(/trial_end_at/)
+  })
+
   it('a date already past does not move the clock', async () => {
     const res = await call(S, 'POST', '/agent/flows/sim-trial/simulate', {
       contactId: 'sim1',
@@ -285,7 +339,8 @@ describe('agent simulate: wait_until', () => {
       contactId: 'sim0',
       eventProperties: { accountId: 'a' },
     })
-    expect(res.body.terminal).toMatchObject({ kind: 'exited', reason: 'wait_until_misconfigured: no_facts_adapter' })
+    // `failed`, not `exited`: the runner would fail the run.
+    expect(res.body.terminal).toMatchObject({ kind: 'failed', reason: 'wait_until_misconfigured: no_facts_adapter' })
   })
 })
 
@@ -319,7 +374,7 @@ describe('agent advance: a parked wait_until', () => {
     const { run } = await parkedRun({ trial_ends_at: new Date(Date.now() + 10 * DAY_MS) })
     expect(run.status).toBe('active')
     expect(run.currentStepIndex).toBe(1)
-    const scheduled = run.nextActionAt
+    const parkedTarget = run.history.filter((h) => h.action === 'wait_until_parked').at(-1)!.details!.target
 
     const res = await call(S, 'POST', `/agent/runs/${run._id}/advance`, { steps: 1 })
     expect(res.status).toBe(200)
@@ -327,7 +382,8 @@ describe('agent advance: a parked wait_until', () => {
     expect(forced).toHaveLength(1)
     expect(forced[0].stepIndex).toBe(1)
     expect(forced[0].details).toMatchObject({ forcedBy: 'agent:test', fact: 'trial_ends_at' })
-    expect(new Date(forced[0].details.scheduledFor).getTime()).toBe(new Date(scheduled).getTime())
+    // scheduledFor is the date the step was waiting for, not its next recheck.
+    expect(new Date(forced[0].details.scheduledFor).getTime()).toBe(new Date(parkedTarget as Date).getTime())
     expect(res.body.historyAdded.some((h: any) => h.action === 'wait_until_parked')).toBe(false)
     expect(res.body.sends).toHaveLength(1)
     const after = await S.H.ctx.collections.flowRuns.findOne({ _id: run._id })
@@ -361,6 +417,58 @@ describe('agent advance: a parked wait_until', () => {
     const two = await call(S, 'POST', `/agent/runs/${run._id}/advance`, { steps: 1 })
     expect(two.body.sends).toHaveLength(1)
     expect(two.body.historyAdded.find((h: any) => h.action === 'wait_completed')?.stepIndex).toBe(3)
+  })
+
+  it('a misconfigured wait_until is not forced past: the run fails as the runner would', async () => {
+    const { run } = await parkedRun(null, [
+      step.send('tw-first'),
+      step.wait(2, 'days'),
+      { type: 'wait_until', fact: 'nope', subjectFrom: 'accountId' } as FlowStep,
+      step.send('tw-second'),
+    ])
+    const res = await call(S, 'POST', `/agent/runs/${run._id}/advance`, { steps: 1 })
+    expect(res.status).toBe(200)
+    expect(res.body.sends).toHaveLength(0)
+    expect(res.body.run.status).toBe('failed')
+    expect(res.body.run.exitReason).toBe('wait_until_misconfigured: fact_not_declared')
+  })
+
+  it('a wait directly before a wait_until: both are logged at their own index', async () => {
+    const { run } = await parkedRun({ trial_ends_at: new Date(Date.now() + 10 * DAY_MS) }, [
+      step.send('tw-first'),
+      step.wait(2, 'days'),
+      step.waitUntil('trial_ends_at', 'accountId'),
+      step.send('tw-second'),
+    ])
+    expect(run.currentStepIndex).toBe(2) // the wait moved the index on when it parked
+    const res = await call(S, 'POST', `/agent/runs/${run._id}/advance`, { steps: 1 })
+    const forced = res.body.historyAdded.filter((h: any) => h.action === 'wait_completed')
+    expect(forced.map((h: any) => h.stepIndex)).toEqual([1, 2])
+    expect(forced[0].details.fact).toBeUndefined()
+    expect(forced[1].details).toMatchObject({ fact: 'trial_ends_at', scheduledFor: null }) // never parked
+    expect(res.body.sends).toHaveLength(1)
+  })
+
+  it('does not enqueue an advance job while forcing past a wait_until', async () => {
+    const { run } = await parkedRun({ trial_ends_at: new Date(Date.now() + 10 * DAY_MS) })
+    // Sends this run has when each advance job is enqueued. The parked run has 1
+    // (the first email). An advance enqueued while it still has 1 would let a
+    // live worker process the step after the wait_until concurrently with
+    // this loop.
+    const sendsAtEnqueue: number[] = []
+    const add = S.H.ctx.queues.advance.add.bind(S.H.ctx.queues.advance)
+    ;(S.H.ctx.queues.advance as any).add = async (...args: unknown[]) => {
+      if ((args[1] as any)?.flowRunId === String(run._id)) {
+        sendsAtEnqueue.push(await S.H.ctx.collections.sends.countDocuments({ flowRunId: run._id }))
+      }
+      return add(...(args as Parameters<typeof add>))
+    }
+    try {
+      await call(S, 'POST', `/agent/runs/${run._id}/advance`, { steps: 1 })
+    } finally {
+      ;(S.H.ctx.queues.advance as any).add = add
+    }
+    expect(sendsAtEnqueue.every((n) => n >= 2)).toBe(true)
   })
 
   it('a plain wait is still forced as before', async () => {

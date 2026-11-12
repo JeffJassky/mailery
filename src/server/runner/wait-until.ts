@@ -34,6 +34,20 @@ export type WaitUntilStep = Extract<FlowStep, { type: 'wait_until' }>
 export const DAY_MS = 24 * 60 * 60 * 1000
 export const HOUR_MS = 60 * 60 * 1000
 
+/**
+ * `factsAdapter.declare` when the adapter is usable, else undefined (which
+ * `waitUntilMisconfiguration` reports as `no_facts_adapter`).
+ */
+export function waitUntilDeclare(
+  adapter: { declare?: Record<string, FactDecl>; resolve?: unknown } | undefined | null,
+): Record<string, FactDecl> | undefined {
+  if (!adapter || typeof adapter.resolve !== 'function') return undefined
+  return adapter.declare
+}
+
+/** Largest |offsetDays| accepted (100 years), so the target is always a valid Date. */
+export const MAX_OFFSET_DAYS = 36500
+
 /** Exit reason for a missing subject id or date with `ifMissing: 'exit'`. */
 export const WAIT_UNTIL_MISSING = 'wait_until_missing'
 
@@ -77,14 +91,18 @@ export function waitUntilMisconfiguration(
   const nonEmpty = (v: unknown) => typeof v === 'string' && v.length > 0
   if (!nonEmpty(s.fact)) return 'invalid_fact'
   if (!nonEmpty(s.subjectFrom)) return 'invalid_subject_from'
-  if (s.offsetDays !== undefined && !(typeof s.offsetDays === 'number' && Number.isFinite(s.offsetDays))) {
+  if (
+    s.offsetDays !== undefined &&
+    !(typeof s.offsetDays === 'number' && Number.isFinite(s.offsetDays) && Math.abs(s.offsetDays) <= MAX_OFFSET_DAYS)
+  ) {
     return 'invalid_offset_days'
   }
   if (s.ifMissing !== undefined && s.ifMissing !== 'exit' && s.ifMissing !== 'continue') return 'invalid_if_missing'
-  if (!declare) return 'no_facts_adapter'
+  if (!declare || typeof declare !== 'object') return 'no_facts_adapter'
   const fact = s.fact as string
   if (!Object.hasOwn(declare, fact)) return 'fact_not_declared'
-  if (declare[fact]!.type !== 'date') return 'fact_not_date'
+  // A declare entry may be null or malformed (nothing validates it at init).
+  if ((declare[fact] as FactDecl | null | undefined)?.type !== 'date') return 'fact_not_date'
   return null
 }
 
@@ -109,9 +127,14 @@ export function waitUntilSubject(
  * unset, null, or not a Date / number / ISO-like string). Reuse `toEpochMs`
  * from `./programs/predicate.js`.
  */
-export function waitUntilTarget(step: Pick<WaitUntilStep, 'fact' | 'offsetDays'>, facts: Facts): Date | null {
-  const ms = toEpochMs(facts[step.fact]) + (step.offsetDays ?? 0) * DAY_MS
-  return Number.isFinite(ms) ? new Date(ms) : null
+export function waitUntilTarget(step: Pick<WaitUntilStep, 'fact' | 'offsetDays'>, facts: Facts | null | undefined): Date | null {
+  // A host may answer an unknown subject with null; that is a missing fact, not a crash.
+  const value = facts && typeof facts === 'object' ? facts[step.fact] : undefined
+  const ms = toEpochMs(value) + (step.offsetDays ?? 0) * DAY_MS
+  if (!Number.isFinite(ms)) return null
+  // Finite but outside the Date range (±8.64e15 ms) is an Invalid Date.
+  const at = new Date(ms)
+  return Number.isNaN(at.getTime()) ? null : at
 }
 
 /**
@@ -174,8 +197,9 @@ export function validateFlowWaitUntilSteps(
       const fact = step.fact as string
       if (!Object.hasOwn(declare, fact)) {
         issues.push({ path: `${p}.fact`, message: `fact "${fact}" is not declared by the factsAdapter` })
-      } else if (declare[fact]!.type !== 'date') {
-        issues.push({ path: `${p}.fact`, message: `wait_until needs a date fact; "${fact}" is ${declare[fact]!.type}` })
+      } else if ((declare[fact] as FactDecl | null | undefined)?.type !== 'date') {
+        const type = (declare[fact] as FactDecl | null | undefined)?.type ?? 'not a valid declaration'
+        issues.push({ path: `${p}.fact`, message: `wait_until needs a date fact; "${fact}" is ${type}` })
       }
     })
   }

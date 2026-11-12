@@ -236,12 +236,12 @@ body: { contactId: string; at?: ISO date; eventProperties?: object; facts?: obje
   wouldEnter: { ok: boolean, reasons: string[] },   // disabled flow, no/unsubscribed subscription, once-and-already-ran, no steps
   path: [{ at, stepIndex, branchPath, type, outcome, detail? }],
   sends: [{ templateSlug, at, stepIndex, branchPath }],
-  terminal: { kind: 'completed' | 'exited' | 'truncated', reason, at },
+  terminal: { kind: 'completed' | 'exited' | 'failed' | 'truncated', reason, at },
   durationMs
 }
 ```
 
-Predicates are evaluated by the runner's own evaluator against tags, fields, events, sends and subscription as they are at the moment of the call, with `now` set to the virtual clock. Waits advance the clock; delivery windows push sends to their slot. `facts` is an optional object merged over the live facts the factsAdapter resolves for each `wait_until` subject (so you can ask "what if the trial ended on this date"); a non-object is `400`. Outcomes: `waited`, `waited_until`, `passed`, `skipped_next`, `exited`, `branch_true`, `branch_false`, `send`, `send_deferred`, `tagged`, `event_fired`, `webhook` (not called), `completed`.
+Predicates are evaluated by the runner's own evaluator against tags, fields, events, sends and subscription as they are at the moment of the call, with `now` set to the virtual clock. Waits advance the clock; delivery windows push sends to their slot. `facts` is an optional object merged over the live facts the factsAdapter resolves for each `wait_until` subject (so you can ask "what if the trial ended on this date"); a non-object, or a key that is not a declared fact, is `400`. A misconfigured `wait_until` ends the simulation with `terminal.kind: 'failed'` and reason `wait_until_misconfigured: <code>`, as the runner would fail the run. Outcomes: `waited`, `waited_until`, `passed`, `skipped_next`, `exited`, `branch_true`, `branch_false`, `send`, `send_deferred`, `tagged`, `event_fired`, `webhook` (not called), `completed`.
 
 ### `POST /flows/:slug/arm`
 
