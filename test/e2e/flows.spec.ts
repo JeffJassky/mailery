@@ -36,7 +36,7 @@ test('add a wait + send step to a flow draft + save', async ({ page, request }) 
 
   // Open the first "+ insert step" picker.
   await page.getByTitle('Insert step').first().click()
-  await page.getByRole('button', { name: 'Wait' }).click()
+  await page.getByRole('button', { name: 'Wait', exact: true }).click()
   await expect(page.getByText(/1 steps/)).toBeVisible()
 
   // Edit the wait duration.
