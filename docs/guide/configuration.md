@@ -87,12 +87,15 @@ Verify each declared domain separately with your email provider (SendGrid / Post
 {
   workerless: false,            // set true on web processes that don't run background workers
   tickIntervalSeconds: 60,      // how often the recovery sweep runs
+  flowWaitUntilRecheckHours: 24, // longest a parked wait_until sleeps before re-reading its date (finite, >= 1)
   sendConcurrency: 5,           // parallel send jobs per worker
   sendRatePerSecond: 10,        // global cap (per-provider overrides this)
   webhookRetryAttempts: 3,
   sendRetryAttempts: 4,
 }
 ```
+
+`flowWaitUntilRecheckHours` bounds how long a [`wait_until`](./flows#waiting-for-a-host-date) flow step sleeps before it re-reads its date fact: a date moved earlier is noticed within this interval. `Mailer.init` throws if it is not a finite number of at least 1.
 
 See [Queue drivers](./queues) for the Bull/Agenda choice, and [Deployment](./deployment) for the web/worker split.
 

@@ -13,6 +13,7 @@ import {
   predicateKind,
   type PredicateKind,
 } from '../../shared/options.js'
+import { dateFactNames, parseOffsetDays, waitUntilLabel, waitUntilMeta, type DeclaredFacts } from './flow-wait-until'
 
 type FlowStep = any
 
@@ -29,6 +30,10 @@ function summarizeStep(
   switch (s.type) {
     case 'wait':
       meta = `${s.value} ${s.unit}`
+      break
+    case 'wait_until':
+      label = `Wait ${waitUntilLabel(s)}`
+      meta = waitUntilMeta(s)
       break
     case 'condition':
       label = 'If: ' + (predicateSummary(s.test) || 'predicate')
@@ -351,7 +356,7 @@ function FlowEditor({ slug, flow, refetch, setRoute }: { slug: string; flow: any
           </div>
           <div className="card-body">
             {selected ? (
-              <StepEditor step={selected} onChange={(patch) => updateStep(selectedIdx, patch)} />
+              <StepEditor step={selected} facts={flow.facts ?? null} onChange={(patch) => updateStep(selectedIdx, patch)} />
             ) : (
               <div className="text-xs subtle">Click a step in the canvas to edit it, or use the + button to add one.</div>
             )}
@@ -385,8 +390,11 @@ function AddStepButton({ onPick, expanded, setExpanded }: { onPick: (t: string) 
 // Per-type step editors
 // ---------------------------------------------------------------------------
 
-function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Partial<FlowStep>) => void }) {
+function StepEditor({ step, facts, onChange }: { step: FlowStep; facts: DeclaredFacts | null; onChange: (patch: Partial<FlowStep>) => void }) {
   switch (step.type) {
+    case 'wait_until':
+      return <WaitUntilEditor step={step} facts={facts} onChange={onChange} />
+
     case 'wait':
       return (
         <div className="field">
@@ -565,6 +573,79 @@ function StepEditor({ step, onChange }: { step: FlowStep; onChange: (patch: Part
     default:
       return <div className="text-xs subtle">Unknown step type: {step.type}</div>
   }
+}
+
+function WaitUntilEditor({ step, facts, onChange }: { step: FlowStep; facts: DeclaredFacts | null; onChange: (patch: Partial<FlowStep>) => void }) {
+  const dates = dateFactNames(facts)
+  // Free text so "-", "1." and "-0." survive mid-typing; only finite numbers are committed.
+  const [offsetText, setOffsetText] = React.useState(() => String(step.offsetDays ?? 0))
+  if (facts === null) {
+    return (
+      <div className="field">
+        <div className="field-hint">
+          This step is disabled: no <span className="mono">factsAdapter</span> is configured. Pass one to{' '}
+          <span className="mono">Mailer.init</span> and declare a <span className="mono">date</span> fact to wait on.
+        </div>
+      </div>
+    )
+  }
+  const known = !step.fact || dates.includes(step.fact)
+  return (
+    <>
+      <div className="field">
+        <label className="field-label">Date fact</label>
+        {dates.length === 0 ? (
+          <div className="field-hint">
+            The facts adapter declares no <span className="mono">date</span> facts. Declare one (type <span className="mono">date</span>) to use this step.
+          </div>
+        ) : (
+          <select className="select" value={step.fact ?? ''} onChange={(e) => onChange({ fact: e.target.value })}>
+            <option value="">Select a date fact…</option>
+            {!known && <option value={step.fact}>{step.fact} (not a declared date fact)</option>}
+            {dates.map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+        )}
+        <div className="field-hint">Re-read from the facts adapter every time the run wakes, so a moved date is followed.</div>
+      </div>
+      <div className="field">
+        <label className="field-label">Subject from (trigger property)</label>
+        <input
+          className="input"
+          placeholder="accountId"
+          value={step.subjectFrom ?? ''}
+          onChange={(e) => onChange({ subjectFrom: e.target.value })}
+        />
+        <div className="field-hint">
+          The name of a property on the trigger event whose value is the subject id passed to the facts adapter. It is a property name, not a template.
+        </div>
+      </div>
+      <div className="field">
+        <label className="field-label">Offset (days)</label>
+        <input
+          className="input"
+          inputMode="decimal"
+          placeholder="0"
+          value={offsetText}
+          onChange={(e) => {
+            setOffsetText(e.target.value)
+            const n = parseOffsetDays(e.target.value)
+            if (n !== undefined) onChange({ offsetDays: n })
+          }}
+        />
+        <div className="field-hint">Negative waits until before the date (-3 = three days before), positive until after. Decimals allowed (1.5).</div>
+      </div>
+      <div className="field">
+        <label className="field-label">If the date is missing</label>
+        <div className="seg">
+          <span className={'seg-item' + ((step.ifMissing ?? 'exit') === 'exit' ? ' active' : '')} onClick={() => onChange({ ifMissing: 'exit' })}>Exit the run</span>
+          <span className={'seg-item' + (step.ifMissing === 'continue' ? ' active' : '')} onClick={() => onChange({ ifMissing: 'continue' })}>Continue</span>
+        </div>
+        <div className="field-hint">Applies when the subject id or the fact is missing, null or unparseable. Exiting is the safe default.</div>
+      </div>
+    </>
+  )
 }
 
 // ---------------------------------------------------------------------------

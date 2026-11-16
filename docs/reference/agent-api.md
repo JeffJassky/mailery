@@ -228,7 +228,7 @@ Dispatch a queued send now. `→ { send: SendSummary }`
 "What would happen to this contact if the trigger fired now?" — answered by walking the published steps against the contact's real state with a virtual clock, writing nothing.
 
 ```ts
-body: { contactId: string; at?: ISO date; eventProperties?: object; version?: number }
+body: { contactId: string; at?: ISO date; eventProperties?: object; facts?: object; version?: number }
 → {
   flow: { slug, version, enabled },
   contact: { externalId, email },
@@ -236,12 +236,12 @@ body: { contactId: string; at?: ISO date; eventProperties?: object; version?: nu
   wouldEnter: { ok: boolean, reasons: string[] },   // disabled flow, no/unsubscribed subscription, once-and-already-ran, no steps
   path: [{ at, stepIndex, branchPath, type, outcome, detail? }],
   sends: [{ templateSlug, at, stepIndex, branchPath }],
-  terminal: { kind: 'completed' | 'exited' | 'truncated', reason, at },
+  terminal: { kind: 'completed' | 'exited' | 'failed' | 'truncated', reason, at },
   durationMs
 }
 ```
 
-Predicates are evaluated by the runner's own evaluator against tags, fields, events, sends and subscription as they are at the moment of the call, with `now` set to the virtual clock. Waits advance the clock; delivery windows push sends to their slot. Outcomes: `waited`, `passed`, `skipped_next`, `exited`, `branch_true`, `branch_false`, `send`, `send_deferred`, `tagged`, `event_fired`, `webhook` (not called), `completed`.
+Predicates are evaluated by the runner's own evaluator against tags, fields, events, sends and subscription as they are at the moment of the call, with `now` set to the virtual clock. Waits advance the clock; delivery windows push sends to their slot. `facts` is an optional object merged over the live facts the factsAdapter resolves for each `wait_until` subject (so you can ask "what if the trial ended on this date"); a non-object, or a key that is not a declared fact, is `400`. A misconfigured `wait_until` ends the simulation with `terminal.kind: 'failed'` and reason `wait_until_misconfigured: <code>`, as the runner would fail the run. Outcomes: `waited`, `waited_until`, `passed`, `skipped_next`, `exited`, `branch_true`, `branch_false`, `send`, `send_deferred`, `tagged`, `event_fired`, `webhook` (not called), `completed`.
 
 ### `POST /flows/:slug/arm`
 
@@ -295,7 +295,7 @@ body: { steps?: number (1–50, default 1); dispatch?: boolean }
 → 409 run_not_active
 ```
 
-Forced waits appear in the history as `wait_completed` with `details.forcedBy` set to the actor. This replaces the old trick of publishing a "minutes instead of days" copy of a flow.
+Forced waits appear in the history as `wait_completed` with `details.forcedBy` set to the actor. A run parked on a `wait_until` is moved past it the same way (`details: { forcedBy, fact, scheduledFor }`), without the `ifMissing` check. This replaces the old trick of publishing a "minutes instead of days" copy of a flow.
 
 ### `POST /runs/:id/cancel`
 

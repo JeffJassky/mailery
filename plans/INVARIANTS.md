@@ -225,3 +225,7 @@ A `category:C` suppression blocks only marketing templates in category C. It nev
 ## 23. Every Program tick writes a decision row
 
 Including ticks that send nothing. The row lists every candidate with `blockedBy`. Logging only winners makes "why didn't they get X" unanswerable and makes any later ranking impossible to evaluate. `15-programs.md` §5.3.
+
+## 24. A `wait_until` reads its date at every wake
+
+A flow `wait_until` step parks on itself and calls `factsAdapter.resolve` each time it wakes; the date fact is the deadline of record. `nextActionAt` is only the next wake (`min(target, now + flowWaitUntilRecheckHours)`), never stored or treated as the deadline, so a host that moves the date moves the run without any call to mailery. A step the runner cannot evaluate (no adapter, undeclared or non-date fact, bad shape) fails the run; it never advances silently and never throws into a retry loop. `19-wait-until.md` §2.

@@ -179,6 +179,14 @@ export const step = {
   fireEvent(eventName: string, properties?: Record<string, unknown>): FlowStep {
     return { type: 'fire_event', eventName, properties }
   },
+  /** `wait_until` (plans/19): park until date fact `fact` of the subject named by trigger property `subjectFrom`. */
+  waitUntil(
+    fact: string,
+    subjectFrom: string,
+    opts: Omit<Extract<FlowStep, { type: 'wait_until' }>, 'type' | 'fact' | 'subjectFrom'> = {},
+  ): FlowStep {
+    return { type: 'wait_until', fact, subjectFrom, ...opts }
+  },
 } as const
 
 // ---------------------------------------------------------------------------

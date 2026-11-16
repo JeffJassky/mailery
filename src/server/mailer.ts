@@ -59,6 +59,7 @@ import {
   assertValidCategories,
   assertValidContactPolicy,
   assertValidPreferences,
+  assertValidFlowWaitUntilRecheckHours,
   resolveConfig,
   type MailerConfig,
   type ResolvedConfig,
@@ -267,6 +268,7 @@ export class Mailer {
     assertValidCategories(input.categories)
     assertValidContactPolicy(input.contactPolicy)
     assertValidPreferences(input.preferences)
+    assertValidFlowWaitUntilRecheckHours(input.flowWaitUntilRecheckHours)
     if (input.varsAdapter) {
       const { assertNoReservedVarKeys } = await import('./adapters/vars.js')
       assertNoReservedVarKeys(input.varsAdapter)

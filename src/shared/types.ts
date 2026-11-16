@@ -101,6 +101,23 @@ export type FlowStep =
   | { type: 'fire_event'; eventName: string; properties?: Record<string, unknown> }
   | { type: 'webhook'; url: string; method?: 'POST' | 'PUT'; payload?: Record<string, unknown>; failureMode?: 'soft' | 'fail_run' }
   | { type: 'exit'; reason?: string }
+  /**
+   * Park the run until a host-owned date (plans/19). The date is read through
+   * `MailerConfig.factsAdapter.resolve(subjectId)` at EVERY wake, so moving it
+   * moves the run: the step re-enters itself until the target is reached.
+   * Wakes at `min(target, now + flowWaitUntilRecheckHours)`. INVARIANT 24.
+   */
+  | {
+      type: 'wait_until'
+      /** Name of a `date` fact declared by `factsAdapter.declare`. */
+      fact: string
+      /** Key in the run's trigger-event properties holding the subject id. A property name, never templated. */
+      subjectFrom: string
+      /** Days relative to the fact. Negative = before. Real number. Default 0. */
+      offsetDays?: number
+      /** Subject id missing, or the fact unset / null / unparseable. Default `'exit'` (reason `wait_until_missing`). */
+      ifMissing?: 'exit' | 'continue'
+    }
 
 export type Predicate =
   | { hasTag: string }

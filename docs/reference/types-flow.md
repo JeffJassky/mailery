@@ -11,6 +11,7 @@ A discriminated union — each step has a `type` field.
 ```ts
 type FlowStep =
   | { type: 'wait'; value: number; unit: 'minutes' | 'hours' | 'days' | 'weeks' }
+  | { type: 'wait_until'; fact: string; subjectFrom: string; offsetDays?: number; ifMissing?: 'exit' | 'continue' }
   | { type: 'condition'; test: Predicate; ifFalse: 'continue' | 'exit' }
   | { type: 'branch'; test: Predicate; ifTrueSteps: FlowStep[]; ifFalseSteps: FlowStep[] }
   | { type: 'send'; templateSlug: string; providerOverride?: string; vars?: Record<string, unknown>; delivery?: DeliveryWindow }
@@ -28,6 +29,26 @@ type FlowStep =
 ```
 
 The runner schedules a delayed wakeup at `now + duration`. While waiting, the flow_run is in `status: 'active'` but `nextActionAt` is the future. No CPU spent until the wakeup.
+
+### `wait_until`
+
+```ts
+{ type: 'wait_until', fact: 'trial_ends_at', subjectFrom: 'accountId', offsetDays: -3 }
+{ type: 'wait_until', fact: 'renews_at', subjectFrom: 'accountId', ifMissing: 'continue' }
+```
+
+Waits until a date fact from your `factsAdapter`, plus `offsetDays` (negative = before; real number from −36500 to 36500; default 0). Unknown keys are rejected at publish. `fact` must be declared with type `date`. `subjectFrom` is the name of a trigger-event property holding the subject id (not a template). The run parks on this step and re-reads the date at every wake, waking at the earlier of the target and `flowWaitUntilRecheckHours` (default 24). `ifMissing` (default `'exit'`, exit reason `wait_until_missing`) decides what happens when the subject or date is missing. See [Waiting for a host date](/guide/flows#waiting-for-a-host-date).
+
+Run history written by this step:
+
+| Action | `details` |
+|---|---|
+| `wait_until_parked` | `{ fact, subjectId, target, wakeAt }` (only when `target` changes) |
+| `wait_until_reached` | `{ fact, subjectId, target }` |
+| `wait_until_skipped` | `{ fact, reason: 'subject_missing' \| 'fact_missing' }` |
+| `wait_completed` (forced) | `{ forcedBy, fact, scheduledFor }` |
+
+A step that cannot be evaluated fails the run with `wait_until_misconfigured: <code>` (`invalid_fact`, `invalid_subject_from`, `invalid_offset_days`, `invalid_if_missing`, `no_facts_adapter`, `fact_not_declared`, `fact_not_date`).
 
 ### `condition`
 

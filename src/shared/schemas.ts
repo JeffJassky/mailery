@@ -296,6 +296,18 @@ export const flowStepSchema: z.ZodType<unknown> = z.lazy(() =>
       type: z.literal('exit'),
       reason: z.string().optional(),
     }),
+    z
+      .object({
+        type: z.literal('wait_until'),
+        fact: z.string().min(1).max(128),
+        subjectFrom: z.string().min(1).max(128),
+        // Bounded so `fact + offset` is always a real Date (plans/19 review).
+        offsetDays: z.number().finite().min(-36500).max(36500).optional(),
+        ifMissing: z.enum(['exit', 'continue']).optional(),
+      })
+      // New step, no legacy rows: reject typos such as `offsetdays`, which
+      // would otherwise publish and be ignored.
+      .strict(),
   ]),
 )
 
